@@ -346,16 +346,30 @@ func buildParams(bt bait.Type, label string, cfg *config.Config) (bait.Params, e
 		}
 		p.FakeSecret = token.NewGCPClientID()
 
+	case bait.TypeStripe:
+		p.FakeToken, err = token.NewStripeKey()
+		if err != nil {
+			return p, err
+		}
+		// test_mode_api_key needs a short alphanumeric suffix
+		keyID, err2 := token.NewGCPPrivateKeyID()
+		if err2 != nil {
+			return p, err2
+		}
+		p.FakeKeyID = keyID[:24] // 24 hex chars
+		p.ProfileName = token.NewProfileName(label)
+
 	case bait.TypeGitHub:
 		p.FakeToken, err = token.NewGitHubToken()
 		if err != nil {
 			return p, err
 		}
-
-	case bait.TypeStripe:
-		p.FakeToken, err = token.NewStripeKey()
-		if err != nil {
-			return p, err
+		// ProfileName used as the fake GitHub Enterprise hostname component
+		// e.g. git.acme-internal.io — use label or generate a plausible corp name
+		if label != "" {
+			p.ProfileName = label + "-internal"
+		} else {
+			p.ProfileName = "corp-internal"
 		}
 
 	case bait.TypeGeneric:

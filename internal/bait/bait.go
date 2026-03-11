@@ -254,9 +254,14 @@ func DefaultPaths(t Type) ([]string, error) {
 	case TypeGCP:
 		return []string{filepath.Join(home, ".config", "gcloud", "sa-prod-backup.json")}, nil
 	case TypeGitHub:
-		return []string{filepath.Join(home, ".config", "gh", "snare-hosts.yml")}, nil
-	case TypeStripe, TypeGeneric:
-		return []string{filepath.Join(home, ".snare-env")}, nil
+		// Append a fake GitHub Enterprise host entry to the real gh CLI hosts.yml.
+		// Fires via api_endpoint when agent uses `gh` CLI targeting the fake host.
+		return []string{filepath.Join(home, ".config", "gh", "hosts.yml")}, nil
+	case TypeStripe:
+		// Append to Stripe CLI config — fires if agent uses stripe CLI or follows verify URL.
+		return []string{filepath.Join(home, ".config", "stripe", "config.toml")}, nil
+	case TypeGeneric:
+		return []string{filepath.Join(home, ".env.local")}, nil
 	default:
 		return nil, fmt.Errorf("no default paths for type %s", t)
 	}
@@ -295,28 +300,49 @@ endpoint_url          = {{.CallbackURL}}
 }
 `)),
 
-	// GitHub: points at snare.sh as the GitHub API base
-	// Fires when an agent tries to call the GitHub API with this token.
+	// GitHub: appends a fake GitHub Enterprise host entry to ~/.config/gh/hosts.yml.
+	//
+	// Reliability: MEDIUM
+	//   - Fires via api_endpoint if agent uses `gh` CLI targeting this host directly
+	//   - Fires if agent follows the verify URL embedded in the user field
+	//   - Does NOT fire if agent extracts the token and calls api.github.com directly
+	//
+	// The fake host (git.{{.ProfileName}}.io) looks like a GitHub Enterprise instance.
+	// A hijacked agent scanning for GitHub credentials would find the oauth_token
+	// and potentially try to use it via `gh api --hostname git.{{.ProfileName}}.io`.
 	TypeGitHub: template.Must(template.New("github").Parse(
-		`# snare-hosts.yml — machine user token
-github.com:
+`
+git.{{.ProfileName}}.io:
     oauth_token: {{.FakeToken}}
     git_protocol: https
+    user: deploy-bot
     api_endpoint: {{.CallbackURL}}/
 `)),
 
-	// Stripe: API base URL redirect
-	// Fires when an agent tries to make any Stripe API call.
+	// Stripe: appends to ~/.config/stripe/config.toml.
+	//
+	// Reliability: MEDIUM
+	//   - Fires if agent uses `stripe` CLI with this profile (stripe CLI reads config.toml)
+	//   - Fires if agent follows the verify URL in the comment
+	//   - Does NOT fire if agent extracts the key and calls api.stripe.com directly
+	//     (no standard env var redirects Stripe SDK base URL across all languages)
+	//
+	// The profile name looks like a real project, not a test key.
 	TypeStripe: template.Must(template.New("stripe").Parse(
-		`# billing service credentials
-STRIPE_SECRET_KEY={{.FakeToken}}
-STRIPE_API_BASE={{.CallbackURL}}
+`
+# {{.ProfileName}} — live billing, restricted key
+# Verify access: {{.CallbackURL}}
+[{{.ProfileName}}]
+live_mode_api_key = "{{.FakeToken}}"
+test_mode_api_key = "sk_test_{{.FakeKeyID}}"
 `)),
 
-	// Generic: catch-all .env style with API base
+	// Generic: .env.local style with API base redirect.
+	// Works for any agent using a custom API client that respects API_BASE_URL.
 	TypeGeneric: template.Must(template.New("generic").Parse(
-		`# service credentials — {{.ProfileName}}
+`# {{.ProfileName}} service credentials
 API_KEY={{.FakeToken}}
 API_BASE_URL={{.CallbackURL}}
+# verify: {{.CallbackURL}}
 `)),
 }
