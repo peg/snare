@@ -1,0 +1,14 @@
+# Go
+/snare
+*.exe
+*.test
+dist/
+
+# Editor
+.idea/
+.vscode/
+*.swp
+
+# Cloudflare
+worker/.wrangler/
+worker/node_modules/

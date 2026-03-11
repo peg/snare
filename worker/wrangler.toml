@@ -1,0 +1,11 @@
+name = "snare-callback"
+main = "index.js"
+compatibility_date = "2024-01-01"
+
+[[kv_namespaces]]
+binding = "SNARE_KV"
+id = "YOUR_KV_NAMESPACE_ID"  # fill in after `wrangler kv:namespace create snare`
+
+# Set via: wrangler secret put WEBHOOK_URLS
+# Value: comma-separated webhook URLs
+# e.g. https://hooks.slack.com/...,https://discord.com/api/webhooks/...
