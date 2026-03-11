@@ -106,10 +106,43 @@ func (m *Manifest) Save() error {
 	return os.Rename(tmp, path)
 }
 
+// AddPending writes a canary in pending state before bait is written to disk.
+// Call Activate(id) after successfully writing bait.
+// This ensures orphaned bait (bait on disk with no manifest record) can't happen.
+func (m *Manifest) AddPending(c Canary) error {
+	c.Active = false
+	c.InactiveReason = "pending"
+	m.Canaries = append(m.Canaries, c)
+	return m.Save()
+}
+
+// Activate marks a pending canary as active after bait is successfully written.
+func (m *Manifest) Activate(id string) error {
+	c := m.FindByID(id)
+	if c == nil {
+		return fmt.Errorf("canary %s not found in manifest", id)
+	}
+	c.Active = true
+	c.InactiveReason = ""
+	return m.Save()
+}
+
 // Add adds a canary to the manifest and saves.
+// Prefer AddPending + Activate for transactional safety.
 func (m *Manifest) Add(c Canary) error {
 	m.Canaries = append(m.Canaries, c)
 	return m.Save()
+}
+
+// Pending returns canaries stuck in pending state (bait write may have failed).
+func (m *Manifest) Pending() []Canary {
+	var pending []Canary
+	for _, c := range m.Canaries {
+		if !c.Active && c.InactiveReason == "pending" {
+			pending = append(pending, c)
+		}
+	}
+	return pending
 }
 
 // FindByID returns a pointer to the canary with the given ID, or nil.

@@ -135,6 +135,70 @@ func NewGCPPrivateKeyID() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
+// NewFakeRSAPrivateKey generates a correctly-formatted RSA-2048 PEM block
+// containing invalid key material. It passes structural/format checks
+// but will fail during actual cryptographic operations.
+// The key is JSON-safe (newlines as \n).
+func NewFakeRSAPrivateKey() (string, error) {
+	// RSA-2048 DER is ~1190 bytes → ~1588 base64 chars → ~25 lines of 64 chars
+	// We generate random bytes of that length — wrong ASN.1 structure but right size.
+	raw := make([]byte, 1190)
+	if _, err := rand.Read(raw); err != nil {
+		return "", fmt.Errorf("generating fake RSA key: %w", err)
+	}
+
+	// Base64-encode and chunk into 64-char lines
+	encoded := encodeBase64Lines(raw, 64)
+
+	pem := "-----BEGIN RSA PRIVATE KEY-----\\n" + encoded + "-----END RSA PRIVATE KEY-----\\n"
+	return pem, nil
+}
+
+func encodeBase64Lines(data []byte, lineLen int) string {
+	const b64chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+	// Standard base64 encode
+	encoded := make([]byte, (len(data)+2)/3*4)
+	const enc = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+	_ = b64chars
+	di, si := 0, 0
+	n := (len(data) / 3) * 3
+	for si < n {
+		val := uint(data[si+0])<<16 | uint(data[si+1])<<8 | uint(data[si+2])
+		encoded[di+0] = enc[val>>18&0x3F]
+		encoded[di+1] = enc[val>>12&0x3F]
+		encoded[di+2] = enc[val>>6&0x3F]
+		encoded[di+3] = enc[val>>0&0x3F]
+		si += 3
+		di += 4
+	}
+	rem := len(data) - si
+	if rem == 2 {
+		val := uint(data[si+0])<<16 | uint(data[si+1])<<8
+		encoded[di+0] = enc[val>>18&0x3F]
+		encoded[di+1] = enc[val>>12&0x3F]
+		encoded[di+2] = enc[val>>6&0x3F]
+		encoded[di+3] = '='
+	} else if rem == 1 {
+		val := uint(data[si+0]) << 16
+		encoded[di+0] = enc[val>>18&0x3F]
+		encoded[di+1] = enc[val>>12&0x3F]
+		encoded[di+2] = '='
+		encoded[di+3] = '='
+	}
+
+	// Chunk into lines
+	var result strings.Builder
+	for i := 0; i < len(encoded); i += lineLen {
+		end := i + lineLen
+		if end > len(encoded) {
+			end = len(encoded)
+		}
+		result.Write(encoded[i:end])
+		result.WriteString("\\n")
+	}
+	return result.String()
+}
+
 func mustRandInt(max int) int {
 	n, err := rand.Int(rand.Reader, big.NewInt(int64(max)))
 	if err != nil {

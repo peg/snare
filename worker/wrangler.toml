@@ -1,8 +1,8 @@
 name = "snare-callback"
 main = "index.js"
 compatibility_date = "2024-01-01"
-account_id = "264d894f4df586b73845ff7d7db628a6"
 workers_dev = false
+# account_id is set via CLOUDFLARE_ACCOUNT_ID env var — not committed
 
 routes = [
   { pattern = "snare.sh/c/*", zone_name = "snare.sh" },

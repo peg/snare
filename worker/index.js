@@ -72,9 +72,14 @@ export default {
         });
       }
 
-      // Forward to webhook(s)
+      // Forward to webhook(s) — log failures but don't fail the request
       const webhooks = (env.WEBHOOK_URLS || "").split(",").filter(Boolean);
-      await Promise.allSettled(webhooks.map(wh => forwardAlert(wh, event, env)));
+      const results = await Promise.allSettled(webhooks.map(wh => forwardAlert(wh, event, env)));
+      results.forEach((r, i) => {
+        if (r.status === "rejected") {
+          console.error(`WEBHOOK_FAILED url=${webhooks[i]} token=${token} error=${r.reason}`);
+        }
+      });
 
       // Return a blank 1x1 pixel response (looks like a tracking pixel)
       return new Response(

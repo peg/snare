@@ -25,15 +25,16 @@ const (
 
 // Params are filled into bait templates.
 type Params struct {
-	TokenID     string // unique canary ID
-	CallbackURL string // snare.sh callback URL — used as the SERVICE ENDPOINT, not a comment
-	Label       string // user-supplied label prefix (optional)
+	TokenID        string // unique canary ID
+	CallbackURL    string // snare.sh callback URL — used as the SERVICE ENDPOINT, not a comment
+	Label          string // user-supplied label prefix (optional)
 	// Per-type fake values — realistic looking but non-functional
-	FakeKeyID   string
-	FakeSecret  string
-	FakeToken   string
-	FakeProjID  string
-	ProfileName string // e.g. "prod-us-east-1-legacy"
+	FakeKeyID      string
+	FakeSecret     string
+	FakeToken      string
+	FakeProjID     string
+	FakePrivateKey string // PEM-formatted RSA private key (invalid but correct structure)
+	ProfileName    string // e.g. "prod-us-east-1-legacy"
 }
 
 // PlacedFile describes a file that was written, including the exact content.
@@ -53,9 +54,13 @@ type PlacedFile struct {
 // Never overwrites or modifies existing content.
 // Never touches the file if this canary's TokenID is already present.
 //
-// Returns PlacedFile with exact Content written — caller must persist this
-// to the manifest for safe teardown.
-func Plant(t Type, params Params, targetPath string, dryRun bool) (*PlacedFile, error) {
+// dryRun=true prints what would happen without writing.
+// dryRun=true + silent=true renders content and returns it without printing or writing
+// (used internally for transactional pre-render).
+//
+// Returns PlacedFile with exact Content — caller must persist this to the manifest.
+func Plant(t Type, params Params, targetPath string, dryRun bool, opts ...bool) (*PlacedFile, error) {
+	silent := len(opts) > 0 && opts[0]
 	tmpl, ok := templates[t]
 	if !ok {
 		return nil, fmt.Errorf("unknown bait type: %s", t)
@@ -77,11 +82,13 @@ func Plant(t Type, params Params, targetPath string, dryRun bool) (*PlacedFile, 
 	}
 
 	if dryRun {
-		action := "create"
-		if mode == manifest.ModeAppend {
-			action = "append to"
+		if !silent {
+			action := "create"
+			if mode == manifest.ModeAppend {
+				action = "append to"
+			}
+			fmt.Printf("[dry-run] would %s %s:\n---\n%s---\n", action, targetPath, content)
 		}
-		fmt.Printf("[dry-run] would %s %s:\n---\n%s---\n", action, targetPath, content)
 		return &PlacedFile{
 			Path: targetPath, Type: t, Mode: mode,
 			TokenID: params.TokenID, Content: content,
@@ -104,8 +111,13 @@ func Plant(t Type, params Params, targetPath string, dryRun bool) (*PlacedFile, 
 		return nil, fmt.Errorf("creating parent dir: %w", err)
 	}
 
-	// Write: append for existing files, create new for new files
-	flags := os.O_APPEND | os.O_CREATE | os.O_WRONLY
+	var flags int
+	if mode == manifest.ModeNewFile {
+		// O_EXCL ensures we fail rather than overwrite if file appears between Stat and Open
+		flags = os.O_CREATE | os.O_EXCL | os.O_WRONLY
+	} else {
+		flags = os.O_APPEND | os.O_WRONLY
+	}
 	f, err := os.OpenFile(targetPath, flags, 0600)
 	if err != nil {
 		return nil, fmt.Errorf("opening %s: %w", targetPath, err)
@@ -285,13 +297,15 @@ endpoint_url          = {{.CallbackURL}}
 
 `)),
 
-	// GCP: token_uri is fetched during OAuth token refresh
+	// GCP: token_uri is fetched during OAuth token refresh.
 	// Fires when an agent tries to authenticate with this service account.
+	// FakePrivateKey is a correctly structured RSA-2048 PEM (invalid key material,
+	// but passes format validation — client library will fail during crypto, not parse).
 	TypeGCP: template.Must(template.New("gcp").Parse(`{
   "type": "service_account",
   "project_id": "{{.FakeProjID}}",
   "private_key_id": "{{.FakeKeyID}}",
-  "private_key": "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA{{.FakeSecret}}\n-----END RSA PRIVATE KEY-----\n",
+  "private_key": "{{.FakePrivateKey}}",
   "client_email": "deploy-svc@{{.FakeProjID}}.iam.gserviceaccount.com",
   "client_id": "{{.FakeSecret}}",
   "auth_uri": "https://accounts.google.com/o/oauth2/auth",

@@ -114,48 +114,60 @@ func cmdPlant(args []string) {
 
 	if dryRun {
 		fmt.Printf("[dry-run] would plant %s canary\n\n", bt)
-	} else {
-		fmt.Printf("Planting %s canary...\n", bt)
+		for _, path := range paths {
+			bait.Plant(bt, params, path, true) //nolint
+		}
+		return
 	}
 
+	fmt.Printf("Planting %s canary...\n", bt)
+
 	for _, path := range paths {
-		placed, err := bait.Plant(bt, params, path, dryRun)
+		// Step 1: silent dry-run render to get content without touching disk or printing
+		preview, err := bait.Plant(bt, params, path, true, true)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "  error planting %s: %v\n", path, err)
+			fmt.Fprintf(os.Stderr, "  ✗ cannot plant %s: %v\n", path, err)
 			continue
 		}
 
-		if !dryRun {
-			// Build manifest entry immediately after successful write
-			contentHash := manifest.HashContent(placed.Content)
-			c := manifest.Canary{
-				ID:          params.TokenID,
-				Type:        string(bt),
-				Label:       label,
-				Path:        placed.Path,
-				Mode:        placed.Mode,
-				Content:     placed.Content,
-				ContentHash: contentHash,
-				CallbackURL: params.CallbackURL,
-				PlantedAt:   time.Now(),
-				Active:      true,
-			}
-			if err := m.Add(c); err != nil {
-				// Bait is on disk but manifest failed — warn loudly
-				fmt.Fprintf(os.Stderr, "  ⚠️  WARN: bait written to %s but manifest update failed: %v\n", path, err)
-				fmt.Fprintf(os.Stderr, "  ⚠️  Token ID: %s — save this for manual teardown\n", params.TokenID)
-				continue
-			}
-			fmt.Printf("  ✓ planted at %s\n", placed.Path)
-			fmt.Printf("    token:    %s\n", params.TokenID)
-			fmt.Printf("    callback: %s\n", params.CallbackURL)
+		// Step 2: write pending manifest record BEFORE touching disk
+		c := manifest.Canary{
+			ID:          params.TokenID,
+			Type:        string(bt),
+			Label:       label,
+			Path:        preview.Path,
+			Mode:        preview.Mode,
+			Content:     preview.Content,
+			ContentHash: manifest.HashContent(preview.Content),
+			CallbackURL: params.CallbackURL,
+			PlantedAt:   time.Now(),
 		}
+		if err := m.AddPending(c); err != nil {
+			fmt.Fprintf(os.Stderr, "  ✗ manifest write failed, skipping %s: %v\n", path, err)
+			continue
+		}
+
+		// Step 3: write bait to disk
+		if _, err := bait.Plant(bt, params, path, false); err != nil {
+			_ = m.Deactivate(params.TokenID, "plant-failed")
+			fmt.Fprintf(os.Stderr, "  ✗ planting %s failed: %v\n", path, err)
+			continue
+		}
+
+		// Step 4: activate
+		if err := m.Activate(params.TokenID); err != nil {
+			fmt.Fprintf(os.Stderr, "  ⚠️  bait written but manifest activation failed for %s: %v\n", path, err)
+			fmt.Fprintf(os.Stderr, "  ⚠️  Token ID: %s\n", params.TokenID)
+			continue
+		}
+
+		fmt.Printf("  ✓ planted at %s\n", path)
+		fmt.Printf("    token:    %s\n", params.TokenID)
+		fmt.Printf("    callback: %s\n", params.CallbackURL)
 	}
 
-	if !dryRun {
-		fmt.Printf("\nRun `snare status` to see active canaries.\n")
-		fmt.Printf("Run `snare test` to verify your alert pipeline.\n")
-	}
+	fmt.Printf("\nRun `snare status` to see active canaries.\n")
+	fmt.Printf("Run `snare test` to verify your alert pipeline.\n")
 }
 
 // cmdStatus shows active canaries on this machine.
@@ -345,6 +357,10 @@ func buildParams(bt bait.Type, label string, cfg *config.Config) (bait.Params, e
 			return p, err
 		}
 		p.FakeSecret = token.NewGCPClientID()
+		p.FakePrivateKey, err = token.NewFakeRSAPrivateKey()
+		if err != nil {
+			return p, err
+		}
 
 	case bait.TypeStripe:
 		p.FakeToken, err = token.NewStripeKey()
