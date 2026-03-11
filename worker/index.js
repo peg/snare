@@ -39,7 +39,7 @@ export default {
         if (seen) {
           return new Response("", { status: 200, headers: { "cache-control": "no-store" } });
         }
-        await env.SNARE_KV.put(dedupKey, "1", { expirationTtl: 30 });
+        await env.SNARE_KV.put(dedupKey, "1", { expirationTtl: 60 });
       }
       const cf = request.cf || {};
       const event = {
