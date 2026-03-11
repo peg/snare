@@ -76,27 +76,42 @@ export default {
 };
 
 async function forwardAlert(webhookURL, event, env) {
-  // Format differs by webhook type
-  const isSlack = webhookURL.includes("hooks.slack.com");
+  const isSlack   = webhookURL.includes("hooks.slack.com");
   const isDiscord = webhookURL.includes("discord.com/api/webhooks");
 
   let body;
 
-  if (isSlack || isDiscord) {
-    const text = [
-      "🚨 *Snare canary fired*",
-      `Token: \`${event.token}\``,
-      `Time: ${event.timestamp}`,
-      `IP: ${event.ip || "unknown"}`,
-      `UA: ${event.userAgent || "unknown"}`,
-      event.body ? `Body: \`${event.body.slice(0, 200)}\`` : null,
-    ].filter(Boolean).join("\n");
-
-    body = JSON.stringify(
-      isDiscord ? { content: text } : { text }
-    );
+  if (isDiscord) {
+    body = JSON.stringify({
+      embeds: [{
+        title: "🪤 Canary fired",
+        color: 0xb2121a, // snare red
+        fields: [
+          { name: "Token",  value: `\`${event.token}\``,           inline: true  },
+          { name: "IP",     value: event.ip || "unknown",           inline: true  },
+          { name: "Method", value: event.method,                    inline: true  },
+          { name: "UA",     value: `\`${(event.userAgent || "unknown").slice(0, 80)}\``, inline: false },
+          ...(event.body ? [{ name: "Body", value: `\`\`\`${event.body.slice(0, 300)}\`\`\``, inline: false }] : []),
+        ],
+        footer: { text: "snare.sh" },
+        timestamp: event.timestamp,
+      }],
+    });
+  } else if (isSlack) {
+    body = JSON.stringify({
+      text: `🪤 *Canary fired* — \`${event.token}\``,
+      attachments: [{
+        color: "#b2121a",
+        fields: [
+          { title: "IP",     value: event.ip || "unknown",  short: true },
+          { title: "Method", value: event.method,           short: true },
+          { title: "UA",     value: (event.userAgent || "unknown").slice(0, 80), short: false },
+        ],
+        footer: "snare.sh",
+        ts: Math.floor(new Date(event.timestamp).getTime() / 1000),
+      }],
+    });
   } else {
-    // Generic webhook — send full event JSON
     body = JSON.stringify(event);
   }
 
