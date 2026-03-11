@@ -1,11 +1,18 @@
 name = "snare-callback"
 main = "index.js"
 compatibility_date = "2024-01-01"
+account_id = "264d894f4df586b73845ff7d7db628a6"
+workers_dev = false
+
+routes = [
+  { pattern = "snare.sh/c/*", zone_name = "snare.sh" },
+  { pattern = "snare.sh/api/*", zone_name = "snare.sh" },
+  { pattern = "snare.sh/health", zone_name = "snare.sh" },
+]
 
 [[kv_namespaces]]
 binding = "SNARE_KV"
-id = "YOUR_KV_NAMESPACE_ID"  # fill in after `wrangler kv:namespace create snare`
+id = "a8acd39e2d1b4545b8d3afc0e17d3432"
 
-# Set via: wrangler secret put WEBHOOK_URLS
-# Value: comma-separated webhook URLs
-# e.g. https://hooks.slack.com/...,https://discord.com/api/webhooks/...
+# Secrets (never commit — set via wrangler secret put):
+#   WEBHOOK_URLS  → comma-separated alert destinations
