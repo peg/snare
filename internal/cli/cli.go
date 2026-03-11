@@ -199,7 +199,12 @@ func cmdTest(args []string) {
 		fatal(err)
 	}
 
-	testTokenID := "snare-test-" + cfg.DeviceID
+	// Use last 8 chars of device ID to keep token compact in alerts
+	shortID := cfg.DeviceID
+	if len(shortID) > 8 {
+		shortID = shortID[len(shortID)-8:]
+	}
+	testTokenID := "snare-test-" + shortID
 	callbackURL := cfg.CallbackURL(testTokenID)
 
 	fmt.Printf("Firing test alert...\n  %s\n\n", callbackURL)
