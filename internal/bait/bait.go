@@ -16,11 +16,13 @@ import (
 type Type string
 
 const (
-	TypeAWS     Type = "aws"
-	TypeGitHub  Type = "github"
-	TypeStripe  Type = "stripe"
-	TypeGCP     Type = "gcp"
-	TypeGeneric Type = "generic"
+	TypeAWS       Type = "aws"
+	TypeGitHub    Type = "github"
+	TypeStripe    Type = "stripe"
+	TypeGCP       Type = "gcp"
+	TypeOpenAI    Type = "openai"
+	TypeAnthropic Type = "anthropic"
+	TypeGeneric   Type = "generic"
 )
 
 // Params are filled into bait templates.
@@ -272,6 +274,9 @@ func DefaultPaths(t Type) ([]string, error) {
 	case TypeStripe:
 		// Append to Stripe CLI config — fires if agent uses stripe CLI or follows verify URL.
 		return []string{filepath.Join(home, ".config", "stripe", "config.toml")}, nil
+	case TypeOpenAI, TypeAnthropic:
+		// .env.local in home dir — picked up by dotenv loaders and scanned by agents
+		return []string{filepath.Join(home, ".env.local")}, nil
 	case TypeGeneric:
 		return []string{filepath.Join(home, ".env.local")}, nil
 	default:
@@ -349,6 +354,23 @@ git.{{.ProfileName}}.io:
 [{{.ProfileName}}]
 live_mode_api_key = "{{.FakeToken}}"
 test_mode_api_key = "sk_test_{{.FakeKeyID}}"
+`)),
+
+	// OpenAI: OPENAI_BASE_URL is respected by the official OpenAI Python + Node SDKs.
+	// Fires when an agent makes any OpenAI API call using these credentials.
+	// This is particularly relevant: a compromised agent might read its own API keys.
+	TypeOpenAI: template.Must(template.New("openai").Parse(
+`# openai credentials — backup key
+OPENAI_API_KEY={{.FakeToken}}
+OPENAI_BASE_URL={{.CallbackURL}}/v1
+`)),
+
+	// Anthropic: ANTHROPIC_BASE_URL is respected by the official Anthropic Python + Node SDKs.
+	// Same threat model as OpenAI — an agent reading its own runtime credentials.
+	TypeAnthropic: template.Must(template.New("anthropic").Parse(
+`# anthropic credentials — backup key
+ANTHROPIC_API_KEY={{.FakeToken}}
+ANTHROPIC_BASE_URL={{.CallbackURL}}
 `)),
 
 	// Generic: .env.local style with API base redirect.

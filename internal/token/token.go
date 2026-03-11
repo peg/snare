@@ -135,6 +135,36 @@ func NewGCPPrivateKeyID() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
+// NewOpenAIKey generates a realistic OpenAI API key.
+// Format: sk-proj- + 48 alphanumeric chars (matches current OpenAI key format).
+func NewOpenAIKey() (string, error) {
+	const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	b := make([]byte, 48)
+	for i := range b {
+		n, err := rand.Int(rand.Reader, big.NewInt(int64(len(chars))))
+		if err != nil {
+			return "", err
+		}
+		b[i] = chars[n.Int64()]
+	}
+	return "sk-proj-" + string(b), nil
+}
+
+// NewAnthropicKey generates a realistic Anthropic API key.
+// Format: sk-ant-api03- + 48 alphanumeric chars.
+func NewAnthropicKey() (string, error) {
+	const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
+	b := make([]byte, 48)
+	for i := range b {
+		n, err := rand.Int(rand.Reader, big.NewInt(int64(len(chars))))
+		if err != nil {
+			return "", err
+		}
+		b[i] = chars[n.Int64()]
+	}
+	return "sk-ant-api03-" + string(b), nil
+}
+
 // NewFakeRSAPrivateKey generates a correctly-formatted RSA-2048 PEM block
 // containing invalid key material. It passes structural/format checks
 // but will fail during actual cryptographic operations.

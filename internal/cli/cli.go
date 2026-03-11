@@ -26,7 +26,7 @@ Usage:
 
 Flags (plant):
   --label <name>               prefix canary names (e.g. "openclaw", "myapp")
-  --type <type>                canary type: aws, gcp, github, stripe, generic (default: aws)
+  --type <type>                canary type: aws, gcp, github, stripe, openai, anthropic, generic (default: aws)
   --dry-run                    show what would be planted without writing anything
 
 Flags (teardown):
@@ -388,6 +388,18 @@ func buildParams(bt bait.Type, label string, cfg *config.Config) (bait.Params, e
 			p.ProfileName = label + "-internal"
 		} else {
 			p.ProfileName = "corp-internal"
+		}
+
+	case bait.TypeOpenAI:
+		p.FakeToken, err = token.NewOpenAIKey()
+		if err != nil {
+			return p, err
+		}
+
+	case bait.TypeAnthropic:
+		p.FakeToken, err = token.NewAnthropicKey()
+		if err != nil {
+			return p, err
 		}
 
 	case bait.TypeGeneric:
