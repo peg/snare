@@ -36,7 +36,7 @@ Flags (teardown):
 `
 
 // Run dispatches the CLI command.
-func Run(args []string) {
+func Run(args []string, version string) {
 	if len(args) == 0 {
 		fmt.Print(usage)
 		os.Exit(0)
@@ -60,6 +60,8 @@ func Run(args []string) {
 		cmdUninstall(rest)
 	case "help", "--help", "-h":
 		fmt.Print(usage)
+	case "version", "--version", "-v":
+		fmt.Printf("snare %s\n", version)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n%s", cmd, usage)
 		os.Exit(1)
