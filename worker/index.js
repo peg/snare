@@ -26,12 +26,20 @@ export default {
       const PREVIEW_BOTS = [
         "Discordbot", "Slackbot", "Twitterbot", "facebookexternalhit",
         "LinkedInBot", "TelegramBot", "WhatsApp", "iMessage",
-        "Googlebot", "bingbot", "curl/", // also filter our own test curls in prod
+        "Googlebot", "bingbot",
       ];
-      // Only filter preview bots, not curl (curl is useful for testing)
-      const isPreviewBot = PREVIEW_BOTS.slice(0, -1).some(b => ua.includes(b));
-      if (isPreviewBot) {
+      if (PREVIEW_BOTS.some(b => ua.includes(b))) {
         return new Response("", { status: 200 });
+      }
+
+      // Rate limit: deduplicate events per token within a 10-second window
+      if (env.SNARE_KV) {
+        const dedupKey = `dedup:${token}:${Math.floor(Date.now() / 10000)}`;
+        const seen = await env.SNARE_KV.get(dedupKey);
+        if (seen) {
+          return new Response("", { status: 200, headers: { "cache-control": "no-store" } });
+        }
+        await env.SNARE_KV.put(dedupKey, "1", { expirationTtl: 30 });
       }
       const cf = request.cf || {};
       const event = {
@@ -49,7 +57,7 @@ export default {
         botScore: cf.botManagement?.score ?? null,
         // Capture body for POST callbacks
         body: request.method === "POST"
-          ? await request.text().catch(() => null)
+          ? (await request.text().catch(() => "")).slice(0, 4096) || null
           : null,
       };
 
@@ -58,7 +66,7 @@ export default {
 
       // Store in KV if configured
       if (env.SNARE_KV) {
-        const key = `event:${token}:${Date.now()}`;
+        const key = `event:${token}:${Date.now()}:${crypto.randomUUID()}`;
         await env.SNARE_KV.put(key, JSON.stringify(event), {
           expirationTtl: 60 * 60 * 24 * 90, // 90 days
         });

@@ -176,11 +176,18 @@ func removeNewFile(c manifest.Canary, force bool, dryRun bool) error {
 }
 
 func removeAppended(c manifest.Canary, force bool, dryRun bool) error {
-	data, err := os.ReadFile(c.Path)
+	// Capture original file info before touching anything
+	info, err := os.Stat(c.Path)
 	if os.IsNotExist(err) {
 		fmt.Printf("  %s: already removed (file not found)\n", c.Path)
 		return nil
 	}
+	if err != nil {
+		return fmt.Errorf("stat %s: %w", c.Path, err)
+	}
+	origMode := info.Mode()
+
+	data, err := os.ReadFile(c.Path)
 	if err != nil {
 		return fmt.Errorf("reading %s: %w", c.Path, err)
 	}
@@ -210,13 +217,23 @@ func removeAppended(c manifest.Canary, force bool, dryRun bool) error {
 	// Excise exact content
 	newContent := fileContent[:idx] + fileContent[idx+len(c.Content):]
 
-	// Write back atomically
+	// Sanity check: TokenID must be gone after excision
+	if bytes.Contains([]byte(newContent), []byte(c.ID)) {
+		return fmt.Errorf("%s: canary ID still present after excision — duplicate entry? Use --force", c.Path)
+	}
+
+	// Write back atomically, preserving original file permissions
 	tmp := c.Path + ".snare-tmp"
-	if err := os.WriteFile(tmp, []byte(newContent), 0600); err != nil {
+	if err := os.WriteFile(tmp, []byte(newContent), origMode); err != nil {
 		return fmt.Errorf("writing temp file: %w", err)
 	}
+	// Ensure mode matches exactly (WriteFile uses umask, Chmod doesn't)
+	if err := os.Chmod(tmp, origMode); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("setting permissions on temp file: %w", err)
+	}
 	if err := os.Rename(tmp, c.Path); err != nil {
-		_ = os.Remove(tmp) // best-effort cleanup
+		_ = os.Remove(tmp)
 		return fmt.Errorf("replacing %s: %w", c.Path, err)
 	}
 

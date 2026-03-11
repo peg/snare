@@ -139,7 +139,7 @@ func (m *Manifest) Deactivate(id string, reason string) error {
 // Remove deletes a canary from the manifest entirely and saves.
 // Prefer Deactivate for audit trails; use Remove only for uninstall.
 func (m *Manifest) Remove(id string) error {
-	filtered := m.Canaries[:0]
+	filtered := make([]Canary, 0, len(m.Canaries))
 	found := false
 	for _, c := range m.Canaries {
 		if c.ID == id {
