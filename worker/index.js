@@ -33,6 +33,7 @@ export default {
       if (isPreviewBot) {
         return new Response("", { status: 200 });
       }
+      const cf = request.cf || {};
       const event = {
         token,
         timestamp: new Date().toISOString(),
@@ -40,7 +41,13 @@ export default {
         userAgent: request.headers.get("user-agent"),
         method: request.method,
         path: url.pathname + url.search,
-        // Capture body for POST callbacks (e.g. from MCP canary server)
+        // Cloudflare geo + network intel (free)
+        country: cf.country || null,
+        city: cf.city || null,
+        asn: cf.asn || null,
+        asnOrg: cf.asOrganization || null,
+        botScore: cf.botManagement?.score ?? null,
+        // Capture body for POST callbacks
         body: request.method === "POST"
           ? await request.text().catch(() => null)
           : null,
@@ -82,17 +89,49 @@ async function forwardAlert(webhookURL, event, env) {
   let body;
 
   if (isDiscord) {
+    // Infer if likely an AI agent based on cloud ASN
+    const cloudProviders = ["amazon", "google", "microsoft", "openai", "anthropic",
+      "digitalocean", "linode", "vultr", "hetzner", "fly.io", "railway", "render"];
+    const asnLower = (event.asnOrg || "").toLowerCase();
+    const likelyAgent = cloudProviders.some(p => asnLower.includes(p));
+
+    // Format timestamp as both exact + relative hint
+    const ts = new Date(event.timestamp);
+    const tsFormatted = ts.toISOString().replace("T", " ").replace(/\.\d+Z$/, " UTC");
+
+    // Location string
+    const location = [event.city, event.country].filter(Boolean).join(", ") || "unknown";
+    const network = event.asnOrg
+      ? `${event.asnOrg} (AS${event.asn})`
+      : (event.ip || "unknown");
+
+    const fields = [
+      { name: "Token",     value: `\`${event.token}\``,        inline: true  },
+      { name: "Time",      value: tsFormatted,                  inline: true  },
+      { name: "Method",    value: event.method,                 inline: true  },
+      { name: "IP",        value: event.ip || "unknown",        inline: true  },
+      { name: "Location",  value: location,                     inline: true  },
+      { name: "Network",   value: network,                      inline: true  },
+      { name: "UA",        value: `\`${(event.userAgent || "unknown").slice(0, 100)}\``, inline: false },
+    ];
+
+    if (likelyAgent) {
+      fields.push({ name: "⚠️ Likely AI agent", value: `Request originated from ${event.asnOrg} — cloud infrastructure`, inline: false });
+    }
+
+    if (event.botScore !== null && event.botScore < 30) {
+      fields.push({ name: "🤖 Bot score", value: `${event.botScore}/100 — high confidence automated`, inline: false });
+    }
+
+    if (event.body) {
+      fields.push({ name: "Body", value: `\`\`\`${event.body.slice(0, 300)}\`\`\``, inline: false });
+    }
+
     body = JSON.stringify({
       embeds: [{
-        title: "🪤 Canary fired",
-        color: 0xb2121a, // snare red
-        fields: [
-          { name: "Token",  value: `\`${event.token}\``,           inline: true  },
-          { name: "IP",     value: event.ip || "unknown",           inline: true  },
-          { name: "Method", value: event.method,                    inline: true  },
-          { name: "UA",     value: `\`${(event.userAgent || "unknown").slice(0, 80)}\``, inline: false },
-          ...(event.body ? [{ name: "Body", value: `\`\`\`${event.body.slice(0, 300)}\`\`\``, inline: false }] : []),
-        ],
+        title: "🪤 Snare fired",
+        color: 0xb2121a,
+        fields,
         footer: { text: "snare.sh" },
         timestamp: event.timestamp,
       }],
