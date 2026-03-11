@@ -20,6 +20,19 @@ export default {
     const match = url.pathname.match(/^\/c\/([a-zA-Z0-9_-]{8,64})$/);
     if (match) {
       const token = match[1];
+
+      // Ignore known link-preview bots — they auto-crawl URLs in messages
+      const ua = request.headers.get("user-agent") || "";
+      const PREVIEW_BOTS = [
+        "Discordbot", "Slackbot", "Twitterbot", "facebookexternalhit",
+        "LinkedInBot", "TelegramBot", "WhatsApp", "iMessage",
+        "Googlebot", "bingbot", "curl/", // also filter our own test curls in prod
+      ];
+      // Only filter preview bots, not curl (curl is useful for testing)
+      const isPreviewBot = PREVIEW_BOTS.slice(0, -1).some(b => ua.includes(b));
+      if (isPreviewBot) {
+        return new Response("", { status: 200 });
+      }
       const event = {
         token,
         timestamp: new Date().toISOString(),
