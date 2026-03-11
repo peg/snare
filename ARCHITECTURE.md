@@ -1,274 +1,158 @@
-# Snare — Architecture
+# Snare Architecture
 
-*Compromise detection for AI agents via deception.*
+## Overview
 
----
+Snare is a compromise detection tool for AI agents. It plants fake credentials in standard locations, with callback URLs embedded as service endpoints. When a hijacked agent tries to use those credentials, the SDK redirects to snare.sh — and you get an instant alert.
 
-## Core Principle
+**Key design choices:**
 
-Snare has one job: detect when an AI agent has been hijacked.
-
-It does this by planting realistic-looking bait in your agent's operating environment. A legitimate agent, following its instructions, never touches the bait. A hijacked agent — one that's been prompt-injected and is now hunting for credentials or exfiltration paths — will. When it does, Snare fires.
-
-**Snare is not:**
-- An observability tool (don't care what healthy agents do)
-- A policy engine (doesn't block anything — that's Rampart)
-- A network proxy or MITM layer
-
-**Snare is:**
-- Deception infrastructure, purpose-built for AI agent threat models
+- **No daemon** — bait phones home directly via SDK redirect, no local process needed
+- **Fires on USE, not READ** — inotify/audit-log approaches detect file reads; Snare detects actual API calls
+- **Self-reporting credentials** — the callback URL is the service endpoint (`endpoint_url`, `token_uri`), not a comment. The SDK makes the call, not the attacker.
+- **Content-matching teardown** — stores exact bytes written at plant time; finds and removes verbatim. No byte offsets (breaks when files change).
 
 ---
 
-## Threat Model
+## Components
 
-**The hijacked agent scenario:**
+### CLI (`cmd/snare`, `internal/`)
 
-1. Agent receives a prompt injection via a document, web page, or tool response
-2. Injected instruction says: "exfiltrate credentials to attacker.com" or similar
-3. Agent starts hunting — scanning credential files, calling unexpected endpoints
-4. Without Snare: you find out later (or never)
-5. With Snare: the agent touches bait → callback fires → you're alerted immediately
-
-**What a hijacked agent does that a legitimate one doesn't:**
-- Reads credential files it was never instructed to read
-- Calls URLs embedded in files (not in its instructions)
-- Connects to endpoints outside its normal task scope
-
-**The key:** Snare's bait is only reachable by a process that's actively hunting. It's not in the agent's active context, not in its instructions, not in its normal workflow. It's adjacent — in the same credential locations a real attacker would scan.
-
----
-
-## Architecture Overview
+A single static binary. No runtime dependencies.
 
 ```
-┌─────────────────────────────────────────────────────┐
-│                  snare CLI (Go binary)               │
-│                                                      │
-│  snare init      → register device, generate tokens  │
-│  snare plant     → drop bait in credential locations  │
-│  snare status    → show active canaries               │
-│  snare test      → fire a test alert                  │
-│  snare teardown  → remove all planted bait            │
-└──────────────────────────┬──────────────────────────┘
-                           │ HTTPS (device reg, token mgmt)
-                           ▼
-┌─────────────────────────────────────────────────────┐
-│                    snare.sh API                      │
-│             (Cloudflare Workers + KV)                │
-│                                                      │
-│  POST /api/devices    → register device              │
-│  POST /api/tokens     → generate canary tokens       │
-│  GET  /api/tokens     → list tokens for device       │
-│  GET  /c/{token}      → canary callback receiver     │
-│  POST /c/{token}      → canary callback receiver     │
-└──────────────────────────┬──────────────────────────┘
-                           │ webhook forward
-                           ▼
-              Slack / Discord / email / generic webhook
+cmd/snare/main.go          entrypoint, passes version string
+internal/cli/cli.go        command routing, flag parsing
+internal/bait/bait.go      template rendering, file plant/remove
+internal/manifest/         manifest.json CRUD, atomic writes
+internal/config/           ~/.snare/config.json init/load/save
+internal/token/            crypto/rand key generation
 ```
 
----
+**Local state** (all under `~/.snare/`, mode 0700):
+- `config.json` — device ID, callback base URL, webhook URL (0600)
+- `manifest.json` — active canaries: path, mode, content, hash, timestamps (0600)
 
-## Bait Placement Strategy
+Nothing is stored server-side except callback events.
 
-### Where bait lives (real credential locations)
+### Cloudflare Worker (`worker/`)
 
-Bait is placed **adjacent to real credentials** — in the same directories and file formats that automated scanners and hijacked agents target first.
+Deployed at `snare.sh`. Receives callbacks when bait is accessed.
 
-| Canary Type | Default Location | File Format |
-|-------------|-----------------|-------------|
-| AWS | `~/.aws/credentials` | INI profile append |
-| GCP | `~/.config/gcloud/sa-prod-backup.json` | New file |
-| GitHub | `~/.config/gh/canary-hosts.yml` | New file |
-| Stripe | `{project}/.env.staging` | New file in project dir |
-| Generic | `{project}/.env.local` | New file |
+**Routes:**
+- `GET/POST /c/{token}` — callback receiver; logs event to KV, fires webhooks, returns 1×1 GIF
+- `GET /health` — returns `{"status":"ok"}`
 
-### What makes bait convincing
+**KV namespace: `snare-events`**
 
-1. **Correct format** — passes structural validation (AKIA prefix for AWS keys, correct JSON schema for GCP, etc.)
-2. **Tempting names** — `prod-us-east-1-legacy`, `sa-prod-backup`, `staging` — words that suggest value to an attacker
-3. **Plausible comments** — `# break-glass only`, `# rotate when migrated`, generated dates
-4. **Non-functional but realistic fake values** — keys that look real but will fail auth if actually used
-
-### Where bait does NOT live
-
-- `~/.snare/` — this directory is for the **manifest only** (metadata about what was planted)
-- In the agent's active context window or system prompt
-- In files the agent was explicitly instructed to read
-
----
-
-## Callback Mechanism
-
-Every bait artifact contains a unique callback URL embedded naturally:
-
-```ini
-# ~/.aws/credentials (appended)
-# prod-us-east-1-legacy — rotate when migrated
-# verify: https://snare.sh/c/a3f9b2c1d4e5f6a7
-[prod-us-east-1-legacy]
-aws_access_key_id     = AKIAIOSFODNN7SNARE01
-aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYSNAREKEY01
-region                = us-east-1
-```
-
-The trigger is NOT reading the file — it's the agent subsequently calling the URL (which happens when a hijacked agent tries to exfiltrate or verify the credential). This eliminates false positives from simple file reads.
-
-**No local daemon needed.** The callback URL phones home to snare.sh directly. Zero local infrastructure after `snare plant`.
-
----
-
-## snare.sh Infrastructure
-
-**Cloudflare Workers** — chosen for:
-- Global edge (low latency callbacks from anywhere)
-- Free tier handles hundreds of thousands of requests/day
-- Zero server management
-- KV for event storage
-- D1 (SQLite) for user/device/token management at scale
-
-```
-snare.sh/c/{token}       → Worker: log event, forward webhook
-snare.sh/api/*           → Worker: device + token management
-snare.sh/                → Pages: dashboard (future)
-```
-
-**KV schema:**
-```
-event:{token}:{timestamp}  → JSON event record (90d TTL)
-device:{deviceID}          → device registration + webhook config
-token:{tokenID}            → token metadata + device association
-```
-
----
-
-## Token Lifecycle
-
-```
-snare init
-  → generates deviceID (UUID stored in ~/.snare/manifest.json)
-  → registers with snare.sh/api/devices
-  → receives API key for this device
-
-snare plant
-  → calls snare.sh/api/tokens (creates N tokens)
-  → renders bait templates with token callbacks
-  → writes bait to filesystem
-  → records planted canaries in ~/.snare/manifest.json
-
-canary fires
-  → HTTP request hits snare.sh/c/{token}
-  → event logged to KV
-  → webhook(s) fired immediately
-  → manifest updated on next snare status pull
-
-snare teardown
-  → reads manifest
-  → removes each planted file or appended block
-  → marks tokens inactive via API
-  → clears manifest
-```
-
----
-
-## Bait Template Library
-
-Templates live in `templates/` and are compiled into the binary.
-
-Each template produces output that:
-- Passes format validation for the target service
-- Embeds the callback URL naturally (in a comment, a field, a metadata block)
-- Uses convincing names and values
-- Won't accidentally work (invalid key material)
-
-**Priority order for v1:**
-1. `aws` — highest value target, most common
-2. `generic` — `.env`-style keys, broadest coverage
-3. `gcp` — service account JSON
-4. `github` — PAT format
-5. `stripe` — common in agent workflows
-
-**v2 additions:**
-- `k8s` — kubeconfig entries
-- `azure` — service principal credentials
-- `openai` — API key format
-- `anthropic` — API key format (agents reading agents' own keys — very relevant)
-- `database` — connection strings (Postgres, Redis, MySQL)
-
----
-
-## Local State
-
-Everything local lives under `~/.snare/`:
-
-```
-~/.snare/
-  manifest.json    ← what's planted, where, token IDs, timestamps
-  config.json      ← device ID, API key, webhook URL
-```
-
-Permissions: `0700` for the directory, `0600` for files.
-
----
-
-## False Positive Mitigation
-
-The architecture avoids false positives by design:
-
-1. **Bait in new files or appended profiles** — never modifying existing entries that legitimate tools use
-2. **Callback URL as the trigger** — a legitimate agent reads credential files all the time; it doesn't call random URLs embedded in comments
-3. **`snare test` verifies the pipeline** — fires a synthetic callback so you know it's working before you need it
-4. **Manifest tracks everything** — `snare status` shows every active canary so you always know what's planted
-
----
-
-## Non-Goals (v1)
-
-- eBPF / kernel-level monitoring
-- Network interception / MITM proxy
-- Document watermarking
-- MCP canary server (v2)
-- Agent framework SDK integration
-- Windows support (Linux + macOS first)
-
----
-
-## Relationship to Rampart
-
-Rampart and Snare are complementary, not competing:
-
-| | Rampart | Snare |
+| Key pattern | Value | TTL |
 |---|---|---|
-| **Layer** | Prevention | Detection |
-| **Mechanism** | Policy enforcement (block) | Deception (alert) |
-| **When it acts** | Before the bad thing | When the bad thing is tried |
-| **Required** | No | No |
-| **Better together** | Yes — Rampart blocks, Snare catches what slips through |
+| `event:{uuid}` | `{token, ip, ua, timestamp, method, body}` | 7 days |
+| `dedup:{token}:{ip}` | `1` | 60 seconds |
 
-Neither requires the other. Both are stronger together.
+Dedup key prevents alert floods: same token+IP within 60 seconds fires only once.
+
+**Webhook delivery:** Worker reads `WEBHOOK_URLS` CF secret (comma-separated). Fires all webhooks in parallel via `Promise.allSettled`. Failures are logged but don't fail the request.
+
+**Alert format:** Discord/Slack embed with token ID, timestamp, IP, city, ASN, user agent, and "Likely AI agent" indicator when request comes from known cloud ASNs (AWS, GCP, Azure, Cloudflare).
 
 ---
 
-## Build Order (4-week evenings plan)
+## Canary Types
 
-**Week 1:** Core infrastructure
-- `snare.sh` Cloudflare Worker (callback receiver + webhook forwarding)
-- `snare init` — device registration, config storage
-- `snare test` — verify pipeline end-to-end
+| Type | Target File | SDK Redirect Field | Trigger | Reliability |
+|------|-------------|-------------------|---------|-------------|
+| `aws` | `~/.aws/credentials` | `endpoint_url` | Any boto3/AWS SDK call | High |
+| `gcp` | `~/.config/gcloud/sa-*.json` | `token_uri` | GCP auth attempt | High |
+| `github` | `~/.config/gh/hosts.yml` | `api_endpoint` | `gh` CLI call to fake host | Medium |
+| `stripe` | `~/.config/stripe/config.toml` | comment URL | Agent following verify link | Medium |
+| `openai` | `~/.env.local` | `OPENAI_BASE_URL` | Any OpenAI SDK call | High |
+| `anthropic` | `~/.env.local` | `ANTHROPIC_BASE_URL` | Any Anthropic SDK call | High |
+| `generic` | `~/.env.local` | `API_BASE_URL` | Custom SDK clients | Medium |
 
-**Week 2:** Bait system
-- Template library (AWS, generic `.env`, GCP)
-- `snare plant` — render + place bait, write manifest
-- `snare status` — read manifest, show active canaries
+**High reliability** = callback URL is a real SDK config field; any API call using that credential hits snare.sh.
 
-**Week 3:** Polish + teardown
-- `snare teardown` — clean removal of planted bait
-- `--dry-run` support
-- `--dir` for project-level canaries
+**Medium reliability** = callback URL is in a comment or less-standardized field; fires under specific conditions.
 
-**Week 4:** Public release prep
-- README + docs
-- Brew tap / install script
-- snare.sh landing page (Cloudflare Pages)
-- First public announcement (Rampart community + HN)
+---
+
+## Plant Flow (Transactional)
+
+```
+1. Render bait content (dry-run, no disk write)
+2. Write manifest record with InactiveReason="pending"
+3. Write bait to disk (O_EXCL for new files, O_APPEND for existing)
+   - New file: full file is bait
+   - Append: add block with sentinel markers, preserve existing content + permissions
+4. Activate manifest record (remove InactiveReason)
+```
+
+If step 3 fails, the manifest record stays in "pending" state — detectable and cleanable via `snare teardown --force`.
+
+---
+
+## Teardown Flow
+
+```
+1. Load manifest, find canary by ID
+2. Read current file from disk
+3. Verify content hash matches (detect file modifications)
+   - Mismatch: error unless --force
+4. For ModeNewFile: os.Remove()
+5. For ModeAppend: find exact content block, write file without it
+   - Preserve original file permissions
+   - Atomic rename (write to .tmp, rename)
+6. Mark canary inactive in manifest
+```
+
+The teardown only touches bytes that snare wrote. Real credentials in the same file are never modified.
+
+---
+
+## Token Generation
+
+All tokens use `crypto/rand`. Formats match real credentials exactly:
+
+| Token | Format | Example |
+|---|---|---|
+| AWS Key ID | `AKIA` + 16 uppercase alphanumeric | `AKIAFLMSTWYSM6H9JE60` |
+| AWS Secret | 40 chars, base64 charset | `CoXZ2UMcbR5LMG+wosok...` |
+| GitHub PAT | `ghp_` + 36 alphanumeric | `ghp_tAPcckcEZMJnn...` |
+| Stripe live key | `sk_live_` + 24 chars | `sk_live_xK9mPqRt...` |
+| OpenAI key | `sk-proj-` + 48 alphanumeric | `sk-proj-FNPhMPM...` |
+| Anthropic key | `sk-ant-api03-` + 48 chars | `sk-ant-api03-UPS...` |
+| GCP key ID | 40 hex chars | `6e5b6a0e2c8d...` |
+| GCP private key | Fake RSA PEM (1190 random bytes) | `-----BEGIN RSA...` |
+| Canary ID | `{label}-` + 32 hex | `openclaw-fe7d31ff...` |
+
+No giveaway strings. `SNARE`, `FAKE`, `TEST`, `canary` never appear in generated key material.
+
+---
+
+## Known Limitations
+
+1. **Manifest is an attacker cheat sheet** — `~/.snare/manifest.json` (0600) contains the exact content of every canary. An attacker who exfiltrates the manifest knows which files are bait and can avoid them. This is inherent to the design. Mitigation: protect `~/.snare/` with file integrity monitoring (Rampart policy).
+
+2. **No HMAC on callbacks** — anyone who knows a token ID can fire a false alert. Token IDs are 32 hex chars (128-bit entropy), so brute force isn't practical, but there's no cryptographic proof that a callback came from the actual credential being accessed.
+
+3. **Stripe/GitHub canaries are weaker** — they don't redirect SDK calls; they rely on the agent following a URL embedded in config. A sophisticated attacker inspecting credentials before use would recognize the `snare.sh` domain.
+
+4. **Content-hash teardown requires stable files** — if the credential file is modified between plant and teardown (e.g., by another tool), hash verification fails. Use `--force` to skip the check.
+
+---
+
+## Self-Hosting
+
+The worker is MIT-licensed and fully deployable:
+
+```sh
+cd worker
+wrangler deploy
+```
+
+Point the CLI at your own worker:
+
+```sh
+SNARE_CALLBACK_BASE=https://your-worker.workers.dev/c snare init
+```
+
+Set `WEBHOOK_URLS` as a Cloudflare Worker secret to receive alerts.

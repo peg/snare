@@ -3,8 +3,9 @@ package cli
 
 import (
 	"fmt"
+	"io"
+	"net/http"
 	"os"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -223,8 +224,7 @@ func cmdTest(args []string) {
 
 	fmt.Printf("Firing test alert...\n  %s\n\n", callbackURL)
 
-	// Use curl to fire the callback (avoids import of net/http for now)
-	err = execCurl(callbackURL)
+	err = httpGet(callbackURL)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "  error: %v\n", err)
 		fmt.Fprintf(os.Stderr, "  check your internet connection and snare.sh status\n")
@@ -232,7 +232,7 @@ func cmdTest(args []string) {
 	}
 
 	fmt.Println("✓ Test alert fired — check your webhook destination.")
-	fmt.Println("  If no alert arrives within 30 seconds, check your WEBHOOK_URLS secret on Cloudflare.")
+	fmt.Println("  If no alert arrives within 30 seconds, verify your webhook is configured correctly.")
 }
 
 // cmdTeardown removes planted canaries.
@@ -307,13 +307,13 @@ func cmdUninstall(args []string) {
 		}
 	}
 
-	// Teardown all active canaries first
-	cmdTeardown(append(args, "--force"))
-
+	// Teardown all active canaries — always force since we're uninstalling
 	if dryRun {
+		cmdTeardown([]string{"--dry-run"})
 		fmt.Println("[dry-run] would delete ~/.snare/")
 		return
 	}
+	cmdTeardown([]string{"--force"})
 
 	dir, err := manifest.Dir()
 	if err != nil {
@@ -425,19 +425,18 @@ func requireConfig() (*config.Config, error) {
 	return cfg, nil
 }
 
-// execCurl fires a GET request to url using the system curl binary.
-func execCurl(url string) error {
-	c := exec.Command("curl", "-sf", "-o", "/dev/null", url)
-	c.Stdout = os.Stdout
-	c.Stderr = os.Stderr
-	return c.Run()
-}
-
-func runShell(cmd string) error {
-	c := exec.Command("sh", "-c", cmd)
-	c.Stdout = os.Stdout
-	c.Stderr = os.Stderr
-	return c.Run()
+// httpGet fires a GET request to url using net/http.
+func httpGet(url string) error {
+	resp, err := http.Get(url) //nolint:noctx
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body) //nolint:errcheck
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	return nil
 }
 
 // Flag helpers
