@@ -2,6 +2,8 @@
 package cli
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -71,9 +73,10 @@ func Run(args []string, version string) {
 
 // cmdInit sets up snare for this machine.
 func cmdInit(args []string) {
-	force := hasFlag(args, "--force")
+	force      := hasFlag(args, "--force")
+	webhookURL := flagValue(args, "--webhook")
 
-	cfg, err := config.Init("", force)
+	cfg, err := config.Init("", webhookURL, force)
 	if err != nil {
 		fatal(err)
 	}
@@ -81,6 +84,12 @@ func cmdInit(args []string) {
 	fmt.Printf("✓ snare initialized\n")
 	fmt.Printf("  Device ID:    %s\n", cfg.DeviceID)
 	fmt.Printf("  Callback:     %s/<token>\n", cfg.CallbackBase)
+	if cfg.WebhookURL != "" {
+		fmt.Printf("  Webhook:      %s\n", cfg.WebhookURL)
+	} else {
+		fmt.Printf("\n  No webhook configured. Run with --webhook <url> to receive alerts:\n")
+		fmt.Printf("  snare init --webhook https://hooks.slack.com/... --force\n")
+	}
 	fmt.Printf("\nRun `snare plant` to deploy your first canaries.\n")
 }
 
@@ -162,6 +171,13 @@ func cmdPlant(args []string) {
 			fmt.Fprintf(os.Stderr, "  ⚠️  bait written but manifest activation failed for %s: %v\n", path, err)
 			fmt.Fprintf(os.Stderr, "  ⚠️  Token ID: %s\n", params.TokenID)
 			continue
+		}
+
+		// Step 5: register webhook with snare.sh (best-effort — don't fail plant on network error)
+		if cfg.WebhookURL != "" && !dryRun {
+			if err := registerToken(cfg, params.TokenID); err != nil {
+				fmt.Fprintf(os.Stderr, "  ⚠️  webhook registration failed (alerts may not arrive): %v\n", err)
+			}
 		}
 
 		fmt.Printf("  ✓ planted at %s\n", path)
@@ -278,6 +294,10 @@ func cmdTeardown(args []string) {
 		if !dryRun {
 			if err := m.Deactivate(c.ID, "teardown"); err != nil {
 				fmt.Fprintf(os.Stderr, "  ⚠️  removed from disk but manifest update failed for %s: %v\n", c.ID, err)
+			}
+			// Best-effort webhook deregistration — ignore errors
+			if cfg, err := config.Load(); err == nil && cfg != nil && cfg.WebhookURL != "" {
+				_ = revokeToken(cfg, c.ID)
 			}
 		}
 	}
@@ -423,6 +443,37 @@ func requireConfig() (*config.Config, error) {
 		return nil, fmt.Errorf("snare not initialized — run `snare init` first")
 	}
 	return cfg, nil
+}
+
+// registerToken registers a per-token webhook with snare.sh.
+func registerToken(cfg *config.Config, tokenID string) error {
+	body, _ := json.Marshal(map[string]string{
+		"token_id":    tokenID,
+		"webhook_url": cfg.WebhookURL,
+		"device_id":   cfg.DeviceID,
+	})
+	resp, err := http.Post(cfg.RegisterURL(), "application/json", bytes.NewReader(body)) //nolint:noctx
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body) //nolint:errcheck
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("registration failed: HTTP %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// revokeToken deregisters a token webhook from snare.sh.
+func revokeToken(cfg *config.Config, tokenID string) error {
+	body, _ := json.Marshal(map[string]string{"token_id": tokenID})
+	resp, err := http.Post(cfg.RevokeURL(), "application/json", bytes.NewReader(body)) //nolint:noctx
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body) //nolint:errcheck
+	return nil
 }
 
 // httpGet fires a GET request to url using net/http.

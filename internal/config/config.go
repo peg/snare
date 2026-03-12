@@ -41,9 +41,28 @@ func Load() (*Config, error) {
 	return &c, nil
 }
 
+// RegisterURL returns the URL for registering a token webhook with snare.sh.
+func (c *Config) RegisterURL() string {
+	// Derive API base from callback base: https://snare.sh/c → https://snare.sh/api
+	base := c.CallbackBase
+	if idx := len(base) - len("/c"); idx > 0 && base[idx:] == "/c" {
+		base = base[:idx]
+	}
+	return base + "/api/register"
+}
+
+// RevokeURL returns the URL for revoking a token webhook registration.
+func (c *Config) RevokeURL() string {
+	base := c.CallbackBase
+	if idx := len(base) - len("/c"); idx > 0 && base[idx:] == "/c" {
+		base = base[:idx]
+	}
+	return base + "/api/revoke"
+}
+
 // Init creates a new device config with a fresh device ID.
 // Errors if config already exists (use --force to overwrite).
-func Init(callbackBase string, force bool) (*Config, error) {
+func Init(callbackBase, webhookURL string, force bool) (*Config, error) {
 	path, err := configPath()
 	if err != nil {
 		return nil, err
@@ -65,8 +84,9 @@ func Init(callbackBase string, force bool) (*Config, error) {
 	}
 
 	c := &Config{
-		DeviceID:    deviceID,
+		DeviceID:     deviceID,
 		CallbackBase: callbackBase,
+		WebhookURL:   webhookURL,
 	}
 
 	if err := c.Save(); err != nil {
