@@ -18,19 +18,31 @@ import (
 	"github.com/peg/snare/internal/token"
 )
 
+// reliability returns a human-readable reliability label per canary type.
+func reliability(t string) string {
+	switch bait.Type(t) {
+	case bait.TypeAWS, bait.TypeGCP, bait.TypeOpenAI, bait.TypeAnthropic:
+		return "high"
+	default:
+		return "medium"
+	}
+}
+
 const usage = `snare — compromise detection for AI agents via deception
 
 Usage:
   snare init                   initialize snare on this machine
   snare plant [flags]          plant canary credentials
   snare status                 show active canaries
+  snare events                 fetch recent alert events from snare.sh
   snare test                   fire a test alert to verify your webhook
   snare teardown [flags]       remove planted canaries
   snare uninstall              teardown + remove all snare state
 
 Flags (plant):
-  --label <name>               prefix canary names (e.g. "openclaw", "myapp")
-  --type <type>                canary type: aws, gcp, github, stripe, openai, anthropic, generic (default: aws)
+  --label <name>               prefix canary names (defaults to hostname)
+  --type <type>                canary type: aws, gcp, github, stripe, openai, anthropic, generic
+  --all                        plant all high-reliability canary types at once
   --dry-run                    show what would be planted without writing anything
 
 Flags (teardown):
@@ -56,6 +68,8 @@ func Run(args []string, version string) {
 		cmdPlant(rest)
 	case "status":
 		cmdStatus(rest)
+	case "events":
+		cmdEvents(rest)
 	case "test":
 		cmdTest(rest)
 	case "teardown":
@@ -239,14 +253,25 @@ func guidedInit(force bool) {
 	fmt.Println()
 }
 
+// highReliabilityTypes returns all high-reliability canary types.
+var highReliabilityTypes = []bait.Type{
+	bait.TypeAWS, bait.TypeGCP, bait.TypeOpenAI, bait.TypeAnthropic,
+}
+
 // cmdPlant deploys canary credentials to this machine.
 func cmdPlant(args []string) {
-	label := flagValue(args, "--label")
+	label    := flagValue(args, "--label")
 	baitType := flagValue(args, "--type")
-	dryRun := hasFlag(args, "--dry-run")
+	dryRun   := hasFlag(args, "--dry-run")
+	plantAll := hasFlag(args, "--all")
 
-	if baitType == "" {
-		baitType = "aws"
+	// Default label to hostname
+	if label == "" {
+		if h, err := os.Hostname(); err == nil {
+			label = strings.ToLower(strings.ReplaceAll(h, ".", "-"))
+		} else {
+			label = "snare"
+		}
 	}
 
 	cfg, err := requireConfig()
@@ -259,7 +284,23 @@ func cmdPlant(args []string) {
 		fatal(err)
 	}
 
+	// --all plants all high-reliability types
+	if plantAll {
+		for _, bt := range highReliabilityTypes {
+			plantOne(bt, label, cfg, m, dryRun)
+		}
+		return
+	}
+
+	if baitType == "" {
+		baitType = "aws"
+	}
+
 	bt := bait.Type(baitType)
+	plantOne(bt, label, cfg, m, dryRun)
+}
+
+func plantOne(bt bait.Type, label string, cfg *config.Config, m *manifest.Manifest, dryRun bool) {
 	params, err := buildParams(bt, label, cfg)
 	if err != nil {
 		fatal(err)
@@ -350,7 +391,10 @@ func cmdStatus(args []string) {
 
 	fmt.Printf("Active canaries (%d):\n\n", len(active))
 	for _, c := range active {
-		age := time.Since(c.PlantedAt).Round(time.Hour)
+		age := time.Since(c.PlantedAt).Round(time.Minute)
+		if age < time.Minute {
+			age = time.Second
+		}
 		label := c.Label
 		if label == "" {
 			label = "-"
@@ -359,14 +403,117 @@ func cmdStatus(args []string) {
 		if c.LastSeen != nil {
 			lastSeen = c.LastSeen.Format("2006-01-02 15:04 UTC")
 		}
-		fmt.Printf("  %s\n", c.ID)
-		fmt.Printf("    type:      %s\n", c.Type)
-		fmt.Printf("    label:     %s\n", label)
-		fmt.Printf("    path:      %s\n", c.Path)
-		fmt.Printf("    planted:   %s ago\n", age)
-		fmt.Printf("    last seen: %s\n", lastSeen)
+		rel := reliability(c.Type)
+		relMark := "●" // high
+		if rel == "medium" {
+			relMark = "◐"
+		}
+		fmt.Printf("  %s  %s\n", relMark, c.ID)
+		fmt.Printf("    type:        %s (%s reliability)\n", c.Type, rel)
+		fmt.Printf("    label:       %s\n", label)
+		fmt.Printf("    path:        %s\n", c.Path)
+		fmt.Printf("    planted:     %s ago\n", age)
+		fmt.Printf("    last seen:   %s\n", lastSeen)
 		fmt.Println()
 	}
+	fmt.Println("  ● high reliability  ◐ medium reliability")
+	fmt.Println()
+	fmt.Println("  Run `snare events` to fetch recent alert history.")
+}
+
+// cmdEvents fetches recent alert events from snare.sh for active canaries.
+func cmdEvents(args []string) {
+	cfg, err := requireConfig()
+	if err != nil {
+		fatal(err)
+	}
+
+	m, err := manifest.Load()
+	if err != nil {
+		fatal(err)
+	}
+
+	active := m.Active()
+	if len(active) == 0 {
+		fmt.Println("No active canaries.")
+		return
+	}
+
+	// Build API base from callback base
+	apiBase := strings.TrimSuffix(cfg.CallbackBase, "/c")
+
+	fmt.Printf("Fetching events for %d canary(s)...\n\n", len(active))
+
+	found := 0
+	for _, c := range active {
+		url := apiBase + "/api/events/" + c.ID
+		resp, err := http.Get(url) //nolint:noctx
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  ✗ %s: %v\n", c.ID, err)
+			continue
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode == 404 {
+			continue // no events for this token
+		}
+
+		var result struct {
+			Events []struct {
+				Timestamp string `json:"timestamp"`
+				IP        string `json:"ip"`
+				City      string `json:"city"`
+				Country   string `json:"country"`
+				AsnOrg    string `json:"asnOrg"`
+				UserAgent string `json:"userAgent"`
+				Method    string `json:"method"`
+			} `json:"events"`
+		}
+
+		data, _ := io.ReadAll(resp.Body)
+		if err := json.Unmarshal(data, &result); err != nil {
+			continue
+		}
+
+		if len(result.Events) == 0 {
+			continue
+		}
+
+		found++
+		label := c.Label
+		if label == "" {
+			label = c.Type
+		}
+		fmt.Printf("  🪤 %s (%s)\n", c.ID, label)
+		for _, e := range result.Events {
+			loc := strings.Join(filterEmpty(e.City, e.Country), ", ")
+			if loc == "" {
+				loc = "unknown location"
+			}
+			ua := e.UserAgent
+			if len(ua) > 80 {
+				ua = ua[:80] + "..."
+			}
+			fmt.Printf("    %s  %s  %s  %s\n", e.Timestamp, e.IP, loc, e.Method)
+			fmt.Printf("    UA: %s\n", ua)
+			fmt.Println()
+		}
+	}
+
+	if found == 0 {
+		fmt.Println("  No events recorded yet. Canaries are active and waiting.")
+		fmt.Println("  Run `snare test` to verify your alert pipeline.")
+	}
+}
+
+func filterEmpty(ss ...string) []string {
+	out := make([]string, 0, len(ss))
+	for _, s := range ss {
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // cmdTest fires a synthetic callback to verify the alert pipeline.

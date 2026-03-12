@@ -52,6 +52,12 @@ export default {
       return handleRevoke(request, env);
     }
 
+    // Events lookup: GET /api/events/{token}
+    const eventsMatch = url.pathname.match(/^\/api\/events\/([a-zA-Z0-9_-]{8,80})$/);
+    if (eventsMatch && request.method === "GET") {
+      return handleEvents(eventsMatch[1], env);
+    }
+
     const match = url.pathname.match(/^\/c\/([a-zA-Z0-9_-]{8,80})$/);
     if (match) {
       return handleCallback(match[1], request, env, url);
@@ -60,6 +66,33 @@ export default {
     return new Response("not found", { status: 404 });
   },
 };
+
+// ─── Events lookup ───────────────────────────────────────────────────────────
+
+async function handleEvents(token, env) {
+  if (!env.SNARE_KV) return json({ error: "KV not configured" }, 500);
+
+  // List all event keys for this token
+  const prefix = `event:${token}:`;
+  const list = await env.SNARE_KV.list({ prefix, limit: 20 });
+
+  const events = [];
+  for (const key of list.keys) {
+    const raw = await env.SNARE_KV.get(key.name);
+    if (raw) {
+      try { events.push(JSON.parse(raw)); } catch { /* skip corrupt */ }
+    }
+  }
+
+  if (events.length === 0) {
+    return json({ token, events: [] }, 404);
+  }
+
+  // Sort newest first
+  events.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+
+  return json({ token, events: events.slice(0, 10) });
+}
 
 // ─── Registration ───────────────────────────────────────────────────────────
 
