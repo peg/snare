@@ -175,7 +175,7 @@ func cmdPlant(args []string) {
 
 		// Step 5: register webhook with snare.sh (best-effort — don't fail plant on network error)
 		if cfg.WebhookURL != "" && !dryRun {
-			if err := registerToken(cfg, params.TokenID); err != nil {
+			if err := registerToken(cfg, params.TokenID, string(bt), label); err != nil {
 				fmt.Fprintf(os.Stderr, "  ⚠️  webhook registration failed (alerts may not arrive): %v\n", err)
 			}
 		}
@@ -446,11 +446,13 @@ func requireConfig() (*config.Config, error) {
 }
 
 // registerToken registers a per-token webhook with snare.sh.
-func registerToken(cfg *config.Config, tokenID string) error {
+func registerToken(cfg *config.Config, tokenID, canaryType, label string) error {
 	body, _ := json.Marshal(map[string]string{
-		"token_id":    tokenID,
-		"webhook_url": cfg.WebhookURL,
-		"device_id":   cfg.DeviceID,
+		"token_id":     tokenID,
+		"webhook_url":  cfg.WebhookURL,
+		"device_id":    cfg.DeviceID,
+		"canary_type":  canaryType,
+		"label":        label,
 	})
 	resp, err := http.Post(cfg.RegisterURL(), "application/json", bytes.NewReader(body)) //nolint:noctx
 	if err != nil {
