@@ -2,6 +2,7 @@
 package cli
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -72,25 +73,170 @@ func Run(args []string, version string) {
 }
 
 // cmdInit sets up snare for this machine.
+// With --webhook: non-interactive. Without: guided setup.
 func cmdInit(args []string) {
 	force      := hasFlag(args, "--force")
 	webhookURL := flagValue(args, "--webhook")
 
-	cfg, err := config.Init("", webhookURL, force)
+	// Non-interactive path: --webhook provided (CI, scripting)
+	if webhookURL != "" {
+		cfg, err := config.Init("", webhookURL, force)
+		if err != nil {
+			fatal(err)
+		}
+		fmt.Printf("✓ snare initialized\n")
+		fmt.Printf("  Device ID: %s\n", cfg.DeviceID)
+		fmt.Printf("  Webhook:   configured\n")
+		fmt.Printf("\nRun `snare plant` to deploy your first canaries.\n")
+		return
+	}
+
+	// Interactive guided setup
+	guidedInit(force)
+}
+
+func guidedInit(force bool) {
+	scanner := bufio.NewScanner(os.Stdin)
+
+	fmt.Println()
+	fmt.Println("  Welcome to Snare — compromise detection for AI agents.")
+	fmt.Println("  Let's get you set up. This takes about 2 minutes.")
+	fmt.Println()
+
+	// Initialize config (generate device ID)
+	cfg, err := config.Init("", "", force)
 	if err != nil {
 		fatal(err)
 	}
 
-	fmt.Printf("✓ snare initialized\n")
-	fmt.Printf("  Device ID:    %s\n", cfg.DeviceID)
-	fmt.Printf("  Callback:     %s/<token>\n", cfg.CallbackBase)
-	if cfg.WebhookURL != "" {
-		fmt.Printf("  Webhook:      %s\n", cfg.WebhookURL)
-	} else {
-		fmt.Printf("\n  No webhook configured. Run with --webhook <url> to receive alerts:\n")
-		fmt.Printf("  snare init --webhook https://hooks.slack.com/... --force\n")
+	fmt.Printf("  Device ID: %s\n", cfg.DeviceID)
+	fmt.Println()
+
+	// Choose platform
+	fmt.Println("  Where would you like to receive alerts?")
+	fmt.Println()
+	fmt.Println("    1. Discord")
+	fmt.Println("    2. Slack")
+	fmt.Println("    3. Telegram")
+	fmt.Println("    4. Custom webhook")
+	fmt.Println()
+	fmt.Print("  Choice [1]: ")
+
+	choice := "1"
+	if scanner.Scan() {
+		if t := strings.TrimSpace(scanner.Text()); t != "" {
+			choice = t
+		}
 	}
-	fmt.Printf("\nRun `snare plant` to deploy your first canaries.\n")
+
+	// Show platform-specific instructions
+	fmt.Println()
+	switch choice {
+	case "1", "discord":
+		fmt.Println("  Discord setup:")
+		fmt.Println("    1. Open your Discord server → Server Settings → Integrations")
+		fmt.Println("    2. Click Webhooks → New Webhook")
+		fmt.Println("    3. Name it \"Snare\", pick a channel (e.g. #alerts)")
+		fmt.Println("    4. Click Copy Webhook URL")
+		fmt.Println()
+		fmt.Println("  The URL looks like: https://discord.com/api/webhooks/123.../abc...")
+	case "2", "slack":
+		fmt.Println("  Slack setup:")
+		fmt.Println("    1. Go to https://api.slack.com/apps → Create New App → From scratch")
+		fmt.Println("    2. Features → Incoming Webhooks → Activate Incoming Webhooks")
+		fmt.Println("    3. Add New Webhook to Workspace → pick a channel → Allow")
+		fmt.Println("    4. Copy the webhook URL")
+		fmt.Println()
+		fmt.Println("  The URL looks like: https://hooks.slack.com/services/T.../B.../xxx")
+	case "3", "telegram":
+		fmt.Println("  Telegram setup:")
+		fmt.Println("    1. Message @BotFather → /newbot → follow prompts → copy the token")
+		fmt.Println("    2. Add your bot to a group or send it a message")
+		fmt.Println("    3. Get your chat ID:")
+		fmt.Println("       curl https://api.telegram.org/bot<TOKEN>/getUpdates")
+		fmt.Println("    4. Your webhook URL is:")
+		fmt.Println("       https://api.telegram.org/bot<TOKEN>/sendMessage?chat_id=<CHAT_ID>")
+	case "4", "custom":
+		fmt.Println("  Custom webhook:")
+		fmt.Println("  Snare will POST a JSON payload to your URL when a canary fires.")
+		fmt.Println("  See ARCHITECTURE.md for the event schema.")
+	default:
+		fmt.Println("  Custom webhook:")
+	}
+
+	fmt.Println()
+	fmt.Print("  Paste your webhook URL: ")
+
+	var webhookURL string
+	for {
+		if scanner.Scan() {
+			webhookURL = strings.TrimSpace(scanner.Text())
+		}
+		if webhookURL == "" {
+			fmt.Print("  URL cannot be empty. Try again: ")
+			continue
+		}
+		if !strings.HasPrefix(webhookURL, "https://") {
+			fmt.Print("  URL must start with https://. Try again: ")
+			continue
+		}
+		break
+	}
+
+	// Save webhook URL
+	cfg.WebhookURL = webhookURL
+	if err := cfg.Save(); err != nil {
+		fatal(fmt.Errorf("saving config: %w", err))
+	}
+
+	// Fire test alert
+	fmt.Println()
+	fmt.Println("  Firing a test alert to verify your webhook...")
+
+	shortID := cfg.DeviceID
+	if len(shortID) > 8 {
+		shortID = shortID[len(shortID)-8:]
+	}
+	testToken := "snare-test-" + shortID
+	callbackURL := cfg.CallbackURL(testToken)
+
+	if err := httpGet(callbackURL); err != nil {
+		fmt.Fprintf(os.Stderr, "\n  ⚠️  Test alert failed: %v\n", err)
+		fmt.Fprintf(os.Stderr, "  Check your internet connection and try again.\n\n")
+	} else {
+		fmt.Print("  Did you receive the alert? [Y/n]: ")
+		if scanner.Scan() {
+			resp := strings.ToLower(strings.TrimSpace(scanner.Text()))
+			if resp == "n" || resp == "no" {
+				fmt.Println()
+				fmt.Println("  No alert received. A few things to check:")
+				switch choice {
+				case "1", "discord":
+					fmt.Println("    • Make sure the webhook URL is correct (copy it again from Discord)")
+					fmt.Println("    • Check that the bot has permission to post in that channel")
+				case "2", "slack":
+					fmt.Println("    • Make sure Incoming Webhooks is activated in your Slack app")
+					fmt.Println("    • Verify the webhook URL was copied fully")
+				case "3", "telegram":
+					fmt.Println("    • Make sure your bot has sent or received at least one message")
+					fmt.Println("    • Double-check your chat_id (use getUpdates to confirm)")
+				}
+				fmt.Println()
+				fmt.Println("  You can update your webhook later:")
+				fmt.Println("  snare init --webhook <new-url> --force")
+				fmt.Println()
+			}
+		}
+	}
+
+	fmt.Println()
+	fmt.Println("  ✓ snare is ready.")
+	fmt.Println()
+	fmt.Println("  Next steps:")
+	fmt.Println("    snare plant             plant AWS canary credentials")
+	fmt.Println("    snare plant --type gcp  plant GCP service account canary")
+	fmt.Println("    snare status            view active canaries")
+	fmt.Println()
 }
 
 // cmdPlant deploys canary credentials to this machine.
