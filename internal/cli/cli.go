@@ -704,8 +704,13 @@ func cmdStatus(args []string) {
 	eventCountMap := make(map[string]int)
 	if apiBase != "" {
 		for _, c := range active {
-			url := apiBase + "/api/events/" + c.ID
-			resp, err := http.Get(url) //nolint:noctx
+			evURL := apiBase + "/api/events/" + c.ID
+			req, _ := http.NewRequest("GET", evURL, nil)
+			if cfg.DeviceSecret != "" {
+				req.Header.Set("Authorization", "Bearer "+cfg.DeviceSecret)
+				req.Header.Set("X-Snare-Device-Id", cfg.DeviceID)
+			}
+			resp, err := http.DefaultClient.Do(req)
 			if err != nil || resp.StatusCode != 200 {
 				if resp != nil {
 					resp.Body.Close()
@@ -1249,16 +1254,29 @@ func requireConfig() (*config.Config, error) {
 	return cfg, nil
 }
 
+// authedPost sends a POST with Authorization: Bearer <device_secret>.
+func authedPost(url string, payload interface{}, cfg *config.Config) (*http.Response, error) {
+	body, _ := json.Marshal(payload)
+	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if cfg.DeviceSecret != "" {
+		req.Header.Set("Authorization", "Bearer "+cfg.DeviceSecret)
+	}
+	return http.DefaultClient.Do(req)
+}
+
 // registerToken registers a per-token webhook with snare.sh.
 func registerToken(cfg *config.Config, tokenID, canaryType, label string) error {
-	body, _ := json.Marshal(map[string]string{
-		"token_id":     tokenID,
-		"webhook_url":  cfg.WebhookURL,
-		"device_id":    cfg.DeviceID,
-		"canary_type":  canaryType,
-		"label":        label,
-	})
-	resp, err := http.Post(cfg.RegisterURL(), "application/json", bytes.NewReader(body)) //nolint:noctx
+	resp, err := authedPost(cfg.RegisterURL(), map[string]string{
+		"token_id":    tokenID,
+		"webhook_url": cfg.WebhookURL,
+		"device_id":   cfg.DeviceID,
+		"canary_type": canaryType,
+		"label":       label,
+	}, cfg)
 	if err != nil {
 		return err
 	}
@@ -1272,8 +1290,10 @@ func registerToken(cfg *config.Config, tokenID, canaryType, label string) error 
 
 // revokeToken deregisters a token webhook from snare.sh.
 func revokeToken(cfg *config.Config, tokenID string) error {
-	body, _ := json.Marshal(map[string]string{"token_id": tokenID})
-	resp, err := http.Post(cfg.RevokeURL(), "application/json", bytes.NewReader(body)) //nolint:noctx
+	resp, err := authedPost(cfg.RevokeURL(), map[string]string{
+		"token_id":  tokenID,
+		"device_id": cfg.DeviceID,
+	}, cfg)
 	if err != nil {
 		return err
 	}

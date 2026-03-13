@@ -10,6 +10,19 @@
  *   real credentials or sensitive data in their bodies, and we must
  *   never have access to that data, even transiently in memory.
  *
+ * AUTH MODEL:
+ *   /c/{token}          — NO AUTH (SDKs/tools must hit this unknowingly)
+ *   /api/register       — requires Authorization: Bearer <device_secret>
+ *   /api/revoke         — requires Authorization: Bearer <device_secret>
+ *   /api/events/{token} — requires Authorization: Bearer <device_secret>
+ *   /health             — NO AUTH
+ *
+ *   Device secret is generated client-side during `snare init` and sent
+ *   with every API call. The worker stores SHA-256(secret) keyed by
+ *   device_id on first registration. Subsequent calls validate against
+ *   the stored hash. Token IDs may leak (screenshots, accidental commits)
+ *   but the device secret stays in ~/.snare/config.json (0600).
+ *
  * Routes:
  *   GET/POST /c/{token}[/*]  — canary callback (metadata-only capture)
  *   POST     /api/register   — register webhook + metadata for a token
@@ -72,10 +85,11 @@ export default {
     // Events lookup: GET /api/events/{token}
     const eventsMatch = url.pathname.match(/^\/api\/events\/([a-zA-Z0-9_-]{8,80})$/);
     if (eventsMatch && request.method === "GET") {
-      return handleEvents(eventsMatch[1], env);
+      return handleEvents(eventsMatch[1], request, env);
     }
 
     // Canary callback: /c/{token} or /c/{token}/anything (for OpenAI /v1 suffix etc.)
+    // NO AUTH — SDKs/tools must hit this unknowingly
     const match = url.pathname.match(/^\/c\/([a-zA-Z0-9_-]{8,80})(\/.*)?$/);
     if (match) {
       // ═══════════════════════════════════════════════════════════════════
@@ -105,6 +119,58 @@ export default {
     return new Response("not found", { status: 404 });
   },
 };
+
+// ─── Auth ────────────────────────────────────────────────────────────────────
+
+// Hash a secret using SHA-256 (same as CLI side)
+async function hashSecret(secret) {
+  const data = new TextEncoder().encode(secret);
+  const hash = await crypto.subtle.digest("SHA-256", data);
+  return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, "0")).join("");
+}
+
+// Validate Authorization: Bearer <device_secret> against stored hash.
+// Returns { ok, deviceId, error } where deviceId is from the request body or header.
+async function validateAuth(request, env, deviceId) {
+  const authHeader = request.headers.get("authorization") || "";
+  const match = authHeader.match(/^Bearer\s+(.+)$/i);
+  if (!match) {
+    return { ok: false, error: "missing Authorization header" };
+  }
+  const secret = match[1];
+
+  if (!deviceId) {
+    return { ok: false, error: "missing device_id" };
+  }
+
+  if (!env.SNARE_KV) {
+    return { ok: false, error: "KV not configured" };
+  }
+
+  const secretHash = await hashSecret(secret);
+
+  // Check if device is registered
+  const storedRaw = await env.SNARE_KV.get(`device:${deviceId}`);
+  if (!storedRaw) {
+    // First time — register this device
+    await env.SNARE_KV.put(`device:${deviceId}`, JSON.stringify({
+      secret_hash: secretHash,
+      registered_at: new Date().toISOString(),
+    }));
+    return { ok: true, deviceId, isNew: true };
+  }
+
+  // Validate secret against stored hash
+  try {
+    const stored = JSON.parse(storedRaw);
+    if (stored.secret_hash !== secretHash) {
+      return { ok: false, error: "invalid device secret" };
+    }
+    return { ok: true, deviceId };
+  } catch {
+    return { ok: false, error: "corrupt device record" };
+  }
+}
 
 // ─── Metadata extraction (HEADERS ONLY — never touches body) ────────────────
 
@@ -198,8 +264,40 @@ async function processAlert(token, metadata, env) {
 
 // ─── Events lookup ───────────────────────────────────────────────────────────
 
-async function handleEvents(token, env) {
+async function handleEvents(token, request, env) {
   if (!env.SNARE_KV) return json({ error: "KV not configured" }, 500);
+
+  // Auth: require device secret
+  // Look up which device owns this token
+  const regRaw = await env.SNARE_KV.get(`webhook:${token}`);
+  let deviceId = null;
+  if (regRaw) {
+    try {
+      const reg = JSON.parse(regRaw);
+      deviceId = reg.device_id;
+    } catch { /* fall through */ }
+  }
+
+  // If token has a registered device, require auth from that device
+  // If token is unregistered (global fallback), require any valid device auth
+  if (deviceId) {
+    const auth = await validateAuth(request, env, deviceId);
+    if (!auth.ok) {
+      return json({ error: auth.error }, 401);
+    }
+  } else {
+    // For unregistered tokens, check if request has any valid device auth
+    const authHeader = request.headers.get("authorization") || "";
+    const headerDeviceId = request.headers.get("x-snare-device-id") || "";
+    if (authHeader && headerDeviceId) {
+      const auth = await validateAuth(request, env, headerDeviceId);
+      if (!auth.ok) {
+        return json({ error: auth.error }, 401);
+      }
+    }
+    // If no auth provided for unregistered token, allow read
+    // (backward compat for snare status on machines using global webhook)
+  }
 
   const prefix = `event:${token}:`;
   const list = await env.SNARE_KV.list({ prefix, limit: 20 });
@@ -235,8 +333,17 @@ async function handleRegister(request, env) {
   if (!webhook_url?.startsWith("https://")) {
     return json({ error: "webhook_url must be https://" }, 400);
   }
+  if (!device_id) {
+    return json({ error: "missing device_id" }, 400);
+  }
   if (!env.SNARE_KV) {
     return json({ error: "KV not configured" }, 500);
+  }
+
+  // Validate device auth
+  const auth = await validateAuth(request, env, device_id);
+  if (!auth.ok) {
+    return json({ error: auth.error }, 401);
   }
 
   await env.SNARE_KV.put(`webhook:${token_id}`, JSON.stringify({
@@ -245,7 +352,7 @@ async function handleRegister(request, env) {
     canary_type:   canary_type || null,
     label:         label       || null,
     registered_at: new Date().toISOString(),
-  }), { expirationTtl: 60 * 60 * 24 * 90 });
+  }), { expirationTtl: 60 * 60 * 24 * 365 }); // 1 year TTL (was 90 days)
 
   return json({ status: "registered", token_id });
 }
@@ -256,7 +363,25 @@ async function handleRevoke(request, env) {
   catch { return json({ error: "invalid JSON" }, 400); }
 
   if (!body.token_id) return json({ error: "missing token_id" }, 400);
+  if (!body.device_id) return json({ error: "missing device_id" }, 400);
   if (!env.SNARE_KV)  return json({ error: "KV not configured" }, 500);
+
+  // Validate: only the device that registered can revoke
+  const regRaw = await env.SNARE_KV.get(`webhook:${body.token_id}`);
+  if (regRaw) {
+    try {
+      const reg = JSON.parse(regRaw);
+      if (reg.device_id && reg.device_id !== body.device_id) {
+        return json({ error: "device_id mismatch — only the registering device can revoke" }, 403);
+      }
+    } catch { /* fall through */ }
+  }
+
+  // Validate device auth
+  const auth = await validateAuth(request, env, body.device_id);
+  if (!auth.ok) {
+    return json({ error: auth.error }, 401);
+  }
 
   await env.SNARE_KV.delete(`webhook:${body.token_id}`);
   return json({ status: "revoked", token_id: body.token_id });
@@ -275,11 +400,11 @@ async function resolveWebhooks(token, env) {
       try {
         const reg = JSON.parse(raw);
         meta = { canaryType: reg.canary_type, label: reg.label, deviceId: reg.device_id };
-        // Only use per-token webhook if it's a real URL (not a placeholder)
-        if (reg.webhook_url && reg.webhook_url.includes("discord.com/") ||
-            reg.webhook_url?.includes("hooks.slack.com") ||
-            reg.webhook_url?.includes("api.telegram.org") ||
-            (reg.webhook_url?.startsWith("https://") && !reg.webhook_url?.includes("use-global"))) {
+        // Use per-token webhook if it's a valid https URL
+        // (fixed: proper parentheses for operator precedence)
+        if (reg.webhook_url &&
+            reg.webhook_url.startsWith("https://") &&
+            !reg.webhook_url.includes("use-global")) {
           perTokenWebhook = reg.webhook_url;
         }
       } catch { /* fall through */ }

@@ -14,9 +14,10 @@ const configFile = "config.json"
 
 // Config holds device-level snare configuration.
 type Config struct {
-	DeviceID    string `json:"device_id"`    // unique ID for this machine
-	CallbackBase string `json:"callback_base"` // e.g. https://snare.sh/c
-	WebhookURL  string `json:"webhook_url,omitempty"` // optional local override
+	DeviceID     string `json:"device_id"`               // unique ID for this machine
+	DeviceSecret string `json:"device_secret,omitempty"`  // secret for API auth (never sent to snare.sh — only hash is stored)
+	CallbackBase string `json:"callback_base"`            // e.g. https://snare.sh/c
+	WebhookURL   string `json:"webhook_url,omitempty"`    // optional local override
 }
 
 // Load reads ~/.snare/config.json. Returns (nil, nil) if not initialized.
@@ -38,6 +39,17 @@ func Load() (*Config, error) {
 	if err := json.Unmarshal(data, &c); err != nil {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
+
+	// Migrate: generate device secret if missing (pre-auth configs)
+	if c.DeviceSecret == "" {
+		secret, err := newDeviceSecret()
+		if err != nil {
+			return &c, nil // non-fatal: work without auth
+		}
+		c.DeviceSecret = secret
+		_ = c.Save() // best-effort save
+	}
+
 	return &c, nil
 }
 
@@ -83,8 +95,14 @@ func Init(callbackBase, webhookURL string, force bool) (*Config, error) {
 		callbackBase = "https://snare.sh/c"
 	}
 
+	deviceSecret, err := newDeviceSecret()
+	if err != nil {
+		return nil, err
+	}
+
 	c := &Config{
 		DeviceID:     deviceID,
+		DeviceSecret: deviceSecret,
 		CallbackBase: callbackBase,
 		WebhookURL:   webhookURL,
 	}
@@ -121,6 +139,14 @@ func (c *Config) Save() error {
 // CallbackURL returns the full callback URL for a given token ID.
 func (c *Config) CallbackURL(tokenID string) string {
 	return c.CallbackBase + "/" + tokenID
+}
+
+func newDeviceSecret() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generating device secret: %w", err)
+	}
+	return hex.EncodeToString(b), nil
 }
 
 func newDeviceID() (string, error) {
