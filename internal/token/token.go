@@ -229,6 +229,53 @@ func encodeBase64Lines(data []byte, lineLen int) string {
 	return result.String()
 }
 
+// NewK8sToken generates a realistic-looking Kubernetes service account token.
+// Format: eyJhbGciOiJ... (JWT-like, base64url header.payload.signature)
+// Not a valid JWT — just looks like one to pass visual inspection.
+func NewK8sToken() (string, error) {
+	// JWT header (always the same for k8s SA tokens)
+	header := "eyJhbGciOiJSUzI1NiIsImtpZCI6IkNnY3cifQ"
+	// Random payload (64 bytes → ~86 base64url chars)
+	payload := make([]byte, 64)
+	if _, err := rand.Read(payload); err != nil {
+		return "", err
+	}
+	// Random signature (128 bytes → ~172 base64url chars)
+	sig := make([]byte, 128)
+	if _, err := rand.Read(sig); err != nil {
+		return "", err
+	}
+	return header + "." + base64url(payload) + "." + base64url(sig), nil
+}
+
+// NewNPMToken generates a realistic npm auth token.
+// Format: npm_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx (36 hex chars)
+func NewNPMToken() (string, error) {
+	b := make([]byte, 18)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return "npm_" + hex.EncodeToString(b), nil
+}
+
+func base64url(data []byte) string {
+	const enc = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+	var result strings.Builder
+	for i := 0; i < len(data)-2; i += 3 {
+		val := uint(data[i])<<16 | uint(data[i+1])<<8 | uint(data[i+2])
+		result.WriteByte(enc[val>>18&0x3F])
+		result.WriteByte(enc[val>>12&0x3F])
+		result.WriteByte(enc[val>>6&0x3F])
+		result.WriteByte(enc[val>>0&0x3F])
+	}
+	return result.String()
+}
+
+// MustRandInt returns a random int in [0, max). Exported for use by CLI.
+func MustRandInt(max int) int {
+	return mustRandInt(max)
+}
+
 func mustRandInt(max int) int {
 	n, err := rand.Int(rand.Reader, big.NewInt(int64(max)))
 	if err != nil {

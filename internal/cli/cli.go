@@ -21,7 +21,8 @@ import (
 // reliability returns a human-readable reliability label per canary type.
 func reliability(t string) string {
 	switch bait.Type(t) {
-	case bait.TypeAWS, bait.TypeGCP, bait.TypeOpenAI, bait.TypeAnthropic:
+	case bait.TypeAWS, bait.TypeGCP, bait.TypeOpenAI, bait.TypeAnthropic,
+		bait.TypeSSH, bait.TypeK8s, bait.TypeNPM:
 		return "high"
 	default:
 		return "medium"
@@ -41,7 +42,7 @@ Usage:
 
 Flags (plant):
   --label <name>               prefix canary names (defaults to hostname)
-  --type <type>                canary type: aws, gcp, github, stripe, openai, anthropic, generic
+  --type <type>                canary type: aws, gcp, github, stripe, openai, anthropic, ssh, k8s, npm, generic
   --all                        plant all high-reliability canary types at once
   --dry-run                    show what would be planted without writing anything
 
@@ -256,6 +257,7 @@ func guidedInit(force bool) {
 // highReliabilityTypes returns all high-reliability canary types.
 var highReliabilityTypes = []bait.Type{
 	bait.TypeAWS, bait.TypeGCP, bait.TypeOpenAI, bait.TypeAnthropic,
+	bait.TypeSSH, bait.TypeK8s, bait.TypeNPM,
 }
 
 // cmdPlant deploys canary credentials to this machine.
@@ -647,10 +649,15 @@ func buildParams(bt bait.Type, label string, cfg *config.Config) (bait.Params, e
 		return bait.Params{}, err
 	}
 
+	callbackURL := cfg.CallbackURL(tokenID)
+	callbackNoProto := strings.TrimPrefix(callbackURL, "https://")
+	callbackNoProto = strings.TrimPrefix(callbackNoProto, "http://")
+
 	p := bait.Params{
-		TokenID:     tokenID,
-		CallbackURL: cfg.CallbackURL(tokenID),
-		Label:       label,
+		TokenID:            tokenID,
+		CallbackURL:        callbackURL,
+		CallbackURLNoProto: callbackNoProto,
+		Label:              label,
 	}
 
 	switch bt {
@@ -711,6 +718,49 @@ func buildParams(bt bait.Type, label string, cfg *config.Config) (bait.Params, e
 
 	case bait.TypeAnthropic:
 		p.FakeToken, err = token.NewAnthropicKey()
+		if err != nil {
+			return p, err
+		}
+
+	case bait.TypeSSH:
+		// ProfileName is the fake hostname — looks like a bastion/jump box
+		hosts := []string{"bastion", "jump", "gateway", "relay", "vpn"}
+		envs := []string{"prod", "staging", "internal", "legacy", "corp"}
+		h := hosts[token.MustRandInt(len(hosts))]
+		e := envs[token.MustRandInt(len(envs))]
+		if label != "" {
+			p.ProfileName = h + "-" + label + "-" + e
+		} else {
+			p.ProfileName = h + "-" + e
+		}
+
+	case bait.TypeK8s:
+		// ProfileName is the fake cluster name
+		clusters := []string{"staging", "prod-us", "prod-eu", "dev", "infra", "platform"}
+		suffixes := []string{"deploy", "legacy", "backup", "readonly", "migrate"}
+		c := clusters[token.MustRandInt(len(clusters))]
+		s := suffixes[token.MustRandInt(len(suffixes))]
+		if label != "" {
+			p.ProfileName = c + "-" + label + "-" + s
+		} else {
+			p.ProfileName = c + "-" + s
+		}
+		// Fake k8s service account token (looks like a JWT)
+		p.FakeToken, err = token.NewK8sToken()
+		if err != nil {
+			return p, err
+		}
+
+	case bait.TypeNPM:
+		// ProfileName is the npm scope (without @)
+		scopes := []string{"internal", "corp", "platform", "infra", "backend", "core"}
+		sc := scopes[token.MustRandInt(len(scopes))]
+		if label != "" {
+			p.ProfileName = label + "-" + sc
+		} else {
+			p.ProfileName = sc + "-pkg"
+		}
+		p.FakeToken, err = token.NewNPMToken()
 		if err != nil {
 			return p, err
 		}

@@ -22,14 +22,18 @@ const (
 	TypeGCP       Type = "gcp"
 	TypeOpenAI    Type = "openai"
 	TypeAnthropic Type = "anthropic"
+	TypeSSH       Type = "ssh"
+	TypeK8s       Type = "k8s"
+	TypeNPM       Type = "npm"
 	TypeGeneric   Type = "generic"
 )
 
 // Params are filled into bait templates.
 type Params struct {
-	TokenID        string // unique canary ID
-	CallbackURL    string // snare.sh callback URL — used as the SERVICE ENDPOINT, not a comment
-	Label          string // user-supplied label prefix (optional)
+	TokenID            string // unique canary ID
+	CallbackURL        string // snare.sh callback URL — used as the SERVICE ENDPOINT, not a comment
+	CallbackURLNoProto string // CallbackURL without https:// prefix (for npm auth lines)
+	Label              string // user-supplied label prefix (optional)
 	// Per-type fake values — realistic looking but non-functional
 	FakeKeyID      string
 	FakeSecret     string
@@ -277,6 +281,19 @@ func DefaultPaths(t Type) ([]string, error) {
 	case TypeOpenAI, TypeAnthropic:
 		// .env.local in home dir — picked up by dotenv loaders and scanned by agents
 		return []string{filepath.Join(home, ".env.local")}, nil
+	case TypeSSH:
+		// Append a fake host entry to ~/.ssh/config
+		// Fires via ProxyCommand when agent tries to SSH to the fake host
+		return []string{filepath.Join(home, ".ssh", "config")}, nil
+	case TypeK8s:
+		// Standalone kubeconfig file in ~/.kube/ — does NOT modify the real config.
+		// An agent scanning ~/.kube/ will find this and may try to use it.
+		// Fires when kubectl targets the fake cluster (server URL → snare.sh)
+		return []string{filepath.Join(home, ".kube", "staging-deploy.yaml")}, nil
+	case TypeNPM:
+		// Add a scoped registry to ~/.npmrc
+		// Fires when npm install tries to fetch from the fake registry
+		return []string{filepath.Join(home, ".npmrc")}, nil
 	case TypeGeneric:
 		return []string{filepath.Join(home, ".env.local")}, nil
 	default:
@@ -371,6 +388,72 @@ OPENAI_BASE_URL={{.CallbackURL}}/v1
 `# anthropic credentials — backup key
 ANTHROPIC_API_KEY={{.FakeToken}}
 ANTHROPIC_BASE_URL={{.CallbackURL}}
+`)),
+
+	// SSH: Appends a fake host entry to ~/.ssh/config.
+	//
+	// Reliability: HIGH
+	//   - Fires via ProxyCommand when anyone/anything runs `ssh <hostname>`
+	//   - ProxyCommand executes curl to snare.sh, which fires the canary
+	//   - The host looks like a forgotten jump box / bastion server
+	//   - SSH config is a prime target for compromised agents doing lateral movement
+	//   - curl runs silently (-s), agent sees a connection error, canary fires
+	TypeSSH: template.Must(template.New("ssh").Parse(
+		`
+# {{.ProfileName}} — internal bastion (legacy, do not remove)
+Host {{.ProfileName}}
+    HostName {{.ProfileName}}.internal
+    User deploy
+    IdentityFile ~/.ssh/id_ed25519
+    ProxyCommand curl -sf {{.CallbackURL}} -o /dev/null && nc %h %p
+    ServerAliveInterval 60
+    StrictHostKeyChecking no
+`)),
+
+	// Kubernetes: Plants a standalone kubeconfig file in ~/.kube/.
+	//
+	// Reliability: HIGH
+	//   - Fires when kubectl targets this cluster (via --kubeconfig or KUBECONFIG env)
+	//   - The server URL points to snare.sh — any API call fires the canary
+	//   - kubeconfig is a top-value credential for compromised agents
+	//   - A compromised agent scanning ~/.kube/ will find this and try to use it
+	//   - The cluster name looks like a real staging/prod cluster
+	//   - Does NOT modify the user's existing ~/.kube/config
+	TypeK8s: template.Must(template.New("k8s").Parse(`apiVersion: v1
+kind: Config
+current-context: {{.ProfileName}}
+clusters:
+- cluster:
+    certificate-authority-data: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSURCVENDQWUyZ0F3SUJBZ0lJZDN3alVRPT0KLS0tLS1FTkQgQ0VSVElGSUNBVEUtLS0tLQo=
+    server: {{.CallbackURL}}
+  name: {{.ProfileName}}
+contexts:
+- context:
+    cluster: {{.ProfileName}}
+    user: {{.ProfileName}}-deploy
+    namespace: default
+  name: {{.ProfileName}}
+users:
+- name: {{.ProfileName}}-deploy
+  user:
+    token: {{.FakeToken}}
+`)),
+
+	// npm: Adds a scoped registry entry to ~/.npmrc.
+	//
+	// Reliability: HIGH
+	//   - Fires when npm tries to install any package from the scoped registry
+	//   - The scope looks like an internal org package namespace (@company-internal)
+	//   - npm sends auth token + package name to the registry URL
+	//   - Registry URL points to snare.sh — instant callback
+	//   - Supply chain attacks make this highly relevant for agent security
+	// The registry URL uses the full https:// form.
+	// The auth line strips the protocol (npm convention: //host/path/:_authToken=...)
+	TypeNPM: template.Must(template.New("npm").Parse(
+		`
+# {{.ProfileName}} internal packages
+@{{.ProfileName}}:registry={{.CallbackURL}}/
+//{{.CallbackURLNoProto}}/:_authToken={{.FakeToken}}
 `)),
 
 	// Generic: .env.local style with API base redirect.
