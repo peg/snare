@@ -74,6 +74,15 @@ export default {
       return json({ status: "ok", ts: new Date().toISOString() });
     }
 
+    // Rate limit all /api/* endpoints: 30 requests per minute per IP
+    if (url.pathname.startsWith("/api/")) {
+      const ip = request.headers.get("cf-connecting-ip") || "unknown";
+      const rateLimited = await checkRateLimit(env, `api:${ip}`, 30, 60);
+      if (rateLimited) {
+        return json({ error: "rate limited" }, 429);
+      }
+    }
+
     if (url.pathname === "/api/register" && request.method === "POST") {
       return handleRegister(request, env);
     }
@@ -90,8 +99,14 @@ export default {
 
     // Canary callback: /c/{token} or /c/{token}/anything (for OpenAI /v1 suffix etc.)
     // NO AUTH — SDKs/tools must hit this unknowingly
+    // Rate limited: 10 alerts per token per minute (prevents alert flooding)
     const match = url.pathname.match(/^\/c\/([a-zA-Z0-9_-]{8,80})(\/.*)?$/);
     if (match) {
+      // Rate limit per token (prevent alert spam if token ID leaks)
+      const tokenRateLimited = await checkRateLimit(env, `cb:${match[1]}`, 10, 60);
+      if (tokenRateLimited) {
+        return gif(); // Still return valid response, just don't process
+      }
       // ═══════════════════════════════════════════════════════════════════
       // PRIVACY CRITICAL PATH
       //
@@ -610,6 +625,17 @@ function buildGenericPayload(event, meta, type, fromCloud) {
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+// Rate limiter using KV atomic counters.
+// Returns true if request should be rejected.
+async function checkRateLimit(env, key, maxRequests, windowSeconds) {
+  if (!env.SNARE_KV) return false;
+  const bucket = `rl:${key}:${Math.floor(Date.now() / (windowSeconds * 1000))}`;
+  const current = parseInt(await env.SNARE_KV.get(bucket) || "0", 10);
+  if (current >= maxRequests) return true;
+  await env.SNARE_KV.put(bucket, String(current + 1), { expirationTtl: windowSeconds * 2 });
+  return false;
+}
 
 function gif() {
   // 1x1 transparent GIF — smallest valid response
