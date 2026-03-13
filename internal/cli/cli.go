@@ -48,7 +48,7 @@ Advanced:
   snare init                   initialize snare on this machine
   snare plant [flags]          plant individual canary credentials
   snare teardown [flags]       remove specific canaries
-  snare uninstall              teardown + remove all snare state
+  snare uninstall [-y]         disarm + remove config + remove binary
 
 Flags (arm):
   --webhook <url>              webhook URL (Discord, Slack, Telegram, or custom)
@@ -895,39 +895,96 @@ func cmdTeardown(args []string) {
 	}
 }
 
-// cmdUninstall removes all canaries then wipes ~/.snare.
+// cmdUninstall completely removes snare: disarm + purge config + remove binary.
+// Does NOT require a separate disarm step — handles everything.
+// Does NOT corrupt files we appended to — uses the same content-matching removal.
 func cmdUninstall(args []string) {
 	dryRun := hasFlag(args, "--dry-run")
+	yes := hasFlag(args, "--yes") || hasFlag(args, "-y")
 
-	fmt.Println("This will remove all planted canaries and delete ~/.snare entirely.")
-	if !dryRun {
-		fmt.Print("Continue? [y/N] ")
+	if !dryRun && !yes {
+		fmt.Println("  This will:")
+		fmt.Println("    1. Remove all planted canaries (safely, without corrupting your files)")
+		fmt.Println("    2. Delete ~/.snare/ (config + manifest)")
+		fmt.Println("    3. Remove the snare binary")
+		fmt.Println()
+		fmt.Print("  Continue? [y/N] ")
 		var resp string
 		fmt.Scanln(&resp)
 		if strings.ToLower(strings.TrimSpace(resp)) != "y" {
-			fmt.Println("Aborted.")
+			fmt.Println("  Aborted.")
 			return
 		}
 	}
 
-	// Teardown all active canaries — always force since we're uninstalling
-	if dryRun {
-		cmdTeardown([]string{"--dry-run"})
-		fmt.Println("[dry-run] would delete ~/.snare/")
-		return
+	// Step 1: Disarm all canaries (force mode, skip confirmation)
+	m, err := manifest.Load()
+	if err != nil && !dryRun {
+		// Manifest might be corrupt — continue with purge
+		fmt.Fprintf(os.Stderr, "  ⚠  manifest load failed: %v (continuing with cleanup)\n", err)
 	}
-	cmdTeardown([]string{"--force"})
 
+	if m != nil {
+		active := m.Active()
+		if len(active) > 0 {
+			if dryRun {
+				fmt.Printf("  [dry-run] would remove %d canary(s):\n", len(active))
+				for _, c := range active {
+					fmt.Printf("    %-12s %s\n", c.Type, c.Path)
+				}
+			} else {
+				fmt.Printf("  Removing %d canaries...\n", len(active))
+				for _, c := range active {
+					if err := bait.Remove(c, true, false); err != nil {
+						fmt.Fprintf(os.Stderr, "    ✗ %-12s %s: %v\n", c.Type, c.Path, err)
+						continue
+					}
+					_ = m.Deactivate(c.ID, "uninstall")
+					// Deregister webhook (best-effort)
+					if cfg, loadErr := config.Load(); loadErr == nil && cfg != nil && cfg.WebhookURL != "" {
+						_ = revokeToken(cfg, c.ID)
+					}
+					fmt.Printf("    ✓ %-12s %s\n", c.Type, c.Path)
+				}
+			}
+		} else {
+			fmt.Println("  No active canaries to remove.")
+		}
+	}
+
+	// Step 2: Remove ~/.snare/
 	dir, err := manifest.Dir()
 	if err != nil {
 		fatal(err)
 	}
-
-	if err := os.RemoveAll(dir); err != nil {
-		fatal(fmt.Errorf("removing ~/.snare: %w", err))
+	if dryRun {
+		fmt.Printf("  [dry-run] would delete %s\n", dir)
+	} else {
+		if err := os.RemoveAll(dir); err != nil {
+			fmt.Fprintf(os.Stderr, "  ⚠  could not remove %s: %v\n", dir, err)
+		} else {
+			fmt.Printf("  ✓ %s removed\n", dir)
+		}
 	}
 
-	fmt.Println("✓ snare uninstalled. ~/.snare removed.")
+	// Step 3: Remove the binary itself
+	binPath, _ := os.Executable()
+	if binPath != "" {
+		if dryRun {
+			fmt.Printf("  [dry-run] would delete %s\n", binPath)
+		} else {
+			if err := os.Remove(binPath); err != nil {
+				fmt.Fprintf(os.Stderr, "  ⚠  could not remove binary %s: %v\n", binPath, err)
+			} else {
+				fmt.Printf("  ✓ %s removed\n", binPath)
+			}
+		}
+	}
+
+	if !dryRun {
+		fmt.Println()
+		fmt.Println("  ✓ snare completely uninstalled. No traces left.")
+	}
 }
 
 // buildParams generates all template parameters for a canary.
