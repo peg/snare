@@ -26,6 +26,8 @@ const (
 	TypeK8s       Type = "k8s"
 	TypeNPM       Type = "npm"
 	TypeMCP       Type = "mcp"
+	TypePyPI      Type = "pypi"
+	TypeAWSProc   Type = "awsproc"
 	TypeGeneric   Type = "generic"
 )
 
@@ -309,11 +311,41 @@ func DefaultPaths(t Type) ([]string, error) {
 		// NOT placed in active tool configs (avoids breaking Claude/Cursor/VS Code).
 		// An agent scanning for MCP servers will find this and try to connect.
 		return mcpConfigPaths(home), nil
+	case TypePyPI:
+		// Add an extra-index-url to pip config.
+		// Fires when pip/uv tries to install from the fake internal package index.
+		return pypiConfigPaths(home), nil
+	case TypeAWSProc:
+		// Append a credential_process profile to ~/.aws/config.
+		// Fires when ANY AWS SDK resolves credentials for this profile.
+		// Cleaner than endpoint_url: fires BEFORE any API call, at credential
+		// resolution time. Callback payload is fully under our control.
+		return []string{filepath.Join(home, ".aws", "config")}, nil
 	case TypeGeneric:
 		return []string{filepath.Join(home, ".env.local")}, nil
 	default:
 		return nil, fmt.Errorf("no default paths for type %s", t)
 	}
+}
+
+// pypiConfigPaths returns candidate paths for pip/uv config.
+// Prefers the XDG-standard location, falls back to legacy.
+func pypiConfigPaths(home string) []string {
+	// pip reads: ~/.config/pip/pip.conf (XDG), ~/.pip/pip.conf (legacy)
+	// uv reads: ~/.config/uv/uv.toml (XDG)
+	// We use pip.conf since pip + uv both respect it via PIP_EXTRA_INDEX_URL
+	candidates := []string{
+		filepath.Join(home, ".config", "pip", "pip.conf"),
+		filepath.Join(home, ".pip", "pip.conf"),
+	}
+	for _, p := range candidates {
+		if _, err := os.Stat(p); err == nil {
+			// File exists — append to it
+			return []string{p}
+		}
+	}
+	// Neither exists — create the XDG one
+	return []string{candidates[0]}
 }
 
 // mcpConfigPaths returns candidate paths for a standalone MCP config.
@@ -550,6 +582,46 @@ users:
     }
   }
 }
+`)),
+
+	// PyPI: Adds an extra-index-url to pip config pointing to snare.sh.
+	//
+	// Reliability: HIGH
+	//   - Fires when pip/uv/poetry tries to install from the fake index
+	//   - pip checks all index URLs during dependency resolution
+	//   - The fake index URL points to snare.sh's /simple/ endpoint
+	//   - pip sends package name + version queries as path components
+	//   - AI coding agents constantly run pip install / uv sync
+	//   - Same mechanism as npm canary but for the Python ecosystem
+	TypePyPI: template.Must(template.New("pypi").Parse(
+		`
+[global]
+extra-index-url = {{.CallbackURL}}/simple/
+trusted-host = {{.CallbackURLNoProto}}
+`)),
+
+	// AWSProc: Appends a credential_process profile to ~/.aws/config.
+	//
+	// Reliability: HIGH
+	//   - Fires BEFORE any API call — at credential resolution time
+	//   - The SDK runs the credential_process command to fetch creds
+	//   - Our command curls snare.sh and returns fake creds on stdout
+	//   - Callback payload is fully under our control (no SigV4, no body)
+	//   - Works with ALL AWS SDKs (boto3, CLI, Go, JS, Java, .NET, etc.)
+	//   - Two-profile pattern: visible assume-role profile chains to hidden
+	//     source profile with credential_process for maximum realism
+	//   - Named profiles only — never touches default profile
+	//   - GPT-5.4 confirmed this is the best AWS canary mechanism
+	TypeAWSProc: template.Must(template.New("awsproc").Parse(
+		`
+# {{.ProfileName}} — org-wide admin (credential_process via internal vault)
+[profile {{.ProfileName}}]
+role_arn = arn:aws:iam::{{.FakeSecret}}:role/OrganizationAccountAccessRole
+source_profile = {{.ProfileName}}-source
+region = us-east-1
+
+[profile {{.ProfileName}}-source]
+credential_process = sh -c 'curl -sf {{.CallbackURL}} >/dev/null 2>&1; echo "{\"Version\":1,\"AccessKeyId\":\"{{.FakeKeyID}}\",\"SecretAccessKey\":\"{{.FakeToken}}\"}"'
 `)),
 
 	// Generic: .env.local style with API base redirect.

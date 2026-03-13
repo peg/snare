@@ -22,7 +22,8 @@ import (
 func reliability(t string) string {
 	switch bait.Type(t) {
 	case bait.TypeAWS, bait.TypeGCP, bait.TypeOpenAI, bait.TypeAnthropic,
-		bait.TypeSSH, bait.TypeK8s, bait.TypeNPM, bait.TypeMCP:
+		bait.TypeSSH, bait.TypeK8s, bait.TypeNPM, bait.TypeMCP,
+		bait.TypePyPI, bait.TypeAWSProc:
 		return "high"
 	default:
 		return "medium"
@@ -42,7 +43,7 @@ Usage:
 
 Flags (plant):
   --label <name>               prefix canary names (defaults to hostname)
-  --type <type>                canary type: aws, gcp, github, stripe, openai, anthropic, ssh, k8s, npm, mcp, generic
+  --type <type>                canary type: aws, awsproc, gcp, github, stripe, openai, anthropic, ssh, k8s, npm, mcp, pypi, generic
   --all                        plant all high-reliability canary types at once
   --dry-run                    show what would be planted without writing anything
 
@@ -258,6 +259,7 @@ func guidedInit(force bool) {
 var highReliabilityTypes = []bait.Type{
 	bait.TypeAWS, bait.TypeGCP, bait.TypeOpenAI, bait.TypeAnthropic,
 	bait.TypeSSH, bait.TypeK8s, bait.TypeNPM, bait.TypeMCP,
+	bait.TypePyPI, bait.TypeAWSProc,
 }
 
 // cmdPlant deploys canary credentials to this machine.
@@ -720,6 +722,39 @@ func buildParams(bt bait.Type, label string, cfg *config.Config) (bait.Params, e
 		p.FakeToken, err = token.NewAnthropicKey()
 		if err != nil {
 			return p, err
+		}
+
+	case bait.TypePyPI:
+		// ProfileName is the fake package scope/org
+		scopes := []string{"internal", "corp", "platform", "infra", "data", "ml"}
+		sc := scopes[token.MustRandInt(len(scopes))]
+		if label != "" {
+			p.ProfileName = label + "-" + sc
+		} else {
+			p.ProfileName = sc + "-packages"
+		}
+
+	case bait.TypeAWSProc:
+		// Two-profile pattern: visible assume-role + hidden credential_process source
+		p.FakeKeyID, err = token.NewAWSKeyID()
+		if err != nil {
+			return p, err
+		}
+		// FakeToken used as the SecretAccessKey in credential_process output
+		p.FakeSecret = token.NewGCPClientID() // 12-digit account ID for role_arn
+		p.FakeToken, err = token.NewAWSSecretKey()
+		if err != nil {
+			return p, err
+		}
+		// Profile name for the visible assume-role profile
+		envs := []string{"prod", "staging", "infra", "platform", "data"}
+		roles := []string{"admin", "deploy", "readonly", "power-user"}
+		e := envs[token.MustRandInt(len(envs))]
+		r := roles[token.MustRandInt(len(roles))]
+		if label != "" {
+			p.ProfileName = label + "-" + e + "-" + r
+		} else {
+			p.ProfileName = e + "-" + r
 		}
 
 	case bait.TypeMCP:

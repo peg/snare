@@ -29,7 +29,9 @@ const CANARY_TYPES = {
   ssh:       { emoji: "🔒", color: 0x4EC9B0, name: "SSH"       },
   k8s:       { emoji: "☸️",  color: 0x326CE5, name: "Kubernetes"},
   npm:       { emoji: "📦", color: 0xCB3837, name: "npm"       },
+  mcp:       { emoji: "🔌", color: 0x7C3AED, name: "MCP"       },
   pypi:      { emoji: "🐍", color: 0x3776AB, name: "PyPI"      },
+  awsproc:   { emoji: "⚙️",  color: 0xFF9900, name: "AWS (credential_process)" },
   docker:    { emoji: "🐳", color: 0x2496ED, name: "Docker"    },
   generic:   { emoji: "🗝️",  color: 0x888888, name: "Generic"   },
 };
