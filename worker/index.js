@@ -263,24 +263,33 @@ async function handleRevoke(request, env) {
 // ─── Webhook resolution ─────────────────────────────────────────────────────
 
 async function resolveWebhooks(token, env) {
+  let meta = {};
+  let perTokenWebhook = null;
+
+  // Always try to load registration metadata (type, label, device)
   if (env.SNARE_KV) {
     const raw = await env.SNARE_KV.get(`webhook:${token}`);
     if (raw) {
       try {
         const reg = JSON.parse(raw);
-        if (reg.webhook_url) {
-          return {
-            webhooks: [reg.webhook_url],
-            meta: { canaryType: reg.canary_type, label: reg.label, deviceId: reg.device_id },
-          };
+        meta = { canaryType: reg.canary_type, label: reg.label, deviceId: reg.device_id };
+        // Only use per-token webhook if it's a real URL (not a placeholder)
+        if (reg.webhook_url && reg.webhook_url.includes("discord.com/") ||
+            reg.webhook_url?.includes("hooks.slack.com") ||
+            reg.webhook_url?.includes("api.telegram.org") ||
+            (reg.webhook_url?.startsWith("https://") && !reg.webhook_url?.includes("use-global"))) {
+          perTokenWebhook = reg.webhook_url;
         }
       } catch { /* fall through */ }
     }
   }
-  return {
-    webhooks: (env.WEBHOOK_URLS || "").split(",").filter(Boolean),
-    meta: {},
-  };
+
+  // Per-token webhook takes priority; otherwise fall back to global
+  const webhooks = perTokenWebhook
+    ? [perTokenWebhook]
+    : (env.WEBHOOK_URLS || "").split(",").filter(Boolean);
+
+  return { webhooks, meta };
 }
 
 // ─── Alert formatting ────────────────────────────────────────────────────────
