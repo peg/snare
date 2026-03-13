@@ -123,12 +123,25 @@ func cmdArm(args []string) {
 	}
 
 	// Step 1: Initialize (or reuse existing config)
+	// Dry-run skips config writes entirely
 	cfg, err := config.Load()
 	if err != nil {
 		fatal(err)
 	}
 
-	if cfg == nil {
+	if dryRun {
+		if cfg == nil {
+			fmt.Println("  [dry-run] would initialize config")
+			// Create a temporary in-memory config for dry-run rendering
+			cfg = &config.Config{
+				DeviceID:     "dry-run",
+				CallbackBase: "https://snare.sh/c",
+				WebhookURL:   webhookURL,
+			}
+		} else {
+			fmt.Printf("  ✓ already initialized (device: %s)\n", cfg.DeviceID)
+		}
+	} else if cfg == nil {
 		// First time — need webhook URL
 		if webhookURL == "" {
 			// Try interactive init
@@ -339,8 +352,7 @@ func cmdDisarm(args []string) {
 
 		removed := 0
 		for _, c := range targets {
-			if err := bait.Remove(c, force || true, false); err != nil {
-				// force during disarm — we want clean removal
+			if err := bait.Remove(c, force, false); err != nil {
 				fmt.Fprintf(os.Stderr, "    ✗ %-12s %s: %v\n", c.Type, c.Path, err)
 				continue
 			}
@@ -667,6 +679,7 @@ func plantOne(bt bait.Type, label string, cfg *config.Config, m *manifest.Manife
 }
 
 // cmdStatus shows active canaries on this machine.
+// Fetches last-seen timestamps from snare.sh API for each canary.
 func cmdStatus(args []string) {
 	m, err := manifest.Load()
 	if err != nil {
@@ -675,8 +688,57 @@ func cmdStatus(args []string) {
 
 	active := m.Active()
 	if len(active) == 0 {
-		fmt.Println("No active canaries. Run `snare plant` to deploy.")
+		fmt.Println("No active canaries. Run `snare arm` to deploy.")
 		return
+	}
+
+	// Load config to build API base URL
+	cfg, _ := config.Load()
+	var apiBase string
+	if cfg != nil {
+		apiBase = strings.TrimSuffix(cfg.CallbackBase, "/c")
+	}
+
+	// Fetch last-seen from API (best-effort, don't fail status on network error)
+	lastSeenMap := make(map[string]string) // tokenID → timestamp
+	eventCountMap := make(map[string]int)
+	if apiBase != "" {
+		for _, c := range active {
+			url := apiBase + "/api/events/" + c.ID
+			resp, err := http.Get(url) //nolint:noctx
+			if err != nil || resp.StatusCode != 200 {
+				if resp != nil {
+					resp.Body.Close()
+				}
+				continue
+			}
+			var result struct {
+				Events []struct {
+					Timestamp string `json:"timestamp"`
+					IsTest    bool   `json:"is_test"`
+				} `json:"events"`
+			}
+			data, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if err := json.Unmarshal(data, &result); err != nil {
+				continue
+			}
+			// Find most recent non-test event
+			for _, e := range result.Events {
+				if !e.IsTest {
+					lastSeenMap[c.ID] = e.Timestamp
+					break
+				}
+			}
+			// Count non-test events
+			count := 0
+			for _, e := range result.Events {
+				if !e.IsTest {
+					count++
+				}
+			}
+			eventCountMap[c.ID] = count
+		}
 	}
 
 	fmt.Printf("Active canaries (%d):\n\n", len(active))
@@ -690,8 +752,14 @@ func cmdStatus(args []string) {
 			label = "-"
 		}
 		lastSeen := "never"
-		if c.LastSeen != nil {
+		if ts, ok := lastSeenMap[c.ID]; ok {
+			lastSeen = ts
+		} else if c.LastSeen != nil {
 			lastSeen = c.LastSeen.Format("2006-01-02 15:04 UTC")
+		}
+		alerts := ""
+		if count, ok := eventCountMap[c.ID]; ok && count > 0 {
+			alerts = fmt.Sprintf(" ⚠ %d alert(s)", count)
 		}
 		rel := reliability(c.Type)
 		relMark := "●" // high
@@ -703,7 +771,7 @@ func cmdStatus(args []string) {
 		fmt.Printf("    label:       %s\n", label)
 		fmt.Printf("    path:        %s\n", c.Path)
 		fmt.Printf("    planted:     %s ago\n", age)
-		fmt.Printf("    last seen:   %s\n", lastSeen)
+		fmt.Printf("    last seen:   %s%s\n", lastSeen, alerts)
 		fmt.Println()
 	}
 	fmt.Println("  ● high reliability  ◐ medium reliability")

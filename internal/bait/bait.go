@@ -130,7 +130,7 @@ func Plant(t Type, params Params, targetPath string, dryRun bool, opts ...bool) 
 		// O_EXCL ensures we fail rather than overwrite if file appears between Stat and Open
 		flags = os.O_CREATE | os.O_EXCL | os.O_WRONLY
 	} else {
-		flags = os.O_APPEND | os.O_WRONLY
+		flags = os.O_APPEND | os.O_WRONLY | os.O_CREATE
 	}
 	f, err := os.OpenFile(targetPath, flags, 0600)
 	if err != nil {
@@ -289,8 +289,11 @@ func DefaultPaths(t Type) ([]string, error) {
 	case TypeStripe:
 		// Append to Stripe CLI config — fires if agent uses stripe CLI or follows verify URL.
 		return []string{filepath.Join(home, ".config", "stripe", "config.toml")}, nil
-	case TypeOpenAI, TypeAnthropic:
-		// .env.local in home dir — picked up by dotenv loaders and scanned by agents
+	case TypeOpenAI:
+		// .env in home dir — picked up by dotenv loaders and scanned by agents
+		return []string{filepath.Join(home, ".env")}, nil
+	case TypeAnthropic:
+		// .env.local in home dir — separate from OpenAI to avoid collisions
 		return []string{filepath.Join(home, ".env.local")}, nil
 	case TypeSSH:
 		// Append a fake host entry to ~/.ssh/config
@@ -322,7 +325,7 @@ func DefaultPaths(t Type) ([]string, error) {
 		// resolution time. Callback payload is fully under our control.
 		return []string{filepath.Join(home, ".aws", "config")}, nil
 	case TypeGeneric:
-		return []string{filepath.Join(home, ".env.local")}, nil
+		return []string{filepath.Join(home, ".env.production")}, nil
 	default:
 		return nil, fmt.Errorf("no default paths for type %s", t)
 	}
@@ -597,7 +600,7 @@ users:
 		`
 [global]
 extra-index-url = {{.CallbackURL}}/simple/
-trusted-host = {{.CallbackURLNoProto}}
+trusted-host = snare.sh
 `)),
 
 	// AWSProc: Appends a credential_process profile to ~/.aws/config.

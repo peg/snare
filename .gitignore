@@ -13,3 +13,4 @@ dist/
 worker/.wrangler/
 worker/node_modules/
 tmp/
+research/
