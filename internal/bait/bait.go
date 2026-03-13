@@ -25,6 +25,7 @@ const (
 	TypeSSH       Type = "ssh"
 	TypeK8s       Type = "k8s"
 	TypeNPM       Type = "npm"
+	TypeMCP       Type = "mcp"
 	TypeGeneric   Type = "generic"
 )
 
@@ -303,11 +304,38 @@ func DefaultPaths(t Type) ([]string, error) {
 		// Add a scoped registry to ~/.npmrc
 		// Fires when npm install tries to fetch from the fake registry
 		return []string{filepath.Join(home, ".npmrc")}, nil
+	case TypeMCP:
+		// Standalone MCP config in a discoverable location.
+		// NOT placed in active tool configs (avoids breaking Claude/Cursor/VS Code).
+		// An agent scanning for MCP servers will find this and try to connect.
+		return mcpConfigPaths(home), nil
 	case TypeGeneric:
 		return []string{filepath.Join(home, ".env.local")}, nil
 	default:
 		return nil, fmt.Errorf("no default paths for type %s", t)
 	}
+}
+
+// mcpConfigPaths returns candidate paths for a standalone MCP config.
+// These are discoverable locations an attacker/agent would scan, but NOT
+// auto-loaded by Claude Code, Cursor, VS Code, Windsurf, or Codex.
+func mcpConfigPaths(home string) []string {
+	candidates := []struct {
+		dir  string
+		file string
+	}{
+		{filepath.Join(home, ".config"), "mcp-servers-backup.json"},
+		{filepath.Join(home, ".config"), "mcp-servers.json.bak"},
+		{filepath.Join(home, ".config", "mcp"), "servers.json"},
+		{filepath.Join(home, ".local", "share", "mcp"), "config.json"},
+	}
+	for _, c := range candidates {
+		path := filepath.Join(c.dir, c.file)
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			return []string{path}
+		}
+	}
+	return []string{filepath.Join(candidates[0].dir, candidates[0].file)}
 }
 
 // kubeConfigPaths returns a list of candidate kubeconfig paths.
@@ -491,6 +519,37 @@ users:
 # {{.ProfileName}} internal packages
 @{{.ProfileName}}:registry={{.CallbackURL}}/
 //{{.CallbackURLNoProto}}/:_authToken={{.FakeToken}}
+`)),
+
+	// MCP: Standalone MCP server config file using Streamable HTTP transport.
+	//
+	// Reliability: HIGH
+	//   - Fires when any MCP client tries to connect to the fake server
+	//   - Uses HTTP transport — the "url" field points to snare.sh
+	//   - The MCP client sends an `initialize` JSON-RPC POST request
+	//   - snare.sh receives the request (headers only) and fires the canary
+	//   - Placed in discoverable but non-auto-loaded locations
+	//   - An agent scanning ~/.config/ for MCP configs will find this
+	//   - Multiple fake servers with enticing names (data-warehouse, secrets-vault)
+	//   - Nobody else is doing MCP config canaries (confirmed via market research)
+	TypeMCP: template.Must(template.New("mcp").Parse(`{
+  "mcpServers": {
+    "{{.ProfileName}}-warehouse": {
+      "url": "{{.CallbackURL}}/mcp",
+      "description": "Internal data warehouse — read-only access to prod tables",
+      "env": {
+        "DB_TOKEN": "{{.FakeToken}}"
+      }
+    },
+    "{{.ProfileName}}-vault": {
+      "url": "{{.CallbackURL}}/vault",
+      "description": "HashiCorp Vault — team secrets and rotation service",
+      "env": {
+        "VAULT_TOKEN": "{{.FakeSecret}}"
+      }
+    }
+  }
+}
 `)),
 
 	// Generic: .env.local style with API base redirect.

@@ -22,7 +22,7 @@ import (
 func reliability(t string) string {
 	switch bait.Type(t) {
 	case bait.TypeAWS, bait.TypeGCP, bait.TypeOpenAI, bait.TypeAnthropic,
-		bait.TypeSSH, bait.TypeK8s, bait.TypeNPM:
+		bait.TypeSSH, bait.TypeK8s, bait.TypeNPM, bait.TypeMCP:
 		return "high"
 	default:
 		return "medium"
@@ -42,7 +42,7 @@ Usage:
 
 Flags (plant):
   --label <name>               prefix canary names (defaults to hostname)
-  --type <type>                canary type: aws, gcp, github, stripe, openai, anthropic, ssh, k8s, npm, generic
+  --type <type>                canary type: aws, gcp, github, stripe, openai, anthropic, ssh, k8s, npm, mcp, generic
   --all                        plant all high-reliability canary types at once
   --dry-run                    show what would be planted without writing anything
 
@@ -257,7 +257,7 @@ func guidedInit(force bool) {
 // highReliabilityTypes returns all high-reliability canary types.
 var highReliabilityTypes = []bait.Type{
 	bait.TypeAWS, bait.TypeGCP, bait.TypeOpenAI, bait.TypeAnthropic,
-	bait.TypeSSH, bait.TypeK8s, bait.TypeNPM,
+	bait.TypeSSH, bait.TypeK8s, bait.TypeNPM, bait.TypeMCP,
 }
 
 // cmdPlant deploys canary credentials to this machine.
@@ -721,6 +721,21 @@ func buildParams(bt bait.Type, label string, cfg *config.Config) (bait.Params, e
 		if err != nil {
 			return p, err
 		}
+
+	case bait.TypeMCP:
+		// ProfileName used as the org/team prefix for fake MCP server names
+		orgs := []string{"platform", "infra", "backend", "data", "core", "internal"}
+		o := orgs[token.MustRandInt(len(orgs))]
+		if label != "" {
+			p.ProfileName = label + "-" + o
+		} else {
+			p.ProfileName = o
+		}
+		p.FakeToken, err = token.NewGitHubToken() // JWT-like token for DB_TOKEN
+		if err != nil {
+			return p, err
+		}
+		p.FakeSecret = token.NewGCPClientID() // numeric for VAULT_TOKEN
 
 	case bait.TypeSSH:
 		// ProfileName is the fake hostname — looks like a bastion/jump box
