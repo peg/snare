@@ -32,14 +32,28 @@ func reliability(t string) string {
 
 const usage = `snare — compromise detection for AI agents via deception
 
-Usage:
-  snare init                   initialize snare on this machine
-  snare plant [flags]          plant canary credentials
+Quick start:
+  snare arm --webhook <url>    arm this machine (init + plant all + test)
+  snare disarm                 remove all canaries and clean up
+  snare status                 show active canaries
+
+Commands:
+  snare arm [flags]            one-command setup: init + plant + test
+  snare disarm [flags]         one-command teardown
   snare status                 show active canaries
   snare events                 fetch recent alert events from snare.sh
   snare test                   fire a test alert to verify your webhook
-  snare teardown [flags]       remove planted canaries
+
+Advanced:
+  snare init                   initialize snare on this machine
+  snare plant [flags]          plant individual canary credentials
+  snare teardown [flags]       remove specific canaries
   snare uninstall              teardown + remove all snare state
+
+Flags (arm):
+  --webhook <url>              webhook URL (Discord, Slack, Telegram, or custom)
+  --label <name>               prefix canary names (defaults to hostname)
+  --dry-run                    show what would be planted without writing
 
 Flags (plant):
   --label <name>               prefix canary names (defaults to hostname)
@@ -47,9 +61,10 @@ Flags (plant):
   --all                        plant all high-reliability canary types at once
   --dry-run                    show what would be planted without writing anything
 
-Flags (teardown):
+Flags (disarm/teardown):
   --token <id>                 remove a single canary by ID
   --force                      remove even if content hash mismatches
+  --purge                      also remove ~/.snare/ config directory
   --dry-run                    show what would be removed without writing anything
 `
 
@@ -64,6 +79,10 @@ func Run(args []string, version string) {
 	rest := args[1:]
 
 	switch cmd {
+	case "arm":
+		cmdArm(rest)
+	case "disarm":
+		cmdDisarm(rest)
 	case "init":
 		cmdInit(rest)
 	case "plant":
@@ -85,6 +104,273 @@ func Run(args []string, version string) {
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n%s", cmd, usage)
 		os.Exit(1)
+	}
+}
+
+// cmdArm is the one-command setup: init + plant all + test.
+// This is the happy path for new machines.
+func cmdArm(args []string) {
+	webhookURL := flagValue(args, "--webhook")
+	label := flagValue(args, "--label")
+	dryRun := hasFlag(args, "--dry-run")
+
+	if label == "" {
+		if h, err := os.Hostname(); err == nil {
+			label = strings.ToLower(strings.ReplaceAll(h, ".", "-"))
+		} else {
+			label = "snare"
+		}
+	}
+
+	// Step 1: Initialize (or reuse existing config)
+	cfg, err := config.Load()
+	if err != nil {
+		fatal(err)
+	}
+
+	if cfg == nil {
+		// First time — need webhook URL
+		if webhookURL == "" {
+			// Try interactive init
+			fmt.Println()
+			guidedInit(false)
+			// Reload config after guided init
+			cfg, err = config.Load()
+			if err != nil || cfg == nil {
+				fatal(fmt.Errorf("init failed — run `snare init` manually"))
+			}
+		} else {
+			cfg, err = config.Init("", webhookURL, false)
+			if err != nil {
+				fatal(err)
+			}
+			fmt.Printf("  ✓ initialized (device: %s)\n", cfg.DeviceID)
+		}
+	} else {
+		// Already initialized — update webhook if provided
+		if webhookURL != "" && webhookURL != cfg.WebhookURL {
+			cfg.WebhookURL = webhookURL
+			if err := cfg.Save(); err != nil {
+				fatal(fmt.Errorf("updating webhook: %w", err))
+			}
+			fmt.Printf("  ✓ webhook updated\n")
+		} else {
+			fmt.Printf("  ✓ already initialized (device: %s)\n", cfg.DeviceID)
+		}
+	}
+
+	// Step 2: Plant all high-reliability canaries
+	m, err := manifest.Load()
+	if err != nil {
+		fatal(err)
+	}
+
+	fmt.Println()
+	fmt.Println("  Planting canaries...")
+
+	planted := 0
+	skipped := 0
+	for _, bt := range highReliabilityTypes {
+		params, err := buildParams(bt, label, cfg)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "    ✗ %s: %v\n", bt, err)
+			continue
+		}
+
+		paths, err := bait.DefaultPaths(bt)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "    ✗ %s: %v\n", bt, err)
+			continue
+		}
+
+		for _, path := range paths {
+			if dryRun {
+				fmt.Printf("    [dry-run] %s → %s\n", bt, path)
+				planted++
+				continue
+			}
+
+			// Check if this type is already planted at this path
+			alreadyPlanted := false
+			for _, c := range m.Active() {
+				if c.Type == string(bt) && c.Path == path {
+					alreadyPlanted = true
+					break
+				}
+			}
+			if alreadyPlanted {
+				fmt.Printf("    ○ %-12s %s (already armed)\n", bt, path)
+				skipped++
+				continue
+			}
+
+			// Silent pre-render
+			preview, err := bait.Plant(bt, params, path, true, true)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "    ✗ %-12s %v\n", bt, err)
+				continue
+			}
+
+			// Write manifest
+			c := manifest.Canary{
+				ID:          params.TokenID,
+				Type:        string(bt),
+				Label:       label,
+				Path:        preview.Path,
+				Mode:        preview.Mode,
+				Content:     preview.Content,
+				ContentHash: manifest.HashContent(preview.Content),
+				CallbackURL: params.CallbackURL,
+				PlantedAt:   time.Now(),
+			}
+			if err := m.AddPending(c); err != nil {
+				fmt.Fprintf(os.Stderr, "    ✗ %-12s manifest: %v\n", bt, err)
+				continue
+			}
+
+			// Write bait
+			if _, err := bait.Plant(bt, params, path, false); err != nil {
+				_ = m.Deactivate(params.TokenID, "plant-failed")
+				fmt.Fprintf(os.Stderr, "    ✗ %-12s %v\n", bt, err)
+				continue
+			}
+
+			// Activate
+			if err := m.Activate(params.TokenID); err != nil {
+				fmt.Fprintf(os.Stderr, "    ⚠  %-12s planted but activation failed\n", bt)
+				continue
+			}
+
+			// Register webhook (best-effort)
+			if cfg.WebhookURL != "" {
+				_ = registerToken(cfg, params.TokenID, string(bt), label)
+			}
+
+			fmt.Printf("    ✓ %-12s %s\n", bt, path)
+			planted++
+		}
+	}
+
+	if dryRun {
+		fmt.Printf("\n  [dry-run] would plant %d canaries\n", planted)
+		return
+	}
+
+	// Step 3: Test webhook
+	fmt.Println()
+	if cfg.WebhookURL != "" {
+		shortID := cfg.DeviceID
+		if len(shortID) > 8 {
+			shortID = shortID[len(shortID)-8:]
+		}
+		testToken := "snare-test-" + shortID
+		callbackURL := cfg.CallbackURL(testToken)
+		if err := httpGet(callbackURL); err != nil {
+			fmt.Fprintf(os.Stderr, "  ⚠  webhook test failed: %v\n", err)
+		} else {
+			fmt.Println("  ✓ webhook test fired")
+		}
+	}
+
+	// Summary
+	fmt.Println()
+	total := planted + skipped
+	if total == 0 {
+		fmt.Println("  No canaries planted. Check errors above.")
+	} else {
+		fmt.Printf("  🪤 %d canaries armed.", total)
+		if skipped > 0 {
+			fmt.Printf(" (%d new, %d already armed)", planted, skipped)
+		}
+		fmt.Println(" This machine is protected.")
+		fmt.Println()
+		fmt.Println("  Run `snare status` to check.")
+		fmt.Println("  Run `snare disarm` to remove everything.")
+	}
+}
+
+// cmdDisarm removes all canaries. Clean, fast, one command.
+func cmdDisarm(args []string) {
+	dryRun := hasFlag(args, "--dry-run")
+	purge := hasFlag(args, "--purge")
+	force := hasFlag(args, "--force")
+	tokenID := flagValue(args, "--token")
+
+	m, err := manifest.Load()
+	if err != nil {
+		if purge {
+			// Manifest might be corrupt — just nuke ~/.snare/
+			goto purgeDir
+		}
+		fatal(err)
+	}
+
+	{
+		var targets []manifest.Canary
+		if tokenID != "" {
+			c := m.FindByID(tokenID)
+			if c == nil {
+				fatal(fmt.Errorf("canary %s not found", tokenID))
+			}
+			targets = []manifest.Canary{*c}
+		} else {
+			targets = m.Active()
+		}
+
+		if len(targets) == 0 && !purge {
+			fmt.Println("  No active canaries. Machine is clean.")
+			return
+		}
+
+		if dryRun {
+			fmt.Printf("  [dry-run] would remove %d canary(s)\n", len(targets))
+			for _, c := range targets {
+				fmt.Printf("    %-12s %s\n", c.Type, c.Path)
+			}
+			if purge {
+				fmt.Println("  [dry-run] would delete ~/.snare/")
+			}
+			return
+		}
+
+		if len(targets) > 0 {
+			fmt.Printf("  Removing %d canaries...\n", len(targets))
+		}
+
+		removed := 0
+		for _, c := range targets {
+			if err := bait.Remove(c, force || true, false); err != nil {
+				// force during disarm — we want clean removal
+				fmt.Fprintf(os.Stderr, "    ✗ %-12s %s: %v\n", c.Type, c.Path, err)
+				continue
+			}
+			_ = m.Deactivate(c.ID, "disarm")
+
+			// Deregister webhook (best-effort)
+			if cfg, err := config.Load(); err == nil && cfg != nil && cfg.WebhookURL != "" {
+				_ = revokeToken(cfg, c.ID)
+			}
+
+			fmt.Printf("    ✓ %-12s %s\n", c.Type, c.Path)
+			removed++
+		}
+
+		fmt.Printf("\n  ✓ %d canaries removed. Machine disarmed.\n", removed)
+	}
+
+purgeDir:
+	if purge {
+		dir, err := manifest.Dir()
+		if err != nil {
+			fatal(err)
+		}
+		if err := os.RemoveAll(dir); err != nil {
+			fatal(fmt.Errorf("removing ~/.snare: %w", err))
+		}
+		fmt.Println("  ✓ ~/.snare/ removed.")
+	} else {
+		fmt.Println("  Config preserved at ~/.snare/ — run `snare arm` to re-arm.")
+		fmt.Println("  Run `snare disarm --purge` to also remove config.")
 	}
 }
 
