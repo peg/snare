@@ -1,11 +1,21 @@
 /**
  * snare.sh — Cloudflare Worker callback receiver
  *
+ * PRIVACY GUARANTEE:
+ *   This worker NEVER reads, logs, stores, or forwards HTTP request bodies.
+ *   When a canary fires, the worker captures only connection metadata
+ *   (IP, User-Agent, method, country, ASN) from request HEADERS.
+ *   The response is returned BEFORE any body could be consumed.
+ *   This is a deliberate design choice — canary callbacks may carry
+ *   real credentials or sensitive data in their bodies, and we must
+ *   never have access to that data, even transiently in memory.
+ *
  * Routes:
- *   GET/POST /c/{token}     — canary callback receiver
- *   POST     /api/register  — register webhook + metadata for a token
- *   POST     /api/revoke    — remove a token registration
- *   GET      /health        — health check
+ *   GET/POST /c/{token}[/*]  — canary callback (metadata-only capture)
+ *   POST     /api/register   — register webhook + metadata for a token
+ *   POST     /api/revoke     — remove a token registration
+ *   GET      /api/events/*   — retrieve recent events for a token
+ *   GET      /health         — health check
  */
 
 // Per-canary type config: emoji, color, display name
@@ -16,6 +26,11 @@ const CANARY_TYPES = {
   stripe:    { emoji: "💳", color: 0x6772E5, name: "Stripe"    },
   openai:    { emoji: "🤖", color: 0x10A37F, name: "OpenAI"    },
   anthropic: { emoji: "🟠", color: 0xD4572F, name: "Anthropic" },
+  ssh:       { emoji: "🔒", color: 0x4EC9B0, name: "SSH"       },
+  k8s:       { emoji: "☸️",  color: 0x326CE5, name: "Kubernetes"},
+  npm:       { emoji: "📦", color: 0xCB3837, name: "npm"       },
+  pypi:      { emoji: "🐍", color: 0x3776AB, name: "PyPI"      },
+  docker:    { emoji: "🐳", color: 0x2496ED, name: "Docker"    },
   generic:   { emoji: "🗝️",  color: 0x888888, name: "Generic"   },
 };
 
@@ -37,7 +52,7 @@ const PREVIEW_BOTS = [
 ];
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
     if (url.pathname === "/health") {
@@ -58,21 +73,132 @@ export default {
       return handleEvents(eventsMatch[1], env);
     }
 
-    const match = url.pathname.match(/^\/c\/([a-zA-Z0-9_-]{8,80})$/);
+    // Canary callback: /c/{token} or /c/{token}/anything (for OpenAI /v1 suffix etc.)
+    const match = url.pathname.match(/^\/c\/([a-zA-Z0-9_-]{8,80})(\/.*)?$/);
     if (match) {
-      return handleCallback(match[1], request, env, url);
+      // ═══════════════════════════════════════════════════════════════════
+      // PRIVACY CRITICAL PATH
+      //
+      // 1. Extract metadata from HEADERS ONLY — body is never touched
+      // 2. Return the response IMMEDIATELY — before any body is consumed
+      // 3. Process the alert asynchronously via ctx.waitUntil
+      //
+      // The request body may contain real credentials, API keys, prompts,
+      // or other sensitive data. We MUST return before it reaches us.
+      // ═══════════════════════════════════════════════════════════════════
+      const token = match[1];
+      const metadata = extractMetadata(request, url);
+
+      // Process alert asynchronously AFTER response is sent to caller
+      ctx.waitUntil(
+        processAlert(token, metadata, env).catch(err =>
+          console.error(`ALERT_ERROR token=${token} err=${err.message}`)
+        )
+      );
+
+      // Return immediately — body is never read
+      return gif();
     }
 
     return new Response("not found", { status: 404 });
   },
 };
 
+// ─── Metadata extraction (HEADERS ONLY — never touches body) ────────────────
+
+function extractMetadata(request, url) {
+  const cf = request.cf || {};
+  return {
+    timestamp: new Date().toISOString(),
+    ip:        request.headers.get("cf-connecting-ip") || "unknown",
+    userAgent: request.headers.get("user-agent") || "",
+    method:    request.method,
+    path:      url.pathname,
+    country:   cf.country        || null,
+    city:      cf.city           || null,
+    asn:       cf.asn            || null,
+    asnOrg:    cf.asOrganization || null,
+    botScore:  cf.botManagement?.score ?? null,
+    // Capture specific safe headers that indicate SDK type
+    sdkHints: {
+      amzSdkRequest: request.headers.get("x-amz-sdk-request") || null,
+      amzTarget:     request.headers.get("x-amz-target") || null,
+      contentType:   request.headers.get("content-type") || null,
+    },
+  };
+}
+
+// ─── Alert processing (runs after response is already sent) ─────────────────
+
+async function processAlert(token, metadata, env) {
+  const ua = metadata.userAgent;
+
+  // Ignore link preview bots
+  if (PREVIEW_BOTS.some(b => ua.includes(b))) return;
+
+  // Deduplicate: same token+IP within 60 seconds fires only once
+  if (env.SNARE_KV) {
+    const dedupKey = `dedup:${token}:${metadata.ip}:${Math.floor(Date.now() / 60000)}`;
+    if (await env.SNARE_KV.get(dedupKey)) return;
+    await env.SNARE_KV.put(dedupKey, "1", { expirationTtl: 60 });
+  }
+
+  const isTest = token.startsWith("snare-test-");
+
+  const event = {
+    token,
+    is_test:   isTest,
+    timestamp: metadata.timestamp,
+    ip:        metadata.ip,
+    userAgent: metadata.userAgent,
+    method:    metadata.method,
+    path:      metadata.path,
+    country:   metadata.country,
+    city:      metadata.city,
+    asn:       metadata.asn,
+    asnOrg:    metadata.asnOrg,
+    botScore:  metadata.botScore,
+    sdkHints:  metadata.sdkHints,
+    // EXPLICITLY: no body field. This is intentional and must never be added.
+  };
+
+  // Log metadata only — never body content
+  console.log("CANARY_FIRED", JSON.stringify({
+    token: event.token,
+    is_test: event.is_test,
+    ip: event.ip,
+    method: event.method,
+    country: event.country,
+    asnOrg: event.asnOrg,
+    userAgent: (event.userAgent || "").slice(0, 100),
+  }));
+
+  // Store event (metadata only)
+  if (env.SNARE_KV) {
+    const key = `event:${token}:${Date.now()}:${crypto.randomUUID()}`;
+    await env.SNARE_KV.put(key, JSON.stringify(event), {
+      expirationTtl: 60 * 60 * 24 * 90,
+    });
+  }
+
+  // Resolve webhook + metadata
+  const { webhooks, meta } = await resolveWebhooks(token, env);
+
+  const results = await Promise.allSettled(
+    webhooks.map(wh => forwardAlert(wh, event, meta))
+  );
+  results.forEach((r, i) => {
+    if (r.status === "rejected") {
+      console.error(`WEBHOOK_FAILED url=${webhooks[i]} token=${token} err=${r.reason}`);
+    }
+  });
+}
+
 // ─── Events lookup ───────────────────────────────────────────────────────────
 
 async function handleEvents(token, env) {
   if (!env.SNARE_KV) return json({ error: "KV not configured" }, 500);
 
-  // List all event keys for this token
   const prefix = `event:${token}:`;
   const list = await env.SNARE_KV.list({ prefix, limit: 20 });
 
@@ -88,9 +214,7 @@ async function handleEvents(token, env) {
     return json({ token, events: [] }, 404);
   }
 
-  // Sort newest first
   events.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
-
   return json({ token, events: events.slice(0, 10) });
 }
 
@@ -115,9 +239,9 @@ async function handleRegister(request, env) {
 
   await env.SNARE_KV.put(`webhook:${token_id}`, JSON.stringify({
     webhook_url,
-    device_id:   device_id   || null,
-    canary_type: canary_type || null,
-    label:       label       || null,
+    device_id:     device_id   || null,
+    canary_type:   canary_type || null,
+    label:         label       || null,
     registered_at: new Date().toISOString(),
   }), { expirationTtl: 60 * 60 * 24 * 90 });
 
@@ -136,69 +260,8 @@ async function handleRevoke(request, env) {
   return json({ status: "revoked", token_id: body.token_id });
 }
 
-// ─── Callback ───────────────────────────────────────────────────────────────
+// ─── Webhook resolution ─────────────────────────────────────────────────────
 
-async function handleCallback(token, request, env, url) {
-  const ua = request.headers.get("user-agent") || "";
-
-  if (PREVIEW_BOTS.some(b => ua.includes(b))) return gif();
-
-  const ip = request.headers.get("cf-connecting-ip") || "unknown";
-
-  // Deduplicate: same token+IP within 60 seconds fires only once
-  if (env.SNARE_KV) {
-    const dedupKey = `dedup:${token}:${ip}:${Math.floor(Date.now() / 60000)}`;
-    if (await env.SNARE_KV.get(dedupKey)) return gif();
-    await env.SNARE_KV.put(dedupKey, "1", { expirationTtl: 60 });
-  }
-
-  const cf = request.cf || {};
-  const isTest = token.startsWith("snare-test-");
-
-  const event = {
-    token,
-    is_test:   isTest,
-    timestamp: new Date().toISOString(),
-    ip,
-    userAgent: ua,
-    method:    request.method,
-    path:      url.pathname + url.search,
-    country:   cf.country       || null,
-    city:      cf.city          || null,
-    asn:       cf.asn           || null,
-    asnOrg:    cf.asOrganization || null,
-    botScore:  cf.botManagement?.score ?? null,
-    body: request.method === "POST"
-      ? (await request.text().catch(() => "")).slice(0, 4096) || null
-      : null,
-  };
-
-  console.log("CANARY_FIRED", JSON.stringify(event));
-
-  // Store event
-  if (env.SNARE_KV) {
-    const key = `event:${token}:${Date.now()}:${crypto.randomUUID()}`;
-    await env.SNARE_KV.put(key, JSON.stringify(event), {
-      expirationTtl: 60 * 60 * 24 * 90,
-    });
-  }
-
-  // Resolve webhook + metadata
-  const { webhooks, meta } = await resolveWebhooks(token, env);
-
-  const results = await Promise.allSettled(
-    webhooks.map(wh => forwardAlert(wh, event, meta))
-  );
-  results.forEach((r, i) => {
-    if (r.status === "rejected") {
-      console.error(`WEBHOOK_FAILED url=${webhooks[i]} token=${token} err=${r.reason}`);
-    }
-  });
-
-  return gif();
-}
-
-// Resolve webhook(s) + registration metadata for a token
 async function resolveWebhooks(token, env) {
   if (env.SNARE_KV) {
     const raw = await env.SNARE_KV.get(`webhook:${token}`);
@@ -214,7 +277,6 @@ async function resolveWebhooks(token, env) {
       } catch { /* fall through */ }
     }
   }
-  // Global fallback (operator-configured CF secret)
   return {
     webhooks: (env.WEBHOOK_URLS || "").split(",").filter(Boolean),
     meta: {},
@@ -239,11 +301,8 @@ async function forwardAlert(webhookURL, event, meta = {}) {
   } else if (isSlack) {
     body = JSON.stringify(buildSlackPayload(event, meta, type, fromCloud));
   } else if (isTelegram) {
-    // Telegram uses chat_id embedded in the URL as a query param or path
-    // Format: https://api.telegram.org/bot{token}/sendMessage?chat_id={id}
     body = JSON.stringify(buildTelegramPayload(event, meta, type, fromCloud));
   } else {
-    // Generic webhook — clean JSON event with metadata
     body = JSON.stringify(buildGenericPayload(event, meta, type, fromCloud));
   }
 
@@ -256,11 +315,10 @@ async function forwardAlert(webhookURL, event, meta = {}) {
 
 function buildDiscordPayload(event, meta, type, fromCloud) {
   const isTest   = event.is_test;
-  const ts       = new Date(event.timestamp).toISOString().replace("T", " ").replace(/\.\d+Z$/, " UTC");
+  const ts       = event.timestamp.replace("T", " ").replace(/\.\d+Z$/, " UTC");
   const location = [event.city, event.country].filter(Boolean).join(", ") || "unknown";
   const network  = event.asnOrg ? `${event.asnOrg} (AS${event.asn})` : (event.ip || "unknown");
 
-  // Title: show canary type + label if we have it
   let title;
   if (isTest) {
     title = `🧪 Test alert — ${type.name}`;
@@ -271,14 +329,19 @@ function buildDiscordPayload(event, meta, type, fromCloud) {
   }
 
   const fields = [
-    { name: "Token",    value: `\`${event.token}\``,      inline: false },
-    { name: "Time",     value: ts,                        inline: true  },
-    { name: "Method",   value: event.method,              inline: true  },
-    { name: "IP",       value: event.ip || "unknown",     inline: true  },
-    { name: "Location", value: location,                  inline: true  },
-    { name: "Network",  value: network,                   inline: true  },
+    { name: "Token",    value: `\`${event.token}\``,  inline: false },
+    { name: "Time",     value: ts,                    inline: true  },
+    { name: "Method",   value: event.method,          inline: true  },
+    { name: "IP",       value: event.ip || "unknown", inline: true  },
+    { name: "Location", value: location,              inline: true  },
+    { name: "Network",  value: network,               inline: true  },
     { name: "UA",       value: `\`${(event.userAgent || "unknown").slice(0, 120)}\``, inline: false },
   ];
+
+  // SDK hints — show what SDK/service was being called (from headers, not body)
+  if (event.sdkHints?.amzTarget) {
+    fields.push({ name: "AWS Target", value: `\`${event.sdkHints.amzTarget}\``, inline: true });
+  }
 
   if (fromCloud && !isTest) {
     fields.push({
@@ -296,20 +359,14 @@ function buildDiscordPayload(event, meta, type, fromCloud) {
     });
   }
 
-  if (event.body) {
-    fields.push({
-      name:   "Request body",
-      value:  `\`\`\`\n${event.body.slice(0, 400)}\n\`\`\``,
-      inline: false,
-    });
-  }
+  // NO body field — never included, by design
 
   return {
     embeds: [{
       title,
       color:     isTest ? 0x888888 : type.color,
       fields,
-      footer:    { text: "snare.sh" },
+      footer:    { text: "snare.sh · request body was never captured" },
       timestamp: event.timestamp,
     }],
   };
@@ -329,10 +386,10 @@ function buildSlackPayload(event, meta, type, fromCloud) {
   }
 
   const fields = [
-    { title: "Token",    value: `\`${event.token}\``,                              short: false },
-    { title: "IP",       value: event.ip || "unknown",                             short: true  },
-    { title: "Location", value: location,                                          short: true  },
-    { title: "UA",       value: (event.userAgent || "unknown").slice(0, 100),      short: false },
+    { title: "Token",    value: `\`${event.token}\``,                         short: false },
+    { title: "IP",       value: event.ip || "unknown",                        short: true  },
+    { title: "Location", value: location,                                     short: true  },
+    { title: "UA",       value: (event.userAgent || "unknown").slice(0, 100), short: false },
   ];
 
   if (fromCloud && !isTest) {
@@ -344,7 +401,7 @@ function buildSlackPayload(event, meta, type, fromCloud) {
     attachments: [{
       color:  isTest ? "#888888" : `#${type.color.toString(16).padStart(6, "0")}`,
       fields,
-      footer: "snare.sh",
+      footer: "snare.sh · request body was never captured",
       ts:     Math.floor(new Date(event.timestamp).getTime() / 1000),
     }],
   };
@@ -380,6 +437,8 @@ function buildTelegramPayload(event, meta, type, fromCloud) {
     lines.push("", `⚠️ <b>Likely AI agent</b> — request from cloud infrastructure`);
   }
 
+  lines.push("", "<i>Request body was never captured</i>");
+
   return { parse_mode: "HTML", text: lines.join("\n") };
 }
 
@@ -398,22 +457,26 @@ function buildGenericPayload(event, meta, type, fromCloud) {
       country: event.country,
     },
     network: {
-      asn:     event.asn,
-      org:     event.asnOrg,
+      asn:      event.asn,
+      org:      event.asnOrg,
       is_cloud: fromCloud,
     },
     request: {
       method:     event.method,
       user_agent: event.userAgent,
-      body:       event.body,
+      path:       event.path,
+      sdk_hints:  event.sdkHints,
+      // body: intentionally omitted — snare never captures request bodies
     },
     bot_score: event.botScore,
+    privacy:   "request_body_never_captured",
   };
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function gif() {
+  // 1x1 transparent GIF — smallest valid response
   return new Response(
     "\x47\x49\x46\x38\x39\x61\x01\x00\x01\x00\x00\x00\x00\x21\xf9\x04\x01\x00\x00\x00\x00\x2c\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02\x44\x01\x00\x3b",
     { status: 200, headers: { "content-type": "image/gif", "cache-control": "no-store" } }
