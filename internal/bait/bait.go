@@ -184,12 +184,17 @@ func removeNewFile(c manifest.Canary, force bool, dryRun bool) error {
 
 	// Verify hash matches what we planted
 	currentHash := manifest.HashContent(string(data))
-	if currentHash != c.ContentHash && !force {
-		return fmt.Errorf(
-			"%s: content has changed since planting (hash mismatch)\n"+
-				"  Use --force to remove anyway (file will be deleted regardless)",
-			c.Path,
-		)
+	if currentHash != c.ContentHash {
+		if !force {
+			return fmt.Errorf(
+				"%s: content has changed since planting (hash mismatch)\n"+
+					"  Someone may have added real data to this file.\n"+
+					"  Use --force to remove anyway, or manually edit the file",
+				c.Path,
+			)
+		}
+		// Force mode: warn but proceed
+		fmt.Printf("  ⚠ %s: content changed since planting — removing anyway (--force)\n", c.Path)
 	}
 
 	if dryRun {

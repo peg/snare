@@ -149,6 +149,15 @@ func newDeviceSecret() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
+// APIBase returns the base URL for API calls (e.g. https://snare.sh).
+func (c *Config) APIBase() string {
+	base := c.CallbackBase
+	if idx := len(base) - len("/c"); idx > 0 && base[idx:] == "/c" {
+		base = base[:idx]
+	}
+	return base
+}
+
 func newDeviceID() (string, error) {
 	b := make([]byte, 8)
 	if _, err := rand.Read(b); err != nil {
