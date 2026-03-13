@@ -112,9 +112,14 @@ func Plant(t Type, params Params, targetPath string, dryRun bool, opts ...bool) 
 		}
 	}
 
-	// Ensure parent directory exists
-	if err := os.MkdirAll(filepath.Dir(targetPath), 0700); err != nil {
+	// Ensure parent directory exists with secure permissions
+	parentDir := filepath.Dir(targetPath)
+	if err := os.MkdirAll(parentDir, 0700); err != nil {
 		return nil, fmt.Errorf("creating parent dir: %w", err)
+	}
+	// SSH requires 0700 on ~/.ssh — enforce it if we created the dir
+	if filepath.Base(parentDir) == ".ssh" {
+		_ = os.Chmod(parentDir, 0700)
 	}
 
 	var flags int
@@ -126,6 +131,9 @@ func Plant(t Type, params Params, targetPath string, dryRun bool, opts ...bool) 
 	}
 	f, err := os.OpenFile(targetPath, flags, 0600)
 	if err != nil {
+		if os.IsExist(err) {
+			return nil, fmt.Errorf("%s already exists — snare won't overwrite existing files. Use a different path or remove the file first", targetPath)
+		}
 		return nil, fmt.Errorf("opening %s: %w", targetPath, err)
 	}
 	defer f.Close()
@@ -289,7 +297,8 @@ func DefaultPaths(t Type) ([]string, error) {
 		// Standalone kubeconfig file in ~/.kube/ — does NOT modify the real config.
 		// An agent scanning ~/.kube/ will find this and may try to use it.
 		// Fires when kubectl targets the fake cluster (server URL → snare.sh)
-		return []string{filepath.Join(home, ".kube", "staging-deploy.yaml")}, nil
+		// Uses a realistic filename that varies to avoid collisions.
+		return kubeConfigPaths(home), nil
 	case TypeNPM:
 		// Add a scoped registry to ~/.npmrc
 		// Fires when npm install tries to fetch from the fake registry
@@ -299,6 +308,28 @@ func DefaultPaths(t Type) ([]string, error) {
 	default:
 		return nil, fmt.Errorf("no default paths for type %s", t)
 	}
+}
+
+// kubeConfigPaths returns a list of candidate kubeconfig paths.
+// Picks the first filename that doesn't already exist on disk.
+// If all candidates exist, falls back to the first one (O_EXCL will catch it).
+func kubeConfigPaths(home string) []string {
+	candidates := []string{
+		"staging-deploy.yaml",
+		"prod-readonly.yaml",
+		"infra-backup.yaml",
+		"legacy-admin.yaml",
+		"platform-deploy.yaml",
+	}
+	kubeDir := filepath.Join(home, ".kube")
+	for _, c := range candidates {
+		path := filepath.Join(kubeDir, c)
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			return []string{path}
+		}
+	}
+	// All exist — return first, let O_EXCL fail with a clear error
+	return []string{filepath.Join(kubeDir, candidates[0])}
 }
 
 // templates holds the Go text/template for each bait type.
@@ -419,12 +450,18 @@ Host {{.ProfileName}}
 	//   - A compromised agent scanning ~/.kube/ will find this and try to use it
 	//   - The cluster name looks like a real staging/prod cluster
 	//   - Does NOT modify the user's existing ~/.kube/config
+	// The certificate-authority-data is a real self-signed CA cert so kubectl
+	// passes TLS validation and actually connects to the server URL.
+	// kubectl will get a TLS error from snare.sh (wrong cert) but the HTTP
+	// request still fires the canary before the TLS handshake fails at the
+	// application layer. Using insecure-skip-tls-verify ensures the
+	// connection always reaches snare.sh regardless of TLS mismatch.
 	TypeK8s: template.Must(template.New("k8s").Parse(`apiVersion: v1
 kind: Config
 current-context: {{.ProfileName}}
 clusters:
 - cluster:
-    certificate-authority-data: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSURCVENDQWUyZ0F3SUJBZ0lJZDN3alVRPT0KLS0tLS1FTkQgQ0VSVElGSUNBVEUtLS0tLQo=
+    insecure-skip-tls-verify: true
     server: {{.CallbackURL}}
   name: {{.ProfileName}}
 contexts:
