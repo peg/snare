@@ -7,7 +7,7 @@ Snare is a compromise detection tool for AI agents. It plants fake credentials i
 **Key design choices:**
 
 - **No daemon** — bait phones home directly via SDK redirect, no local process needed
-- **Fires on USE, not READ** — inotify/audit-log approaches detect file reads; Snare detects actual API calls
+- **Fires on USE, not READ** — inotify/audit-log approaches detect file reads; Snare detects active exploitation
 - **Self-reporting credentials** — the callback URL is the service endpoint (`endpoint_url`, `token_uri`), not a comment. The SDK makes the call, not the attacker.
 - **Content-matching teardown** — stores exact bytes written at plant time; finds and removes verbatim. No byte offsets (breaks when files change).
 
@@ -21,57 +21,109 @@ A single static binary. No runtime dependencies.
 
 ```
 cmd/snare/main.go          entrypoint, passes version string
-internal/cli/cli.go        command routing, flag parsing
+internal/cli/cli.go        command routing, flag parsing, arm/disarm/rotate
 internal/bait/bait.go      template rendering, file plant/remove
 internal/manifest/         manifest.json CRUD, atomic writes
-internal/config/           ~/.snare/config.json init/load/save
-internal/token/            crypto/rand key generation
+internal/config/           ~/.snare/config.json init/load/save, device registration
+internal/token/            crypto/rand key generation per canary type
 ```
 
 **Local state** (all under `~/.snare/`, mode 0700):
-- `config.json` — device ID, callback base URL, webhook URL (0600)
-- `manifest.json` — active canaries: path, mode, content, hash, timestamps (0600)
+- `config.json` — device ID, device secret, callback base URL, optional webhook URL (0600)
+- `manifest.json` — active canaries: path, mode, content hash, callback URL, timestamps (0600)
 
-Nothing is stored server-side except callback events.
+Nothing is stored server-side except event metadata and webhook registrations.
 
 ### Cloudflare Worker (`worker/`)
 
 Deployed at `snare.sh`. Receives callbacks when bait is accessed.
 
 **Routes:**
-- `GET/POST /c/{token}` — callback receiver; logs event to KV, fires webhooks, returns 1×1 GIF
-- `GET /health` — returns `{"status":"ok"}`
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `GET/POST` | `/c/{token}[/*]` | None | Canary callback — fires alert, returns 1×1 GIF |
+| `POST` | `/api/devices` | None (first-time) | Create server-assigned device ID |
+| `POST` | `/api/register` | Bearer device_secret | Register webhook + metadata for a token |
+| `POST` | `/api/revoke` | Bearer device_secret | Remove a token registration |
+| `GET` | `/api/events/{token}` | Bearer device_secret | Retrieve recent events for a token |
+| `GET` | `/health` | None | Returns `{"status":"ok"}` |
+
+**Auth model:**
+
+Device secret is generated client-side (`crypto/rand`, 32 bytes) during `snare init`. SHA-256 hash stored in KV keyed by device ID on first use. Subsequent calls validate against the stored hash.
+
+Device IDs are server-assigned via `POST /api/devices` — clients cannot choose or squat IDs. Falls back to local random ID if server is unreachable at init time.
+
+`/c/{token}` has **no auth** by design — SDKs and tools must hit this URL without knowing it's a canary.
 
 **KV namespace: `snare-events`**
 
 | Key pattern | Value | TTL |
 |---|---|---|
-| `event:{uuid}` | `{token, ip, ua, timestamp, method, body}` | 7 days |
-| `dedup:{token}:{ip}` | `1` | 60 seconds |
+| `device:{device_id}` | `{secret_hash, created_at}` | No expiry |
+| `webhook:{token_id}` | `{webhook_url, device_id, canary_type, label, registered_at}` | 365 days |
+| `event:{token}:{timestamp}:{uuid}` | event JSON (see below) | 90 days |
+| `dedup:{token}:{ip}:{minute}` | `1` | 120 seconds |
+| `rl:{scope}:{window}` | request count | 2× window duration |
 
-Dedup key prevents alert floods: same token+IP within 60 seconds fires only once.
+**Event JSON fields:** `token`, `is_test`, `timestamp`, `ip`, `userAgent`, `method`, `path`, `country`, `city`, `asn`, `asnOrg`, `botScore`, `sdkHints`
 
-**Webhook delivery:** Worker reads `WEBHOOK_URLS` CF secret (comma-separated). Fires all webhooks in parallel via `Promise.allSettled`. Failures are logged but don't fail the request.
+**No `body` field** — ever. Request bodies are never read, stored, or forwarded.
 
-**Alert format:** Discord/Slack embed with token ID, timestamp, IP, city, ASN, user agent, and "Likely AI agent" indicator when request comes from known cloud ASNs (AWS, GCP, Azure, Cloudflare).
+**Rate limiting:**
+- `/api/*` — 30 requests/minute per IP
+- `/c/{token}` — 10 alerts/minute per token (prevents alert flooding if token ID leaks)
+
+**Webhook delivery:**
+
+1. Load per-token webhook registration from KV (`webhook:{token_id}`)
+2. Fall back to global `WEBHOOK_URLS` CF secret if no per-token registration
+3. Fire all webhooks in parallel via `Promise.allSettled`
+4. Failures logged to CF Workers Logs but don't affect the response
+
+Outbound webhook requests include `X-Snare-Signature: sha256=<hmac>` when `WEBHOOK_SIGNING_SECRET` CF secret is configured. Receivers can verify alerts came from snare.sh.
+
+**Supported webhook formats:** Discord (embed), Slack (attachment), Telegram (HTML), generic JSON (`event: "canary.fired"`).
 
 ---
 
 ## Canary Types
 
-| Type | Target File | SDK Redirect Field | Trigger | Reliability |
-|------|-------------|-------------------|---------|-------------|
-| `aws` | `~/.aws/credentials` | `endpoint_url` | Any boto3/AWS SDK call | High |
-| `gcp` | `~/.config/gcloud/sa-*.json` | `token_uri` | GCP auth attempt | High |
-| `github` | `~/.config/gh/hosts.yml` | `api_endpoint` | `gh` CLI call to fake host | Medium |
-| `stripe` | `~/.config/stripe/config.toml` | comment URL | Agent following verify link | Medium |
-| `openai` | `~/.env.local` | `OPENAI_BASE_URL` | Any OpenAI SDK call | High |
-| `anthropic` | `~/.env.local` | `ANTHROPIC_BASE_URL` | Any Anthropic SDK call | High |
-| `generic` | `~/.env.local` | `API_BASE_URL` | Custom SDK clients | Medium |
+| Type | Location | Mechanism | Trigger | Reliability |
+|------|----------|-----------|---------|-------------|
+| `aws` | `~/.aws/credentials` | `endpoint_url` redirect | Any AWS SDK/CLI call | High |
+| `awsproc` | `~/.aws/config` | `credential_process` shell command | AWS SDK credential resolution | High |
+| `gcp` | `~/.config/gcloud/sa-*.json` | `token_uri` redirect | GCP OAuth token refresh | High |
+| `openai` | `~/.env` | `OPENAI_BASE_URL` redirect | Any OpenAI SDK call | High |
+| `anthropic` | `~/.env.local` | `ANTHROPIC_BASE_URL` redirect | Any Anthropic SDK call | High |
+| `ssh` | `~/.ssh/config` | `ProxyCommand curl` callback | SSH connection attempt | High |
+| `k8s` | `~/.kube/<name>.yaml` | kubeconfig `server` URL | Any `kubectl` call | High |
+| `npm` | `~/.npmrc` | scoped registry URL | `npm install @scope/*` | High |
+| `pypi` | `~/.config/pip/pip.conf` | `extra-index-url` | `pip install` (queries all indexes) | High |
+| `mcp` | `~/.config/mcp-servers*.json` | Streamable HTTP transport URL | MCP client `initialize` request | High |
+| `github` | `~/.config/gh/hosts.yml` | `api_endpoint` field | `gh` CLI call to fake host | Medium |
+| `stripe` | `~/.config/stripe/config.toml` | verify URL in config | Stripe CLI or agent following URL | Medium |
+| `generic` | `~/.env.production` | `API_BASE_URL` | Custom SDK clients | Medium |
 
-**High reliability** = callback URL is a real SDK config field; any API call using that credential hits snare.sh.
+**High reliability** = callback URL is the real SDK service endpoint; any credential use redirects to snare.sh.
 
-**Medium reliability** = callback URL is in a comment or less-standardized field; fires under specific conditions.
+**Medium reliability** = callback URL is less standardized or requires specific agent behavior to trigger.
+
+The `awsproc` canary uses a **two-profile pattern** for maximum realism:
+
+```ini
+# Visible assume-role profile (what attackers scan for)
+[profile prod-admin]
+role_arn = arn:aws:iam::982736450123:role/OrganizationAccountAccessRole
+source_profile = prod-admin-source
+
+# Hidden credential_process source (fires the callback)
+[profile prod-admin-source]
+credential_process = sh -c 'curl -sf https://snare.sh/c/{token} >/dev/null 2>&1; echo "{\"Version\":1,\"AccessKeyId\":\"AKIA...\",\"SecretAccessKey\":\"...\"}"'
+```
+
+The callback fires at credential resolution time — **before any AWS API call is made**.
 
 ---
 
@@ -79,80 +131,124 @@ Dedup key prevents alert floods: same token+IP within 60 seconds fires only once
 
 ```
 1. Render bait content (dry-run, no disk write)
-2. Write manifest record with InactiveReason="pending"
-3. Write bait to disk (O_EXCL for new files, O_APPEND for existing)
-   - New file: full file is bait
-   - Append: add block with sentinel markers, preserve existing content + permissions
-4. Activate manifest record (remove InactiveReason)
+2. Write manifest record with status="pending"
+3. Write bait to disk:
+   - New files: O_CREATE|O_EXCL|O_WRONLY — fails if file exists
+   - Append: O_CREATE|O_APPEND|O_WRONLY — checks for duplicate token ID first
+4. Register token with snare.sh (best-effort, non-blocking)
+5. Activate manifest record
 ```
 
 If step 3 fails, the manifest record stays in "pending" state — detectable and cleanable via `snare teardown --force`.
+
+Registration (step 4) associates the token with the device secret so events can be queried via `snare status`. Uses `"use-global"` sentinel when no local webhook is configured, which binds ownership while routing delivery through the global CF fallback.
 
 ---
 
 ## Teardown Flow
 
 ```
-1. Load manifest, find canary by ID
+1. Load manifest, find canary by ID (or all active)
 2. Read current file from disk
-3. Verify content hash matches (detect file modifications)
-   - Mismatch: error unless --force
+3. Verify content hash matches planted content
+   - Mismatch without --force: error (someone may have added real data)
+   - Mismatch with --force: warn and proceed
 4. For ModeNewFile: os.Remove()
 5. For ModeAppend: find exact content block, write file without it
    - Preserve original file permissions
    - Atomic rename (write to .tmp, rename)
-6. Mark canary inactive in manifest
+6. Revoke token registration from snare.sh (best-effort)
+7. Mark canary inactive in manifest
 ```
 
-The teardown only touches bytes that snare wrote. Real credentials in the same file are never modified.
+Teardown only touches bytes that snare wrote. Real credentials in the same file are never modified.
+
+---
+
+## Device Secret Rotation
+
+```sh
+snare rotate
+```
+
+Generates a new 256-bit device secret, saves to `~/.snare/config.json`, and re-registers all active tokens with the new secret. If a local webhook is configured, tokens are re-registered immediately. If using the global CF fallback, re-registration is automatic on the next `snare arm` cycle.
+
+If the device secret is compromised (e.g., `~/.snare/config.json` was read by an attacker), run `snare rotate` immediately. The old secret becomes invalid.
 
 ---
 
 ## Token Generation
 
-All tokens use `crypto/rand`. Formats match real credentials exactly:
+All tokens use `crypto/rand`. Formats match real credentials exactly — no giveaway strings:
 
-| Token | Format | Example |
-|---|---|---|
-| AWS Key ID | `AKIA` + 16 uppercase alphanumeric | `AKIAFLMSTWYSM6H9JE60` |
-| AWS Secret | 40 chars, base64 charset | `CoXZ2UMcbR5LMG+wosok...` |
-| GitHub PAT | `ghp_` + 36 alphanumeric | `ghp_tAPcckcEZMJnn...` |
-| Stripe live key | `sk_live_` + 24 chars | `sk_live_xK9mPqRt...` |
-| OpenAI key | `sk-proj-` + 48 alphanumeric | `sk-proj-FNPhMPM...` |
-| Anthropic key | `sk-ant-api03-` + 48 chars | `sk-ant-api03-UPS...` |
-| GCP key ID | 40 hex chars | `6e5b6a0e2c8d...` |
-| GCP private key | Fake RSA PEM (1190 random bytes) | `-----BEGIN RSA...` |
-| Canary ID | `{label}-` + 32 hex | `openclaw-fe7d31ff...` |
+| Token | Format |
+|---|---|
+| AWS Key ID | `AKIA` + 16 uppercase alphanumeric |
+| AWS Secret | 40 chars, base64 charset |
+| GitHub PAT | `ghp_` + 36 alphanumeric |
+| Stripe live key | `sk_live_` + 24 chars |
+| OpenAI key | `sk-proj-` + 48 alphanumeric |
+| Anthropic key | `sk-ant-api03-` + 48 chars |
+| GCP client email | `{name}@{project}.iam.gserviceaccount.com` |
+| Canary token ID | `{label}-` + 32 hex chars (128-bit random) |
+| Device ID | `dev-` + 32 hex chars (128-bit random, server-assigned) |
+| Device secret | 64 hex chars (256-bit random, client-generated) |
 
-No giveaway strings. `SNARE`, `FAKE`, `TEST`, `canary` never appear in generated key material.
+`SNARE`, `FAKE`, `TEST`, `canary` never appear in generated key material.
+
+---
+
+## Privacy Guarantees
+
+**Callback traffic (`/c/{token}`):**
+- Request body is **never read, stored, or forwarded** — worker returns the response before consuming the body
+- Canary callbacks may carry real credentials or sensitive data in their body; the worker is deliberately body-blind
+- Only header-derived metadata is stored: IP, user agent, method, path, country, ASN
+
+**Management API (`/api/*`):**
+- Request bodies are read (JSON payloads for registration/revocation)
+- These contain only: token IDs, webhook URLs, device IDs — never credentials or user data
+
+**Network layer:**
+- Cloudflare terminates TLS and transports all requests
+- The privacy guarantee applies to snare.sh application code, not the underlying network
+- Self-hosting the worker provides full network-layer privacy
 
 ---
 
 ## Known Limitations
 
-1. **Manifest is an attacker cheat sheet** — `~/.snare/manifest.json` (0600) contains the exact content of every canary. An attacker who exfiltrates the manifest knows which files are bait and can avoid them. This is inherent to the design. Mitigation: protect `~/.snare/` with file integrity monitoring (Rampart policy).
+1. **Manifest is an attacker cheat sheet** — `~/.snare/manifest.json` (0600) lists every canary path and token ID. An attacker who reads this file knows which credentials are bait. Mitigation: protect `~/.snare/` with file integrity monitoring.
 
-2. **No HMAC on callbacks** — anyone who knows a token ID can fire a false alert. Token IDs are 32 hex chars (128-bit entropy), so brute force isn't practical, but there's no cryptographic proof that a callback came from the actual credential being accessed.
+2. **KV eventual consistency** — Cloudflare KV is eventually consistent. Rate limiting and dedup counters can race under high concurrency. Strict atomicity requires Durable Objects (planned for v2).
 
-3. **Stripe/GitHub canaries are weaker** — they don't redirect SDK calls; they rely on the agent following a URL embedded in config. A sophisticated attacker inspecting credentials before use would recognize the `snare.sh` domain.
+3. **Domain fingerprinting** — `snare.sh` is a known domain once the project is public. Sophisticated attackers could avoid triggering canaries by detecting the domain. Mitigation: custom callback domains (enterprise feature, planned).
 
-4. **Content-hash teardown requires stable files** — if the credential file is modified between plant and teardown (e.g., by another tool), hash verification fails. Use `--force` to skip the check.
+4. **GitHub/Stripe canaries are weaker** — these don't redirect SDK calls; they rely on agents following embedded URLs. A sophisticated attacker inspecting credentials before use may not trigger them.
 
 ---
 
 ## Self-Hosting
 
-The worker is MIT-licensed and fully deployable:
+The worker source is in `worker/`. Deploy to your own Cloudflare account:
 
 ```sh
 cd worker
-wrangler deploy
+npx wrangler deploy
 ```
 
-Point the CLI at your own worker:
+Configure a custom callback base:
 
 ```sh
-SNARE_CALLBACK_BASE=https://your-worker.workers.dev/c snare init
+snare arm --webhook https://your-webhook.example.com
 ```
 
-Set `WEBHOOK_URLS` as a Cloudflare Worker secret to receive alerts.
+> **Note:** The `callback_base` in `~/.snare/config.json` defaults to `https://snare.sh/c`. To use a custom worker, edit `callback_base` directly after `snare init`. Custom callback domains void the managed privacy guarantee — your deployment controls what gets logged.
+
+Set `WEBHOOK_URLS` as a Cloudflare Worker secret for alert delivery, and optionally `WEBHOOK_SIGNING_SECRET` for `X-Snare-Signature` verification.
+
+---
+
+## License
+
+Apache 2.0 — see [LICENSE](./LICENSE).
