@@ -57,19 +57,42 @@ get_latest_version() {
     fi
 }
 
-# Download the binary
+# Download the binary and verify its checksum
 download_binary() {
     BINARY="snare-${PLATFORM}"
     URL="https://github.com/${REPO}/releases/download/${VERSION}/${BINARY}"
+    CHECKSUM_URL="${URL}.sha256"
     TMP_FILE="$(mktemp)"
+    TMP_CHECKSUM="$(mktemp)"
 
     info "Downloading snare ${VERSION} for ${PLATFORM}..."
 
     if command -v curl >/dev/null 2>&1; then
         curl -fsSL "$URL" -o "$TMP_FILE" || fail "Download failed: $URL"
+        curl -fsSL "$CHECKSUM_URL" -o "$TMP_CHECKSUM" || fail "Checksum download failed: $CHECKSUM_URL"
     else
         wget -qO "$TMP_FILE" "$URL" || fail "Download failed: $URL"
+        wget -qO "$TMP_CHECKSUM" "$CHECKSUM_URL" || fail "Checksum download failed: $CHECKSUM_URL"
     fi
+
+    # Verify SHA-256 checksum
+    info "Verifying checksum..."
+    EXPECTED="$(awk '{print $1}' "$TMP_CHECKSUM")"
+    if command -v sha256sum >/dev/null 2>&1; then
+        ACTUAL="$(sha256sum "$TMP_FILE" | awk '{print $1}')"
+    elif command -v shasum >/dev/null 2>&1; then
+        ACTUAL="$(shasum -a 256 "$TMP_FILE" | awk '{print $1}')"
+    else
+        rm -f "$TMP_FILE" "$TMP_CHECKSUM"
+        fail "sha256sum or shasum is required for checksum verification"
+    fi
+    rm -f "$TMP_CHECKSUM"
+
+    if [ "$ACTUAL" != "$EXPECTED" ]; then
+        rm -f "$TMP_FILE"
+        fail "Checksum mismatch! Expected ${EXPECTED}, got ${ACTUAL}. The download may be corrupted or tampered with."
+    fi
+    ok "Checksum verified"
 
     chmod +x "$TMP_FILE"
     echo "$TMP_FILE"
