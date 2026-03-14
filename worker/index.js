@@ -409,8 +409,10 @@ async function handleRegister(request, env) {
   if (!webhook_url?.startsWith("https://")) {
     return json({ error: "webhook_url must be https://" }, 400);
   }
-  if (!isAllowedWebhookURL(webhook_url, env)) {
-    return json({ error: "webhook_url domain not allowed — must be Discord, Slack, Telegram, PagerDuty, or Teams" }, 403);
+  // Allow "use-global" as a sentinel to bind token ownership without a per-token webhook
+  // The worker will use WEBHOOK_URLS global fallback for alert delivery
+  if (webhook_url !== "use-global" && !isAllowedWebhookURL(webhook_url, env)) {
+    return json({ error: "webhook_url domain not allowed — must be Discord, Slack, Telegram, PagerDuty, Teams, or 'use-global'" }, 403);
   }
   if (!device_id) {
     return json({ error: "missing device_id" }, 400);

@@ -1330,9 +1330,14 @@ func authedPost(url string, payload interface{}, cfg *config.Config) (*http.Resp
 
 // registerToken registers a per-token webhook with snare.sh.
 func registerToken(cfg *config.Config, tokenID, canaryType, label string) error {
+	webhookURL := cfg.WebhookURL
+	if webhookURL == "" {
+		// No local webhook — register with sentinel to bind ownership for events auth
+		webhookURL = "use-global"
+	}
 	resp, err := authedPost(cfg.RegisterURL(), map[string]string{
 		"token_id":    tokenID,
-		"webhook_url": cfg.WebhookURL,
+		"webhook_url": webhookURL,
 		"device_id":   cfg.DeviceID,
 		"canary_type": canaryType,
 		"label":       label,
