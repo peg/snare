@@ -32,7 +32,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.22"
+          go-version: "1.24"
           cache: true
 
       - name: Run tests
@@ -49,8 +49,15 @@ jobs:
             -o dist/snare-${{ matrix.suffix }} \
             ./cmd/snare
 
+      - name: Generate checksum
+        run: |
+          cd dist
+          sha256sum snare-${{ matrix.suffix }} > snare-${{ matrix.suffix }}.sha256
+
       - name: Upload to release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/snare-${{ matrix.suffix }}
+          files: |
+            dist/snare-${{ matrix.suffix }}
+            dist/snare-${{ matrix.suffix }}.sha256
           generate_release_notes: true
