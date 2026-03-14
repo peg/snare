@@ -17,22 +17,23 @@ jobs:
         include:
           - goos: linux
             goarch: amd64
-            suffix: linux-amd64
+            suffix: linux_amd64
           - goos: linux
             goarch: arm64
-            suffix: linux-arm64
+            suffix: linux_arm64
           - goos: darwin
             goarch: amd64
-            suffix: darwin-amd64
+            suffix: darwin_amd64
           - goos: darwin
             goarch: arm64
-            suffix: darwin-arm64
+            suffix: darwin_arm64
 
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.24"
+          go-version-file: go.mod
           cache: true
 
       - name: Run tests
@@ -44,20 +45,52 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "0"
         run: |
+          mkdir -p dist
           go build \
             -ldflags="-s -w -X main.version=${{ github.ref_name }}" \
-            -o dist/snare-${{ matrix.suffix }} \
+            -o dist/snare \
             ./cmd/snare
 
-      - name: Generate checksum
+      - name: Package tarball
         run: |
           cd dist
-          sha256sum snare-${{ matrix.suffix }} > snare-${{ matrix.suffix }}.sha256
+          TARBALL="snare_${{ matrix.suffix }}.tar.gz"
+          tar -czf "$TARBALL" snare
+          sha256sum "$TARBALL" >> checksums.txt
 
-      - name: Upload to release
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: snare_${{ matrix.suffix }}
+          path: |
+            dist/snare_${{ matrix.suffix }}.tar.gz
+            dist/checksums.txt
+
+  publish:
+    name: Publish Release
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Merge checksums
+        run: |
+          cd dist
+          cat checksums.txt* > all_checksums.txt 2>/dev/null || cat */checksums.txt > all_checksums.txt 2>/dev/null || true
+          find . -name "checksums.txt" | xargs cat | sort -u > checksums.txt
+          cat checksums.txt
+
+      - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/snare-${{ matrix.suffix }}
-            dist/snare-${{ matrix.suffix }}.sha256
+            dist/**/*.tar.gz
+            dist/checksums.txt
           generate_release_notes: true
+          fail_on_unmatched_files: false
