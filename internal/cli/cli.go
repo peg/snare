@@ -280,10 +280,9 @@ func cmdArm(args []string) {
 				continue
 			}
 
-			// Register webhook (best-effort)
-			if cfg.WebhookURL != "" {
-				_ = registerToken(cfg, params.TokenID, string(bt), label)
-			}
+			// Register with snare.sh — always, so device owns the token for events auth.
+			// registerToken uses "use-global" sentinel when no local webhook configured.
+			_ = registerToken(cfg, params.TokenID, string(bt), label)
 
 			fmt.Printf("    ✓ %-12s %s\n", bt, path)
 			planted++
@@ -295,14 +294,17 @@ func cmdArm(args []string) {
 		return
 	}
 
-	// Step 3: Test webhook
+	// Step 3: Test the full alert pipeline — register test token first, then fire callback.
 	fmt.Println()
-	if cfg.WebhookURL != "" {
+	{
 		shortID := cfg.DeviceID
 		if len(shortID) > 8 {
 			shortID = shortID[len(shortID)-8:]
 		}
 		testToken := "snare-test-" + shortID
+		if err := registerToken(cfg, testToken, "test", "test"); err != nil {
+			fmt.Fprintf(os.Stderr, "  ⚠  test webhook registration failed: %v\n", err)
+		}
 		callbackURL := cfg.CallbackURL(testToken)
 		if err := httpGet(callbackURL); err != nil {
 			fmt.Fprintf(os.Stderr, "  ⚠  webhook test failed: %v\n", err)
@@ -940,8 +942,9 @@ func plantOne(bt bait.Type, label string, cfg *config.Config, m *manifest.Manife
 			continue
 		}
 
-		// Step 5: register webhook with snare.sh (best-effort — don't fail plant on network error)
-		if cfg.WebhookURL != "" && !dryRun {
+		// Step 5: register with snare.sh — always, so device owns the token for events auth.
+		// Uses "use-global" sentinel when no local webhook configured.
+		if !dryRun {
 			if err := registerToken(cfg, params.TokenID, string(bt), label); err != nil {
 				fmt.Fprintf(os.Stderr, "  ⚠️  webhook registration failed (alerts may not arrive): %v\n", err)
 			}
@@ -1088,12 +1091,17 @@ func cmdEvents(args []string) {
 	found := 0
 	for _, c := range active {
 		url := apiBase + "/api/events/" + c.ID
-		resp, err := http.Get(url) //nolint:noctx
+		resp, err := authedGet(url, cfg)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "  ✗ %s: %v\n", c.ID, err)
 			continue
 		}
 		defer resp.Body.Close()
+
+		if resp.StatusCode == 401 || resp.StatusCode == 403 {
+			fmt.Fprintf(os.Stderr, "  ✗ auth failed — run `snare init --force` to re-register\n")
+			break
+		}
 
 		if resp.StatusCode == 404 {
 			continue // no events for this token
@@ -1157,21 +1165,30 @@ func filterEmpty(ss ...string) []string {
 	return out
 }
 
-// cmdTest fires a synthetic callback to verify the alert pipeline.
+// cmdTest fires a synthetic callback to verify the full alert pipeline.
+// It registers the test token with snare.sh first so the worker knows where
+// to deliver the alert, then fires the callback and waits briefly to confirm.
 func cmdTest(args []string) {
 	cfg, err := requireConfig()
 	if err != nil {
 		fatal(err)
 	}
 
-	// Use last 8 chars of device ID to keep token compact in alerts
+	// Derive a stable per-device test token
 	shortID := cfg.DeviceID
 	if len(shortID) > 8 {
 		shortID = shortID[len(shortID)-8:]
 	}
 	testTokenID := "snare-test-" + shortID
-	callbackURL := cfg.CallbackURL(testTokenID)
 
+	// Register the test token so the worker routes alerts to this device's webhook.
+	// This is what actually proves the full pipeline works end-to-end.
+	if err := registerToken(cfg, testTokenID, "test", "test"); err != nil {
+		fmt.Fprintf(os.Stderr, "  ⚠  webhook registration failed: %v\n", err)
+		fmt.Fprintf(os.Stderr, "  The callback will still fire but your webhook may not receive the alert.\n\n")
+	}
+
+	callbackURL := cfg.CallbackURL(testTokenID)
 	fmt.Printf("Firing test alert...\n  %s\n\n", callbackURL)
 
 	err = httpGet(callbackURL)
@@ -1573,6 +1590,18 @@ func requireConfig() (*config.Config, error) {
 }
 
 // authedPost sends a POST with Authorization: Bearer <device_secret>.
+func authedGet(url string, cfg *config.Config) (*http.Response, error) {
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	if cfg != nil && cfg.DeviceSecret != "" {
+		req.Header.Set("Authorization", "Bearer "+cfg.DeviceSecret)
+		req.Header.Set("X-Snare-Device-Id", cfg.DeviceID)
+	}
+	return http.DefaultClient.Do(req)
+}
+
 func authedPost(url string, payload interface{}, cfg *config.Config) (*http.Response, error) {
 	body, _ := json.Marshal(payload)
 	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
