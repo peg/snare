@@ -1,0 +1,35 @@
+version: "3.9"
+
+services:
+  snare:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: snare-server
+    restart: unless-stopped
+    ports:
+      - "${SNARE_PORT:-8080}:8080"
+    volumes:
+      - snare-data:/data
+    environment:
+      # Override any of these in a .env file or via docker compose --env-file
+      - SNARE_PORT=${SNARE_PORT:-8080}
+      - SNARE_DB=/data/snare.db
+      - SNARE_WEBHOOK_URL=${SNARE_WEBHOOK_URL:-}
+      - SNARE_TLS_DOMAIN=${SNARE_TLS_DOMAIN:-}
+    command: >
+      snare serve
+      --port 8080
+      --db /data/snare.db
+      ${SNARE_WEBHOOK_URL:+--webhook-url $SNARE_WEBHOOK_URL}
+      ${SNARE_TLS_DOMAIN:+--tls-domain $SNARE_TLS_DOMAIN}
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+volumes:
+  snare-data:
+    driver: local
