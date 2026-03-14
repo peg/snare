@@ -4,7 +4,10 @@ package token
 
 import (
 	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
 	"encoding/hex"
+	"encoding/pem"
 	"fmt"
 	"math/big"
 	"strings"
@@ -165,23 +168,29 @@ func NewAnthropicKey() (string, error) {
 	return "sk-ant-api03-" + string(b), nil
 }
 
-// NewFakeRSAPrivateKey generates a correctly-formatted RSA-2048 PEM block
-// containing invalid key material. It passes structural/format checks
-// but will fail during actual cryptographic operations.
+// NewFakeRSAPrivateKey generates a fully valid RSA-2048 PEM key for use as a
+// GCP canary. The key is generated fresh each time — it's a throwaway canary
+// credential with no real value. It passes all library validation, allowing
+// JWT construction and the token_uri call to proceed.
 // The key is JSON-safe (newlines as \n).
 func NewFakeRSAPrivateKey() (string, error) {
-	// RSA-2048 DER is ~1190 bytes → ~1588 base64 chars → ~25 lines of 64 chars
-	// We generate random bytes of that length — wrong ASN.1 structure but right size.
-	raw := make([]byte, 1190)
-	if _, err := rand.Read(raw); err != nil {
-		return "", fmt.Errorf("generating fake RSA key: %w", err)
+	// Generate a real RSA-2048 key — this is a disposable canary key,
+	// not protecting any real data. The private key never leaves the machine.
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return "", fmt.Errorf("generating RSA key: %w", err)
 	}
 
-	// Base64-encode and chunk into 64-char lines
-	encoded := encodeBase64Lines(raw, 64)
-
-	pem := "-----BEGIN RSA PRIVATE KEY-----\\n" + encoded + "-----END RSA PRIVATE KEY-----\\n"
-	return pem, nil
+	der := x509.MarshalPKCS1PrivateKey(key)
+	pemBlock := pem.EncodeToMemory(&pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: der,
+	})
+	// Convert to JSON-safe form: replace literal newlines with \n
+	jsonSafe := strings.ReplaceAll(string(pemBlock), "\n", "\\n")
+	// Remove trailing \\n to match GCP format
+	jsonSafe = strings.TrimSuffix(jsonSafe, "\\n") + "\\n"
+	return jsonSafe, nil
 }
 
 func encodeBase64Lines(data []byte, lineLen int) string {
