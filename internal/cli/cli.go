@@ -4,17 +4,22 @@ package cli
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"os/signal"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/peg/snare/internal/bait"
 	"github.com/peg/snare/internal/config"
 	"github.com/peg/snare/internal/manifest"
+	"github.com/peg/snare/internal/serve"
 	"github.com/peg/snare/internal/token"
 )
 
@@ -43,6 +48,7 @@ Commands:
   snare status                 show active canaries
   snare events                 fetch recent alert events from snare.sh
   snare test                   fire a test alert to verify your webhook
+  snare serve [flags]          run self-hosted callback server (replaces snare.sh)
 
 Advanced:
   snare init                   initialize snare on this machine
@@ -67,6 +73,12 @@ Flags (disarm/teardown):
   --force                      remove even if content hash mismatches
   --purge                      also remove ~/.snare/ config directory
   --dry-run                    show what would be removed without writing anything
+
+Flags (serve):
+  --port <n>                   HTTP listen port (default: 8080)
+  --db <path>                  SQLite database path (default: ~/.snare/serve/snare.db)
+  --tls-domain <domain>        enable Let's Encrypt HTTPS for this domain
+  --webhook-url <url>          global fallback webhook URL for alerts
 `
 
 // Run dispatches the CLI command.
@@ -100,6 +112,8 @@ func Run(args []string, version string) {
 		cmdTeardown(rest)
 	case "uninstall":
 		cmdUninstall(rest)
+	case "serve":
+		cmdServe(rest)
 	case "help", "--help", "-h":
 		fmt.Print(usage)
 	case "version", "--version", "-v":
@@ -1117,6 +1131,46 @@ func cmdUninstall(args []string) {
 	if !dryRun {
 		fmt.Println()
 		fmt.Println("  ✓ snare completely uninstalled. No traces left.")
+	}
+}
+
+// cmdServe starts the self-hosted snare HTTP server.
+func cmdServe(args []string) {
+	portStr := flagValue(args, "--port")
+	dbPath := flagValue(args, "--db")
+	tlsDomain := flagValue(args, "--tls-domain")
+	webhookURL := flagValue(args, "--webhook-url")
+
+	cfg := serve.DefaultConfig()
+
+	if portStr != "" {
+		p, err := strconv.Atoi(portStr)
+		if err != nil || p < 1 || p > 65535 {
+			fmt.Fprintf(os.Stderr, "error: invalid --port %q\n", portStr)
+			os.Exit(1)
+		}
+		cfg.Port = p
+	}
+	if dbPath != "" {
+		cfg.DBPath = dbPath
+	}
+	if tlsDomain != "" {
+		cfg.TLSDomain = tlsDomain
+	}
+	if webhookURL != "" {
+		cfg.WebhookURL = webhookURL
+	}
+
+	srv, err := serve.New(cfg)
+	if err != nil {
+		fatal(fmt.Errorf("starting server: %w", err))
+	}
+
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	if err := srv.Serve(ctx); err != nil {
+		fatal(err)
 	}
 }
 
