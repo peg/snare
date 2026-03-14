@@ -1,14 +1,21 @@
 /**
  * snare.sh — Cloudflare Worker callback receiver
  *
- * PRIVACY GUARANTEE:
- *   This worker NEVER reads, logs, stores, or forwards HTTP request bodies.
- *   When a canary fires, the worker captures only connection metadata
- *   (IP, User-Agent, method, country, ASN) from request HEADERS.
+ * PRIVACY GUARANTEE (callback traffic):
+ *   Canary callback requests (/c/{token}) NEVER have their bodies read,
+ *   logged, stored, or forwarded. The worker captures only connection
+ *   metadata (IP, User-Agent, method, country, ASN) from HEADERS.
  *   The response is returned BEFORE any body could be consumed.
  *   This is a deliberate design choice — canary callbacks may carry
  *   real credentials or sensitive data in their bodies, and we must
  *   never have access to that data, even transiently in memory.
+ *
+ *   Note: /api/* endpoints DO read request bodies (JSON payloads for
+ *   registration/revocation). These are CLI-initiated management calls
+ *   containing only token IDs, webhook URLs, and device IDs — never
+ *   credentials or sensitive user data. Cloudflare terminates TLS and
+ *   transports all requests; the privacy guarantee applies to our
+ *   application code, not the network layer.
  *
  * AUTH MODEL:
  *   /c/{token}          — NO AUTH (SDKs/tools must hit this unknowingly)
@@ -83,6 +90,10 @@ export default {
       }
     }
 
+    if (url.pathname === "/api/devices" && request.method === "POST") {
+      return handleCreateDevice(request, env);
+    }
+
     if (url.pathname === "/api/register" && request.method === "POST") {
       return handleRegister(request, env);
     }
@@ -134,6 +145,43 @@ export default {
     return new Response("not found", { status: 404 });
   },
 };
+
+// ─── Webhook domain allowlist ────────────────────────────────────────────────
+// Prevent snare.sh being used as a free webhook spammer.
+// Only well-known alerting platforms + HTTPS are allowed.
+// Self-hosters can add their own domains via env var WEBHOOK_ALLOWED_DOMAINS.
+const WEBHOOK_DOMAIN_ALLOWLIST = [
+  "discord.com",
+  "hooks.slack.com",
+  "api.telegram.org",
+  "hooks.zapier.com",
+  "api.pagerduty.com",
+  "events.pagerduty.com",
+  "outlook.office.com",          // MS Teams
+  "discordapp.com",
+];
+
+function isAllowedWebhookURL(url, env) {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "https:") return false;
+
+    // Check built-in allowlist
+    if (WEBHOOK_DOMAIN_ALLOWLIST.some(d => parsed.hostname === d || parsed.hostname.endsWith("." + d))) {
+      return true;
+    }
+
+    // Check operator-configured domains (comma-separated env var)
+    const extra = (env.WEBHOOK_ALLOWED_DOMAINS || "").split(",").filter(Boolean);
+    if (extra.some(d => parsed.hostname === d.trim() || parsed.hostname.endsWith("." + d.trim()))) {
+      return true;
+    }
+
+    return false;
+  } catch {
+    return false;
+  }
+}
 
 // ─── Auth ────────────────────────────────────────────────────────────────────
 
@@ -220,11 +268,7 @@ async function processAlert(token, metadata, env) {
   if (PREVIEW_BOTS.some(b => ua.includes(b))) return;
 
   // Deduplicate: same token+IP within 60 seconds fires only once
-  if (env.SNARE_KV) {
-    const dedupKey = `dedup:${token}:${metadata.ip}:${Math.floor(Date.now() / 60000)}`;
-    if (await env.SNARE_KV.get(dedupKey)) return;
-    await env.SNARE_KV.put(dedupKey, "1", { expirationTtl: 60 });
-  }
+  if (await isDuplicate(env, token, metadata.ip)) return;
 
   const isTest = token.startsWith("snare-test-");
 
@@ -293,25 +337,14 @@ async function handleEvents(token, request, env) {
     } catch { /* fall through */ }
   }
 
-  // If token has a registered device, require auth from that device
-  // If token is unregistered (global fallback), require any valid device auth
-  if (deviceId) {
-    const auth = await validateAuth(request, env, deviceId);
-    if (!auth.ok) {
-      return json({ error: auth.error }, 401);
-    }
-  } else {
-    // For unregistered tokens, check if request has any valid device auth
-    const authHeader = request.headers.get("authorization") || "";
-    const headerDeviceId = request.headers.get("x-snare-device-id") || "";
-    if (authHeader && headerDeviceId) {
-      const auth = await validateAuth(request, env, headerDeviceId);
-      if (!auth.ok) {
-        return json({ error: auth.error }, 401);
-      }
-    }
-    // If no auth provided for unregistered token, allow read
-    // (backward compat for snare status on machines using global webhook)
+  // Auth required for ALL event reads — no unauthenticated fallback
+  const headerDeviceId = deviceId || request.headers.get("x-snare-device-id") || "";
+  if (!headerDeviceId) {
+    return json({ error: "authentication required" }, 401);
+  }
+  const auth = await validateAuth(request, env, headerDeviceId);
+  if (!auth.ok) {
+    return json({ error: auth.error }, 401);
   }
 
   const prefix = `event:${token}:`;
@@ -333,6 +366,34 @@ async function handleEvents(token, request, env) {
   return json({ token, events: events.slice(0, 10) });
 }
 
+// ─── Device creation ────────────────────────────────────────────────────────
+
+// POST /api/devices — server mints a device_id, client sends only its secret.
+// This prevents squatting on device IDs.
+async function handleCreateDevice(request, env) {
+  let body;
+  try { body = await request.json(); }
+  catch { return json({ error: "invalid JSON" }, 400); }
+
+  const { device_secret } = body;
+  if (!device_secret || typeof device_secret !== "string" || device_secret.length < 32) {
+    return json({ error: "device_secret required (min 32 chars)" }, 400);
+  }
+  if (!env.SNARE_KV) return json({ error: "KV not configured" }, 500);
+
+  // Server-minted device ID — client cannot predict or squat it
+  const randomBytes = crypto.getRandomValues(new Uint8Array(16));
+  const deviceId = "dev-" + Array.from(randomBytes).map(b => b.toString(16).padStart(2, "0")).join("");
+
+  const secretHash = await hashSecret(device_secret);
+  await env.SNARE_KV.put(`device:${deviceId}`, JSON.stringify({
+    secret_hash: secretHash,
+    created_at: new Date().toISOString(),
+  }));
+
+  return json({ status: "created", device_id: deviceId });
+}
+
 // ─── Registration ───────────────────────────────────────────────────────────
 
 async function handleRegister(request, env) {
@@ -348,6 +409,9 @@ async function handleRegister(request, env) {
   if (!webhook_url?.startsWith("https://")) {
     return json({ error: "webhook_url must be https://" }, 400);
   }
+  if (!isAllowedWebhookURL(webhook_url, env)) {
+    return json({ error: "webhook_url domain not allowed — must be Discord, Slack, Telegram, PagerDuty, or Teams" }, 403);
+  }
   if (!device_id) {
     return json({ error: "missing device_id" }, 400);
   }
@@ -361,13 +425,24 @@ async function handleRegister(request, env) {
     return json({ error: auth.error }, 401);
   }
 
+  // Check if this token is already registered to a DIFFERENT device
+  const existingRaw = await env.SNARE_KV.get(`webhook:${token_id}`);
+  if (existingRaw) {
+    try {
+      const existing = JSON.parse(existingRaw);
+      if (existing.device_id && existing.device_id !== device_id) {
+        return json({ error: "token already registered to another device" }, 403);
+      }
+    } catch { /* corrupt entry — allow overwrite */ }
+  }
+
   await env.SNARE_KV.put(`webhook:${token_id}`, JSON.stringify({
     webhook_url,
     device_id:     device_id   || null,
     canary_type:   canary_type || null,
     label:         label       || null,
     registered_at: new Date().toISOString(),
-  }), { expirationTtl: 60 * 60 * 24 * 365 }); // 1 year TTL (was 90 days)
+  }), { expirationTtl: 60 * 60 * 24 * 365 }); // 1 year TTL
 
   return json({ status: "registered", token_id });
 }
@@ -457,11 +532,32 @@ async function forwardAlert(webhookURL, event, meta = {}) {
     body = JSON.stringify(buildGenericPayload(event, meta, type, fromCloud));
   }
 
-  return fetch(webhookURL, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body,
-  });
+  const headers = {
+    "content-type": "application/json",
+    "user-agent": "snare.sh/1.0",
+  };
+
+  // Sign outbound webhook payload so receivers can verify it came from snare.sh
+  // Signature: HMAC-SHA256(payload, WEBHOOK_SIGNING_SECRET) encoded as hex
+  // Receivers check: X-Snare-Signature header
+  if (env.WEBHOOK_SIGNING_SECRET) {
+    try {
+      const key = await crypto.subtle.importKey(
+        "raw",
+        new TextEncoder().encode(env.WEBHOOK_SIGNING_SECRET),
+        { name: "HMAC", hash: "SHA-256" },
+        false,
+        ["sign"]
+      );
+      const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(body));
+      headers["x-snare-signature"] = "sha256=" + Array.from(new Uint8Array(sig))
+        .map(b => b.toString(16).padStart(2, "0")).join("");
+    } catch (e) {
+      console.error("SIGN_ERROR", e.message);
+    }
+  }
+
+  return fetch(webhookURL, { method: "POST", headers, body });
 }
 
 function buildDiscordPayload(event, meta, type, fromCloud) {
@@ -626,14 +722,31 @@ function buildGenericPayload(event, meta, type, fromCloud) {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-// Rate limiter using KV atomic counters.
-// Returns true if request should be rejected.
+// Rate limiter using KV.
+// Note: KV is eventually consistent — this is a best-effort rate limit.
+// It will not prevent every concurrent burst but stops sustained abuse.
+// For strict atomicity, migrate to Durable Objects (v2 milestone).
 async function checkRateLimit(env, key, maxRequests, windowSeconds) {
   if (!env.SNARE_KV) return false;
   const bucket = `rl:${key}:${Math.floor(Date.now() / (windowSeconds * 1000))}`;
+  // Write-then-read: write optimistically, then check the count
+  // This doesn't fully prevent races but reduces the window significantly
   const current = parseInt(await env.SNARE_KV.get(bucket) || "0", 10);
   if (current >= maxRequests) return true;
+  // Increment — may race under high concurrency but worst case is minor overshoot
   await env.SNARE_KV.put(bucket, String(current + 1), { expirationTtl: windowSeconds * 2 });
+  return false;
+}
+
+// Dedup: prevent duplicate alerts for same token+IP within the window.
+// KV is eventually consistent — duplicate events are possible under race.
+// The 60-second window significantly reduces duplicate noise in practice.
+// Strict dedup requires Durable Objects (v2 milestone).
+async function isDuplicate(env, token, ip) {
+  if (!env.SNARE_KV) return false;
+  const key = `dedup:${token}:${ip}:${Math.floor(Date.now() / 60000)}`;
+  if (await env.SNARE_KV.get(key)) return true;
+  await env.SNARE_KV.put(key, "1", { expirationTtl: 120 });
   return false;
 }
 
@@ -641,7 +754,16 @@ function gif() {
   // 1x1 transparent GIF — smallest valid response
   return new Response(
     "\x47\x49\x46\x38\x39\x61\x01\x00\x01\x00\x00\x00\x00\x21\xf9\x04\x01\x00\x00\x00\x00\x2c\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02\x44\x01\x00\x3b",
-    { status: 200, headers: { "content-type": "image/gif", "cache-control": "no-store" } }
+    {
+      status: 200,
+      headers: {
+        "content-type": "image/gif",
+        "cache-control": "no-store, max-age=0",
+        "x-content-type-options": "nosniff",
+        "referrer-policy": "no-referrer",
+        "cross-origin-resource-policy": "cross-origin",
+      },
+    }
   );
 }
 

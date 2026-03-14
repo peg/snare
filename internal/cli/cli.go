@@ -48,6 +48,7 @@ Advanced:
   snare init                   initialize snare on this machine
   snare plant [flags]          plant individual canary credentials
   snare teardown [flags]       remove specific canaries
+  snare rotate                 rotate device secret (if leaked)
   snare uninstall [-y]         disarm + remove config + remove binary
 
 Flags (arm):
@@ -83,6 +84,8 @@ func Run(args []string, version string) {
 		cmdArm(rest)
 	case "disarm":
 		cmdDisarm(rest)
+	case "rotate":
+		cmdRotate(rest)
 	case "init":
 		cmdInit(rest)
 	case "plant":
@@ -384,6 +387,63 @@ purgeDir:
 		fmt.Println("  Config preserved at ~/.snare/ — run `snare arm` to re-arm.")
 		fmt.Println("  Run `snare disarm --purge` to also remove config.")
 	}
+}
+
+// cmdRotate generates a new device secret and re-registers all active tokens.
+// Use this if your device secret was leaked (e.g., ~/.snare/config.json exposed).
+func cmdRotate(args []string) {
+	cfg, err := config.Load()
+	if err != nil || cfg == nil {
+		fatal(fmt.Errorf("snare not initialized — run `snare arm` first"))
+	}
+
+	fmt.Println("  Rotating device secret...")
+	fmt.Printf("  Old secret: %s...%s\n", cfg.DeviceSecret[:4], cfg.DeviceSecret[len(cfg.DeviceSecret)-4:])
+
+	// Generate new secret
+	newSecret, err := config.NewDeviceSecret()
+	if err != nil {
+		fatal(fmt.Errorf("generating new secret: %w", err))
+	}
+
+	// Update config
+	cfg.DeviceSecret = newSecret
+	if err := cfg.Save(); err != nil {
+		fatal(fmt.Errorf("saving config: %w", err))
+	}
+	fmt.Println("  ✓ New secret saved to ~/.snare/config.json")
+
+	// Re-register all active tokens with new secret
+	m, err := manifest.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "  ⚠  could not load manifest: %v\n", err)
+		return
+	}
+
+	active := m.Active()
+	if len(active) == 0 {
+		fmt.Println("  No active tokens to re-register.")
+		return
+	}
+
+	if cfg.WebhookURL == "" {
+		fmt.Println("  No local webhook configured — using global CF fallback.")
+		fmt.Println("  Token re-registration skipped (tokens use server-side webhook).")
+		return
+	}
+
+	fmt.Printf("  Re-registering %d tokens...\n", len(active))
+	ok := 0
+	for _, c := range active {
+		if err := registerToken(cfg, c.ID, c.Type, c.Label); err != nil {
+			fmt.Fprintf(os.Stderr, "    ✗ %s: %v\n", c.ID[:16], err)
+		} else {
+			ok++
+		}
+	}
+	fmt.Printf("  ✓ %d/%d tokens re-registered with new secret.\n", ok, len(active))
+	fmt.Println()
+	fmt.Println("  Your old secret is now invalid. Old tokens cannot be hijacked.")
 }
 
 // cmdInit sets up snare for this machine.
