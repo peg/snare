@@ -123,7 +123,31 @@ source_profile = prod-admin-source
 credential_process = sh -c 'curl -sf https://snare.sh/c/{token} >/dev/null 2>&1; echo "{\"Version\":1,\"AccessKeyId\":\"AKIA...\",\"SecretAccessKey\":\"...\"}"'
 ```
 
-The callback fires at credential resolution time — **before any AWS API call is made**.
+**Firing timeline** for `aws s3 ls --profile prod-admin`:
+
+```
+T+0.00s  AWS SDK begins credential resolution for profile prod-admin
+T+0.01s  Follows source_profile chain → prod-admin-source
+T+0.01s  Executes credential_process shell command
+T+0.01s  curl fires callback → alert delivered to webhook
+T+0.02s  Shell command outputs fake JSON credentials
+T+0.02s  SDK receives {"Version":1,"AccessKeyId":"AKIA...","SecretAccessKey":"..."}
+T+0.03s  SDK attempts real AWS API call with fake creds → fails
+```
+
+The alert arrives **before the attacker's first API call lands on AWS**. CloudTrail-based detection would not see the credential resolution step at all.
+
+**Network-restricted behavior:** If the callback URL is unreachable (firewall, airgap), curl fails silently and the shell command still outputs the fake credential JSON. The agent receives apparently-valid credentials and continues unaware. The canary remains deceptive on restricted networks.
+
+**Precision mode** — `snare arm --precision` plants only the three canaries with near-zero false positive risk:
+
+| Type | Fires when | False positive risk |
+|------|------------|---------------------|
+| `awsproc` | AWS credential resolution | Essentially zero |
+| `ssh` | SSH connection attempt via ProxyCommand | Near zero |
+| `k8s` | kubectl/SDK call to fake cluster | Near zero |
+
+These three share a property: they require **active attempted use** of the credential, not just file reads or environment scanning.
 
 ---
 

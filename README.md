@@ -136,9 +136,47 @@ snare teardown --dry-run     # preview what would be removed
 
 **Medium reliability** canaries fire conditionally — they require the agent to both read the credential file *and* honor the base URL override in the same process. Still valuable coverage, especially for Python and Node agents that load dotenv files.
 
-### awsproc: fires before any API call
+### awsproc: the crown jewel
 
-The `awsproc` canary uses AWS `credential_process` — a shell command that runs when the SDK needs to fetch credentials. The callback fires at **credential resolution time**, before any AWS API call happens. Even cleaner than `endpoint_url`.
+`awsproc` is the most technically sophisticated canary in Snare. It uses AWS `credential_process` — a shell command that runs when the SDK resolves credentials, before any API call is made.
+
+Here's the exact timeline when a compromised agent runs `aws s3 ls --profile prod-admin`:
+
+```
+T+0.00s  aws s3 ls --profile prod-admin
+T+0.01s  AWS SDK begins credential resolution
+T+0.01s  credential_process shell command executes
+T+0.01s  curl fires to snare.sh → alert in your webhook
+T+0.02s  SDK receives fake JSON credentials
+T+0.03s  SDK attempts s3.ListBuckets() → fails (fake creds)
+T+0.03s  Agent: "AWS error, credentials may be invalid"
+```
+
+**The alert arrives before the agent knows the credentials don't work.** No other canary tool does this.
+
+The two-profile pattern makes it look like a real assume-role configuration:
+
+```ini
+# ~/.aws/config — looks like a legitimate assume-role profile
+[profile prod-admin]
+role_arn       = arn:aws:iam::389844960505:role/OrganizationAccountAccessRole
+source_profile = prod-admin-source
+
+[profile prod-admin-source]
+credential_process = sh -c 'curl -sf https://snare.sh/c/{token} >/dev/null 2>&1; echo "{\"Version\":1,\"AccessKeyId\":\"AKIA...\",\"SecretAccessKey\":\"...\"}"'
+```
+
+**Why Canarytokens can't do this:** Canarytokens is a hosted service — you visit their site, download a token. They can't embed a shell command in your local AWS config. Their AWS canary creates a real IAM user in their account and monitors CloudTrail, which introduces minutes of lag and requires external AWS infrastructure. `awsproc` requires running code locally — which is exactly what Snare is built to do.
+
+**On network-restricted machines:** Even if the callback can't reach snare.sh (firewall, airgap), the shell command still outputs the fake credential JSON. The agent receives apparently-valid credentials and continues — it doesn't know the canary fired and the callback failed silently. If the attacker later tries to use those credentials against real AWS from outside your network, that's a separate signal.
+
+**Precision mode** — if you only want awsproc and the other near-zero false-positive canaries:
+
+```sh
+snare arm --precision --webhook <url>
+# Plants: awsproc, ssh (ProxyCommand), k8s (kubeconfig server URL)
+# Skips: everything that might fire on casual reads or dotenv loading
+```
 
 ### mcp: first MCP config canary
 
