@@ -71,6 +71,11 @@ func (c *Config) DevicesURL() string {
 	return c.APIBase() + "/api/devices"
 }
 
+// RotateURL returns the URL for rotating the device secret on snare.sh.
+func (c *Config) RotateURL() string {
+	return c.APIBase() + "/api/rotate"
+}
+
 // Init creates a new device config with a fresh device ID.
 // Errors if config already exists (use --force to overwrite).
 func Init(callbackBase, webhookURL string, force bool) (*Config, error) {

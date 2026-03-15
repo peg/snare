@@ -102,6 +102,10 @@ export default {
       return handleRevoke(request, env);
     }
 
+    if (url.pathname === "/api/rotate" && request.method === "POST") {
+      return handleRotateSecret(request, env);
+    }
+
     // Events lookup: GET /api/events/{token}
     const eventsMatch = url.pathname.match(/^\/api\/events\/([a-zA-Z0-9_-]{8,80})$/);
     if (eventsMatch && request.method === "GET") {
@@ -479,6 +483,43 @@ async function handleRevoke(request, env) {
 
   await env.SNARE_KV.delete(`webhook:${body.token_id}`);
   return json({ status: "revoked", token_id: body.token_id });
+}
+
+// ─── Device secret rotation ──────────────────────────────────────────────────
+
+// POST /api/rotate — update device secret hash for an existing device.
+// Requires: old secret for auth (proves ownership), new secret in body.
+async function handleRotateSecret(request, env) {
+  let body;
+  try { body = await request.json(); }
+  catch { return json({ error: "invalid JSON" }, 400); }
+
+  const { device_id, new_secret } = body;
+  if (!device_id)   return json({ error: "missing device_id" }, 400);
+  if (!new_secret)  return json({ error: "missing new_secret" }, 400);
+  if (new_secret.length < 32) return json({ error: "new_secret too short (min 32 chars)" }, 400);
+  if (!env.SNARE_KV) return json({ error: "KV not configured" }, 500);
+
+  // Auth with current secret (Authorization header)
+  const auth = await validateAuth(request, env, device_id);
+  if (!auth.ok) return json({ error: auth.error }, 401);
+
+  // Hash the new secret and update device record
+  const encoder = new TextEncoder();
+  const keyData = encoder.encode(new_secret);
+  const hashBuf = await crypto.subtle.digest("SHA-256", keyData);
+  const newHash = Array.from(new Uint8Array(hashBuf)).map(b => b.toString(16).padStart(2, "0")).join("");
+
+  const deviceRaw = await env.SNARE_KV.get(`device:${device_id}`);
+  let deviceRecord = {};
+  try { deviceRecord = JSON.parse(deviceRaw || "{}"); } catch { /**/ }
+
+  deviceRecord.secret_hash = newHash;
+  deviceRecord.rotated_at = new Date().toISOString();
+
+  await env.SNARE_KV.put(`device:${device_id}`, JSON.stringify(deviceRecord));
+
+  return json({ status: "rotated", device_id });
 }
 
 // ─── Webhook resolution ─────────────────────────────────────────────────────

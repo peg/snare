@@ -152,6 +152,27 @@ var precisionTypes = []bait.Type{
 }
 
 func cmdArm(args []string) {
+	if hasFlag(args, "--help") || hasFlag(args, "-h") {
+		fmt.Print(`snare arm — initialize snare and plant all recommended canaries
+
+Usage:
+  snare arm [flags]
+
+Flags:
+  --webhook <url>    webhook URL (Discord, Slack, Telegram, PagerDuty, Teams)
+  --label <name>     prefix canary names (defaults to hostname)
+  --precision        plant only awsproc, ssh, k8s (near-zero false positives)
+  --dry-run          show what would be planted without writing anything
+  --help             show this help
+
+Examples:
+  snare arm --webhook https://discord.com/api/webhooks/...
+  snare arm --webhook https://hooks.slack.com/... --label prod-server
+  snare arm --precision --webhook <url>
+`)
+		return
+	}
+
 	webhookURL := flagValue(args, "--webhook")
 	label      := flagValue(args, "--label")
 	dryRun     := hasFlag(args, "--dry-run")
@@ -673,24 +694,42 @@ func cmdRotate(args []string) {
 		return
 	}
 
-	if cfg.WebhookURL == "" {
-		fmt.Println("  No local webhook configured — using global CF fallback.")
-		fmt.Println("  Token re-registration skipped (tokens use server-side webhook).")
+	// Tell the server to update the stored secret hash for this device.
+	// This is the critical step — without it, all subsequent API calls will 401.
+	fmt.Println("  Updating server-side secret hash...")
+	rotateResp, err := authedPost(cfg.RotateURL(), map[string]string{
+		"device_id":  cfg.DeviceID,
+		"new_secret": newSecret,
+	}, cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "  ✗ server rotation failed: %v\n", err)
+		fmt.Fprintf(os.Stderr, "  Config saved locally — run `snare rotate` again once connectivity is restored.\n")
 		return
 	}
-
-	fmt.Printf("  Re-registering %d tokens...\n", len(active))
-	ok := 0
-	for _, c := range active {
-		if err := registerToken(cfg, c.ID, c.Type, c.Label); err != nil {
-			fmt.Fprintf(os.Stderr, "    ✗ %s: %v\n", c.ID[:16], err)
-		} else {
-			ok++
-		}
+	defer rotateResp.Body.Close()
+	if rotateResp.StatusCode != 200 {
+		body, _ := io.ReadAll(rotateResp.Body)
+		fmt.Fprintf(os.Stderr, "  ✗ server rotation failed (HTTP %d): %s\n", rotateResp.StatusCode, strings.TrimSpace(string(body)))
+		fmt.Fprintf(os.Stderr, "  Config saved locally — run `snare rotate` again once the issue is resolved.\n")
+		return
 	}
-	fmt.Printf("  ✓ %d/%d tokens re-registered with new secret.\n", ok, len(active))
+	fmt.Println("  ✓ Server secret hash updated")
+
+	// Re-register all active tokens with new secret
+	if len(active) > 0 {
+		fmt.Printf("  Re-registering %d tokens...\n", len(active))
+		ok := 0
+		for _, c := range active {
+			if err := registerToken(cfg, c.ID, c.Type, c.Label); err != nil {
+				fmt.Fprintf(os.Stderr, "    ✗ %s: %v\n", c.ID[:16], err)
+			} else {
+				ok++
+			}
+		}
+		fmt.Printf("  ✓ %d/%d tokens re-registered with new secret.\n", ok, len(active))
+	}
 	fmt.Println()
-	fmt.Println("  Your old secret is now invalid. Old tokens cannot be hijacked.")
+	fmt.Println("  ✓ Rotation complete. Old secret is now invalid.")
 }
 
 // cmdInit sets up snare for this machine.
@@ -790,9 +829,13 @@ func guidedInit(force bool) {
 
 	var webhookURL string
 	for {
-		if scanner.Scan() {
-			webhookURL = strings.TrimSpace(scanner.Text())
+		if !scanner.Scan() {
+			// EOF or stdin closed — non-interactive environment
+			fmt.Fprintln(os.Stderr, "\n  error: no webhook URL provided")
+			fmt.Fprintln(os.Stderr, "  Use: snare arm --webhook <url>")
+			os.Exit(1)
 		}
+		webhookURL = strings.TrimSpace(scanner.Text())
 		if webhookURL == "" {
 			fmt.Print("  URL cannot be empty. Try again: ")
 			continue
@@ -1687,10 +1730,16 @@ func registerToken(cfg *config.Config, tokenID, canaryType, label string) error 
 		return err
 	}
 	defer resp.Body.Close()
-	io.Copy(io.Discard, resp.Body) //nolint:errcheck
 	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(resp.Body)
+		// Try to extract error message from JSON response
+		var errResp struct{ Error string `json:"error"` }
+		if json.Unmarshal(body, &errResp) == nil && errResp.Error != "" {
+			return fmt.Errorf("registration failed: %s", errResp.Error)
+		}
 		return fmt.Errorf("registration failed: HTTP %d", resp.StatusCode)
 	}
+	io.Copy(io.Discard, resp.Body) //nolint:errcheck
 	return nil
 }
 
