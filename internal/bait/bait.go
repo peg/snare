@@ -612,7 +612,6 @@ users:
 		`
 [global]
 extra-index-url = {{.CallbackURL}}/simple/
-trusted-host = snare.sh
 `)),
 
 	// AWSProc: Appends a credential_process profile to ~/.aws/config.

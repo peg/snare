@@ -312,7 +312,7 @@ async function processAlert(token, metadata, env) {
   const { webhooks, meta } = await resolveWebhooks(token, env);
 
   const results = await Promise.allSettled(
-    webhooks.map(wh => forwardAlert(wh, event, meta))
+    webhooks.map(wh => forwardAlert(wh, event, meta, env))
   );
   results.forEach((r, i) => {
     if (r.status === "rejected") {
@@ -515,7 +515,7 @@ async function resolveWebhooks(token, env) {
 
 // ─── Alert formatting ────────────────────────────────────────────────────────
 
-async function forwardAlert(webhookURL, event, meta = {}) {
+async function forwardAlert(webhookURL, event, meta = {}, env = {}) {
   const isDiscord  = webhookURL.includes("discord.com/api/webhooks");
   const isSlack    = webhookURL.includes("hooks.slack.com");
   const isTelegram = webhookURL.includes("api.telegram.org");
