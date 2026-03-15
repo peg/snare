@@ -55,17 +55,19 @@ curl -fsSL "$DOWNLOAD_URL" -o "${TMP}/${TARBALL}"
 # Verify checksum
 curl -fsSL "$CHECKSUM_URL" -o "${TMP}/checksums.txt"
 EXPECTED=$(grep "$TARBALL" "${TMP}/checksums.txt" | awk '{print $1}')
-if [ -n "$EXPECTED" ]; then
-  ACTUAL=$(sha256sum "${TMP}/${TARBALL}" 2>/dev/null | awk '{print $1}' \
-    || shasum -a 256 "${TMP}/${TARBALL}" | awk '{print $1}')
-  if [ "$EXPECTED" != "$ACTUAL" ]; then
-    echo "Checksum mismatch — download may be corrupt" >&2
-    echo "  expected: $EXPECTED" >&2
-    echo "  actual:   $ACTUAL" >&2
-    exit 1
-  fi
-  echo "✓ Checksum verified"
+if [ -z "$EXPECTED" ]; then
+  echo "Failed to find checksum for ${TARBALL} in checksums.txt" >&2
+  exit 1
 fi
+ACTUAL=$(sha256sum "${TMP}/${TARBALL}" 2>/dev/null | awk '{print $1}' \
+  || shasum -a 256 "${TMP}/${TARBALL}" | awk '{print $1}')
+if [ "$EXPECTED" != "$ACTUAL" ]; then
+  echo "Checksum mismatch — download may be corrupt or tampered" >&2
+  echo "  expected: $EXPECTED" >&2
+  echo "  actual:   $ACTUAL" >&2
+  exit 1
+fi
+echo "✓ Checksum verified"
 
 # Extract
 tar -xzf "${TMP}/${TARBALL}" -C "$TMP"
