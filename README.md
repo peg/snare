@@ -121,20 +121,20 @@ snare teardown --dry-run     # preview what would be removed
 | `aws` | `~/.aws/credentials` | Any AWS SDK/CLI call via `endpoint_url` | High |
 | `awsproc` | `~/.aws/config` | AWS SDK credential resolution via `credential_process` | High |
 | `gcp` | `~/.config/gcloud/sa-*.json` | GCP auth attempt via `token_uri` redirect | High |
-| `openai` | `~/.env` | Any OpenAI SDK call via `OPENAI_BASE_URL` | High |
-| `anthropic` | `~/.env.local` | Any Anthropic SDK call via `ANTHROPIC_BASE_URL` | High |
+| `openai` | `~/.env` | Any OpenAI SDK call via `OPENAI_BASE_URL` | Medium |
+| `anthropic` | `~/.env.local` | Any Anthropic SDK call via `ANTHROPIC_BASE_URL` | Medium |
 | `ssh` | `~/.ssh/config` | SSH connection via `ProxyCommand` callback | High |
 | `k8s` | `~/.kube/<name>.yaml` | Any `kubectl` call to fake cluster | High |
-| `npm` | `~/.npmrc` | `npm install` of scoped package from fake registry | High |
+| `npm` | `~/.npmrc` | `npm install` of scoped package from fake registry | Medium |
 | `pypi` | `~/.config/pip/pip.conf` | `pip install` queries fake extra index | High |
-| `mcp` | `~/.config/mcp-servers*.json` | MCP client connects to fake HTTP server | High |
+| `mcp` | `~/.config/mcp-servers*.json` | MCP client connects to fake HTTP server | Medium |
 | `github` | `~/.config/gh/hosts.yml` | `gh` CLI targeting fake Enterprise host | Medium |
 | `stripe` | `~/.config/stripe/config.toml` | Stripe CLI or agent following verify URL | Medium |
 | `generic` | `~/.env.production` | Any SDK reading `API_BASE_URL` | Medium |
 
-**High reliability** canaries detect active exploitation — the callback URL is the service endpoint, so any API call using that credential hits snare.sh before the attacker can do anything else.
+**High reliability** canaries fire whenever the credential is used — the callback URL *is* the service endpoint, so any SDK call redirects to snare.sh automatically.
 
-**Medium reliability** canaries fire under more specific conditions but still provide valuable coverage.
+**Medium reliability** canaries fire conditionally — they require the agent to both read the credential file *and* honor the base URL override in the same process. Still valuable coverage, especially for Python and Node agents that load dotenv files.
 
 ### awsproc: fires before any API call
 
@@ -220,6 +220,8 @@ npx wrangler deploy
 Set `WEBHOOK_URLS` as a Cloudflare Worker secret for alert delivery. Optionally set `WEBHOOK_SIGNING_SECRET` to sign outbound webhook requests.
 
 To use a custom callback server, edit `callback_base` in `~/.snare/config.json` after `snare init`.
+
+**Dashboard auth required:** `snare serve` requires `--dashboard-token` (or `SNARE_DASHBOARD_TOKEN` env var) to protect the alert dashboard. Generate one with `openssl rand -hex 32`.
 
 ---
 

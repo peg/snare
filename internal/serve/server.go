@@ -19,10 +19,11 @@ import (
 
 // Config holds the server configuration.
 type Config struct {
-	Port       int    // listen port (default 8080)
-	DBPath     string // path to SQLite database
-	TLSDomain  string // if set, enable Let's Encrypt TLS
-	WebhookURL string // global fallback webhook URL
+	Port           int    // listen port (default 8080)
+	DBPath         string // path to SQLite database
+	TLSDomain      string // if set, enable Let's Encrypt TLS
+	WebhookURL     string // global fallback webhook URL
+	DashboardToken string // bearer token for dashboard + dashboard API auth (required)
 }
 
 // DefaultConfig returns sensible defaults.
@@ -67,15 +68,58 @@ func New(cfg Config) (*Server, error) {
 
 // routes wires all HTTP handlers.
 func (s *Server) routes() {
+	// Unauthenticated: canary callbacks and health
+	s.mux.HandleFunc("/c/", s.handleCanary)
 	s.mux.HandleFunc("/health", s.handleHealth)
+
+	// Device API: authenticated by device secret (per-device bearer token)
 	s.mux.HandleFunc("/api/devices", s.handleCreateDevice)
 	s.mux.HandleFunc("/api/register", s.handleRegister)
 	s.mux.HandleFunc("/api/revoke", s.handleRevoke)
 	s.mux.HandleFunc("/api/events/", s.handleEvents)
-	s.mux.HandleFunc("/api/dashboard/alerts", s.handleDashboardAlerts)
-	s.mux.HandleFunc("/api/dashboard/devices", s.handleDashboardDevices)
-	s.mux.HandleFunc("/c/", s.handleCanary)
-	s.mux.HandleFunc("/", s.handleDashboard)
+
+	// Dashboard: authenticated by DashboardToken (operator-level access)
+	s.mux.HandleFunc("/api/dashboard/alerts", s.requireDashboardAuth(s.handleDashboardAlerts))
+	s.mux.HandleFunc("/api/dashboard/devices", s.requireDashboardAuth(s.handleDashboardDevices))
+	s.mux.HandleFunc("/", s.requireDashboardAuth(s.handleDashboard))
+}
+
+// requireDashboardAuth wraps a handler to require Bearer token authentication.
+// The token must match cfg.DashboardToken. If DashboardToken is empty, the
+// server refuses to start (enforced in cmdServe).
+func (s *Server) requireDashboardAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.cfg.DashboardToken == "" {
+			http.Error(w, "dashboard auth not configured", http.StatusServiceUnavailable)
+			return
+		}
+		auth := r.Header.Get("Authorization")
+		if auth == "Bearer "+s.cfg.DashboardToken {
+			next(w, r)
+			return
+		}
+		// Also accept token as query param for browser access to the dashboard
+		if r.URL.Query().Get("token") == s.cfg.DashboardToken {
+			next(w, r)
+			return
+		}
+		// For the dashboard HTML page, show a simple login form
+		if r.Header.Get("Accept") != "" && strings.Contains(r.Header.Get("Accept"), "text/html") {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.WriteHeader(http.StatusUnauthorized)
+			fmt.Fprintf(w, `<!doctype html><html><head><title>Snare — Login</title>
+<style>body{background:#0a0a0b;color:#f0f0f2;font-family:monospace;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}
+form{background:#111113;border:1px solid #232328;border-radius:8px;padding:2rem;display:flex;flex-direction:column;gap:1rem;min-width:320px}
+input{background:#0a0a0b;border:1px solid #232328;color:#f0f0f2;padding:.625rem .875rem;border-radius:5px;font-family:monospace}
+button{background:#f5a623;color:#0a0a0b;border:none;padding:.625rem 1.25rem;border-radius:5px;font-weight:600;cursor:pointer}</style></head>
+<body><form method="GET"><h2 style="margin:0">🪤 snare</h2>
+<input type="password" name="token" placeholder="Dashboard token" autofocus>
+<button>Access dashboard</button></form></body></html>`)
+			return
+		}
+		w.Header().Set("WWW-Authenticate", `Bearer realm="snare dashboard"`)
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	}
 }
 
 // Serve starts the HTTP (or HTTPS) server and blocks until ctx is cancelled.

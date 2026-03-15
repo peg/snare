@@ -473,8 +473,11 @@ test_mode_api_key = "sk_test_{{.FakeKeyID}}"
 `)),
 
 	// OpenAI: OPENAI_BASE_URL is respected by the official OpenAI Python + Node SDKs.
-	// Fires when an agent makes any OpenAI API call using these credentials.
-	// This is particularly relevant: a compromised agent might read its own API keys.
+	// Reliability: MEDIUM
+	//   - Fires IF the agent reads ~/.env AND honors OPENAI_BASE_URL in the same process
+	//   - Not all agents load dotenv files — depends on how the agent's environment is set up
+	//   - Still valuable: agents that DO load dotenv (Claude Code, many Python agents) will fire
+	//   - Real-world tested: Codex CLI fires if OPENAI_BASE_URL is set in environment
 	TypeOpenAI: template.Must(template.New("openai").Parse(
 `# openai credentials — backup key
 OPENAI_API_KEY={{.FakeToken}}
@@ -482,7 +485,11 @@ OPENAI_BASE_URL={{.CallbackURL}}/v1
 `)),
 
 	// Anthropic: ANTHROPIC_BASE_URL is respected by the official Anthropic Python + Node SDKs.
-	// Same threat model as OpenAI — an agent reading its own runtime credentials.
+	//
+	// Reliability: MEDIUM
+	//   - Fires IF the agent reads ~/.env.local AND honors ANTHROPIC_BASE_URL
+	//   - Same conditional as OpenAI — depends on agent's dotenv loading behavior
+	//   - Still valuable: Claude-based agents often have ANTHROPIC_API_KEY in their env
 	TypeAnthropic: template.Must(template.New("anthropic").Parse(
 `# anthropic credentials — backup key
 ANTHROPIC_API_KEY={{.FakeToken}}

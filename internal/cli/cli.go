@@ -28,10 +28,13 @@ import (
 // reliability returns a human-readable reliability label per canary type.
 func reliability(t string) string {
 	switch bait.Type(t) {
-	case bait.TypeAWS, bait.TypeGCP, bait.TypeOpenAI, bait.TypeAnthropic,
-		bait.TypeSSH, bait.TypeK8s, bait.TypeNPM, bait.TypeMCP,
-		bait.TypePyPI, bait.TypeAWSProc:
+	// High: callback URL is the real SDK service endpoint — fires on any use
+	case bait.TypeAWS, bait.TypeAWSProc, bait.TypeGCP,
+		bait.TypeSSH, bait.TypeK8s, bait.TypePyPI:
 		return "high"
+	// Medium-high: fires reliably but requires specific agent behavior
+	case bait.TypeOpenAI, bait.TypeAnthropic, bait.TypeNPM, bait.TypeMCP:
+		return "medium"
 	default:
 		return "medium"
 	}
@@ -60,7 +63,7 @@ Advanced:
   snare plant [flags]          plant individual canary credentials
   snare teardown [flags]       remove specific canaries
   snare rotate                 rotate device secret (if leaked)
-  snare uninstall [-y]         disarm + remove config + remove binary
+  snare uninstall [-y] [--force]  disarm + remove config + remove binary
 
 Flags (arm):
   --webhook <url>              webhook URL (Discord, Slack, Telegram, or custom)
@@ -84,6 +87,8 @@ Flags (serve):
   --db <path>                  SQLite database path (default: ~/.snare/serve/snare.db)
   --tls-domain <domain>        enable Let's Encrypt HTTPS for this domain
   --webhook-url <url>          global fallback webhook URL for alerts
+  --dashboard-token <token>    required: token to protect the dashboard (min 16 chars)
+                               also: SNARE_DASHBOARD_TOKEN env var
 `
 
 // Run dispatches the CLI command.
@@ -282,7 +287,11 @@ func cmdArm(args []string) {
 
 			// Register with snare.sh — always, so device owns the token for events auth.
 			// registerToken uses "use-global" sentinel when no local webhook configured.
-			_ = registerToken(cfg, params.TokenID, string(bt), label)
+			if err := registerToken(cfg, params.TokenID, string(bt), label); err != nil {
+				fmt.Fprintf(os.Stderr, "    ⚠  %-12s planted but registration failed: %v\n", bt, err)
+				fmt.Fprintf(os.Stderr, "       Canary is active but alerts may not be delivered.\n")
+				fmt.Fprintf(os.Stderr, "       Run `snare doctor` to diagnose.\n")
+			}
 
 			fmt.Printf("    ✓ %-12s %s\n", bt, path)
 			planted++
@@ -833,11 +842,13 @@ func guidedInit(force bool) {
 	fmt.Println()
 }
 
-// highReliabilityTypes returns all high-reliability canary types.
+// armCanaryTypes are planted by default with `snare arm` — the full recommended set.
+// High reliability types fire when the SDK actually uses the credential.
+// Medium reliability types fire conditionally but are still valuable coverage.
 var highReliabilityTypes = []bait.Type{
-	bait.TypeAWS, bait.TypeGCP, bait.TypeOpenAI, bait.TypeAnthropic,
-	bait.TypeSSH, bait.TypeK8s, bait.TypeNPM, bait.TypeMCP,
-	bait.TypePyPI, bait.TypeAWSProc,
+	bait.TypeAWS, bait.TypeAWSProc, bait.TypeGCP,
+	bait.TypeSSH, bait.TypeK8s, bait.TypePyPI,
+	bait.TypeOpenAI, bait.TypeAnthropic, bait.TypeNPM, bait.TypeMCP,
 }
 
 // cmdPlant deploys canary credentials to this machine.
@@ -1302,14 +1313,19 @@ func cmdUninstall(args []string) {
 				}
 			} else {
 				fmt.Printf("  Removing %d canaries...\n", len(active))
+				forceRemove := hasFlag(args, "--force")
 				for _, c := range active {
-					if err := bait.Remove(c, true, false); err != nil {
-						fmt.Fprintf(os.Stderr, "    ✗ %-12s %s: %v\n", c.Type, c.Path, err)
+					if err := bait.Remove(c, forceRemove, false); err != nil {
+						if strings.Contains(err.Error(), "content has changed") {
+							fmt.Fprintf(os.Stderr, "    ⚠  %-12s %s: content changed since planting — skipping (use --force to override)\n", c.Type, c.Path)
+						} else {
+							fmt.Fprintf(os.Stderr, "    ✗  %-12s %s: %v\n", c.Type, c.Path, err)
+						}
 						continue
 					}
 					_ = m.Deactivate(c.ID, "uninstall")
 					// Deregister webhook (best-effort)
-					if cfg, loadErr := config.Load(); loadErr == nil && cfg != nil && cfg.WebhookURL != "" {
+					if cfg, loadErr := config.Load(); loadErr == nil && cfg != nil {
 						_ = revokeToken(cfg, c.ID)
 					}
 					fmt.Printf("    ✓ %-12s %s\n", c.Type, c.Path)
@@ -1357,12 +1373,32 @@ func cmdUninstall(args []string) {
 
 // cmdServe starts the self-hosted snare HTTP server.
 func cmdServe(args []string) {
-	portStr := flagValue(args, "--port")
-	dbPath := flagValue(args, "--db")
-	tlsDomain := flagValue(args, "--tls-domain")
+	portStr    := flagValue(args, "--port")
+	dbPath     := flagValue(args, "--db")
+	tlsDomain  := flagValue(args, "--tls-domain")
 	webhookURL := flagValue(args, "--webhook-url")
+	dashToken  := flagValue(args, "--dashboard-token")
+
+	// Also accept token from env var
+	if dashToken == "" {
+		dashToken = os.Getenv("SNARE_DASHBOARD_TOKEN")
+	}
+
+	if dashToken == "" {
+		fmt.Fprintln(os.Stderr, "error: --dashboard-token is required for snare serve")
+		fmt.Fprintln(os.Stderr, "  This token protects the dashboard and alert API from unauthorized access.")
+		fmt.Fprintln(os.Stderr, "  Set it with --dashboard-token <token> or SNARE_DASHBOARD_TOKEN env var.")
+		fmt.Fprintln(os.Stderr, "  Generate one with: openssl rand -hex 32")
+		os.Exit(1)
+	}
+
+	if len(dashToken) < 16 {
+		fmt.Fprintln(os.Stderr, "error: --dashboard-token must be at least 16 characters")
+		os.Exit(1)
+	}
 
 	cfg := serve.DefaultConfig()
+	cfg.DashboardToken = dashToken
 
 	if portStr != "" {
 		p, err := strconv.Atoi(portStr)
