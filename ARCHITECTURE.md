@@ -95,13 +95,13 @@ Outbound webhook requests include `X-Snare-Signature: sha256=<hmac>` when `WEBHO
 | `aws` | `~/.aws/credentials` | `endpoint_url` redirect | Any AWS SDK/CLI call | High |
 | `awsproc` | `~/.aws/config` | `credential_process` shell command | AWS SDK credential resolution | High |
 | `gcp` | `~/.config/gcloud/sa-*.json` | `token_uri` redirect | GCP OAuth token refresh | High |
-| `openai` | `~/.env` | `OPENAI_BASE_URL` redirect | Any OpenAI SDK call | High |
-| `anthropic` | `~/.env.local` | `ANTHROPIC_BASE_URL` redirect | Any Anthropic SDK call | High |
+| `openai` | `~/.env` | `OPENAI_BASE_URL` redirect | Agent reads dotenv AND honors base URL | Medium |
+| `anthropic` | `~/.env.local` | `ANTHROPIC_BASE_URL` redirect | Agent reads dotenv AND honors base URL | Medium |
 | `ssh` | `~/.ssh/config` | `ProxyCommand curl` callback | SSH connection attempt | High |
 | `k8s` | `~/.kube/<name>.yaml` | kubeconfig `server` URL | Any `kubectl` call | High |
-| `npm` | `~/.npmrc` | scoped registry URL | `npm install @scope/*` | High |
+| `npm` | `~/.npmrc` | scoped registry URL | `npm install @scope/*` | Medium |
 | `pypi` | `~/.config/pip/pip.conf` | `extra-index-url` | `pip install` (queries all indexes) | High |
-| `mcp` | `~/.config/mcp-servers*.json` | Streamable HTTP transport URL | MCP client `initialize` request | High |
+| `mcp` | `~/.config/mcp-servers*.json` | Streamable HTTP transport URL | MCP client `initialize` request | Medium |
 | `github` | `~/.config/gh/hosts.yml` | `api_endpoint` field | `gh` CLI call to fake host | Medium |
 | `stripe` | `~/.config/stripe/config.toml` | verify URL in config | Stripe CLI or agent following URL | Medium |
 | `generic` | `~/.env.production` | `API_BASE_URL` | Custom SDK clients | Medium |
