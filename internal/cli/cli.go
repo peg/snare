@@ -68,6 +68,8 @@ Advanced:
 Flags (arm):
   --webhook <url>              webhook URL (Discord, Slack, Telegram, or custom)
   --label <name>               prefix canary names (defaults to hostname)
+  --precision                  plant only highest-signal canaries (awsproc, ssh, k8s)
+                               near-zero false positives; fires only on active credential use
   --dry-run                    show what would be planted without writing
 
 Flags (plant):
@@ -140,10 +142,20 @@ func Run(args []string, version string) {
 
 // cmdArm is the one-command setup: init + plant all + test.
 // This is the happy path for new machines.
+// precisionTypes are the highest-signal canaries: near-zero false positives,
+// fire only on active credential use or resolution. For environments where
+// you want maximum signal-to-noise ratio.
+var precisionTypes = []bait.Type{
+	bait.TypeAWSProc, // fires at credential resolution — before any API call
+	bait.TypeSSH,     // fires on SSH connection attempt via ProxyCommand
+	bait.TypeK8s,     // fires on any kubectl/SDK call to fake cluster
+}
+
 func cmdArm(args []string) {
 	webhookURL := flagValue(args, "--webhook")
-	label := flagValue(args, "--label")
-	dryRun := hasFlag(args, "--dry-run")
+	label      := flagValue(args, "--label")
+	dryRun     := hasFlag(args, "--dry-run")
+	precision  := hasFlag(args, "--precision")
 
 	if label == "" {
 		if h, err := os.Hostname(); err == nil {
@@ -212,9 +224,15 @@ func cmdArm(args []string) {
 	fmt.Println()
 	fmt.Println("  Planting canaries...")
 
+	armTypes := highReliabilityTypes
+	if precision {
+		armTypes = precisionTypes
+		fmt.Println("  Precision mode: planting highest-signal canaries only (awsproc, ssh, k8s)")
+	}
+
 	planted := 0
 	skipped := 0
-	for _, bt := range highReliabilityTypes {
+	for _, bt := range armTypes {
 		params, err := buildParams(bt, label, cfg)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "    ✗ %s: %v\n", bt, err)
