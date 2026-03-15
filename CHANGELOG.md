@@ -7,7 +7,7 @@ Versioning: [Semantic Versioning](https://semver.org/)
 
 ---
 
-## [Unreleased]
+## [0.1.0] - 2026-03-15
 
 ### Added
 - `snare arm --precision` — plants only the 3 highest-signal canaries (awsproc, ssh, k8s) with near-zero false positive risk
