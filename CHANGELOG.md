@@ -7,6 +7,16 @@ Versioning: [Semantic Versioning](https://semver.org/)
 
 ---
 
+## [Unreleased]
+
+## [0.1.1] - 2026-03-16
+
+### Fixed
+- Worker: false-positive filtering — AWS canaries require AWS4-HMAC-SHA256 signature, GCP canaries require POST, known scanner orgs (Shodan, Censys, Rapid7, etc.) silently dropped
+- `install.sh`: checksum verification now fails closed — previously skipped silently if checksum lookup returned empty
+- README: added missing commands (`snare doctor`, `snare events`, `snare config`, `snare serve`)
+- CHANGELOG: correctly marked v0.1.0 release date
+
 ## [0.1.0] - 2026-03-15
 
 ### Added
