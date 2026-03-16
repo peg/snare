@@ -92,8 +92,13 @@ snare arm [--webhook <url>]  # initialize + plant all canaries + test
 snare disarm                 # remove all canaries (keep config)
 snare disarm --purge         # remove canaries + ~/.snare/ config
 snare status                 # show active canaries + last-seen timestamps
+snare events                 # fetch recent alert history from snare.sh
 snare test                   # fire a test alert to verify your webhook
+snare doctor                 # validate configuration and canary health
+snare config                 # show current config
+snare config set webhook <url>  # update webhook URL
 snare rotate                 # rotate device secret (if config.json was exposed)
+snare serve [--dashboard-token <token>]  # run self-hosted callback server
 snare uninstall              # remove everything including the binary
 ```
 
