@@ -160,28 +160,6 @@ func (d *DB) deleteToken(tokenID string) error {
 	return err
 }
 
-// listTokens returns all token registrations (for dashboard).
-func (d *DB) listTokens() ([]tokenReg, error) {
-	rows, err := d.db.Query(`
-		SELECT token_id, device_id, COALESCE(webhook_url,''), COALESCE(canary_type,''), COALESCE(label,''), registered_at
-		FROM tokens ORDER BY registered_at DESC
-	`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var out []tokenReg
-	for rows.Next() {
-		var t tokenReg
-		if err := rows.Scan(&t.TokenID, &t.DeviceID, &t.WebhookURL, &t.CanaryType, &t.Label, &t.RegisteredAt); err != nil {
-			return nil, err
-		}
-		out = append(out, t)
-	}
-	return out, rows.Err()
-}
-
 // ─── Event operations ─────────────────────────────────────────────────────────
 
 type event struct {

@@ -43,23 +43,6 @@ var cloudProviders = []string{
 	"together", "replicate", "modal",
 }
 
-// alertPayload is the generic JSON payload sent to webhooks.
-type alertPayload struct {
-	Token      string `json:"token"`
-	Timestamp  string `json:"timestamp"`
-	IP         string `json:"ip"`
-	UserAgent  string `json:"user_agent"`
-	CanaryType string `json:"canary_type,omitempty"`
-	Label      string `json:"label,omitempty"`
-	IsTest     bool   `json:"is_test"`
-	Method     string `json:"method,omitempty"`
-	Path       string `json:"path,omitempty"`
-	Country    string `json:"country,omitempty"`
-	City       string `json:"city,omitempty"`
-	ASN        string `json:"asn,omitempty"`
-	ASNOrg     string `json:"asn_org,omitempty"`
-}
-
 // deliverWebhook sends an alert to the configured webhook URL.
 // It selects the appropriate format based on the URL.
 func deliverWebhook(webhookURL string, e event, reg *tokenReg) {
