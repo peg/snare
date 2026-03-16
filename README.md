@@ -2,17 +2,17 @@
 
 **Compromise detection for AI agents via deception.**
 
-Snare plants fake credentials in your agent's environment. If the agent gets hijacked and goes hunting for credentials, it finds yours — and you get an instant alert.
+Snare plants fake credentials in your agent's environment. When a hijacked agent goes hunting for credentials, it finds yours and phones home.
 
-No daemon. No proxy. No policy changes. The bait phones home.
+No daemon. No proxy. No policy changes.
 
 ---
 
 ## How it works
 
-A hijacked AI agent — one that's been prompt-injected or otherwise compromised — does something a healthy agent doesn't: it looks for credentials it wasn't told about and tries to use them.
+A hijacked AI agent does something a healthy one doesn't: it looks for credentials it was never told about and tries to use them.
 
-Snare exploits this. It plants convincing fake AWS keys, GCP service accounts, GitHub tokens, and more in the standard locations where real credentials live. Each fake credential has the callback URL embedded as the **service endpoint**, not a comment:
+Snare exploits this. It plants convincing fake AWS keys, GCP service accounts, GitHub tokens, and more in the standard locations where real credentials live. Each fake credential has the callback URL baked in as the **service endpoint**, not a comment:
 
 ```ini
 # ~/.aws/credentials
@@ -37,7 +37,7 @@ UA      Boto3/1.34.46 md/Botocore#1.34.46 ua/2.0 os/linux#6.8.0...
 ⚠️ Likely AI agent   Request originated from Amazon Technologies Inc
 ```
 
-The Boto3 user agent tells you exactly which SDK fired it. The ASN tells you it came from a cloud-hosted agent. **The credential itself is the sensor.**
+The Boto3 user agent tells you which SDK fired it. The ASN tells you it came from a cloud-hosted agent. **The credential itself is the sensor.**
 
 ---
 
@@ -49,7 +49,7 @@ curl -fsSL https://snare.sh/install | sh
 
 Or download a binary from [releases](https://github.com/peg/snare/releases).
 
-**Requirements:** Linux or macOS, no other dependencies.
+Requires Linux or macOS. No other dependencies.
 
 ---
 
@@ -59,7 +59,7 @@ Or download a binary from [releases](https://github.com/peg/snare/releases).
 snare arm --webhook https://discord.com/api/webhooks/YOUR/WEBHOOK
 ```
 
-That's it. Snare initializes itself, plants canaries across all your credential locations, fires a test alert to confirm your webhook works, and reports what's armed.
+That's it. Snare initializes, plants canaries across your credential locations, fires a test alert to confirm the webhook works, and tells you what's armed.
 
 ```
   ✓ initialized (device: dev-2146102a5849a7b3)
@@ -81,7 +81,7 @@ That's it. Snare initializes itself, plants canaries across all your credential 
   🪤 10 canaries armed. This machine is protected.
 ```
 
-**Supported webhook destinations:** Discord, Slack, Telegram, PagerDuty, MS Teams.
+Supported webhook destinations: Discord, Slack, Telegram, PagerDuty, MS Teams.
 
 ---
 
@@ -102,13 +102,9 @@ snare serve [--dashboard-token <token>]  # run self-hosted callback server
 snare uninstall              # remove everything including the binary
 ```
 
-Re-arming is idempotent — running `snare arm` again skips already-planted canaries and plants any that are missing:
+`snare arm` is idempotent. Running it again skips canaries that are already planted and adds any that are missing.
 
-```sh
-snare arm                    # plants missing canaries, skips existing ones
-```
-
-For granular control:
+For more control:
 
 ```sh
 snare plant --type aws       # plant a single canary type
@@ -137,32 +133,32 @@ snare teardown --dry-run     # preview what would be removed
 | `stripe` | `~/.config/stripe/config.toml` | Stripe CLI or agent following verify URL | Medium |
 | `generic` | `~/.env.production` | Any SDK reading `API_BASE_URL` | Medium |
 
-**High reliability** canaries fire whenever the credential is used — the callback URL *is* the service endpoint, so any SDK call redirects to snare.sh automatically.
+High reliability canaries fire whenever the credential is used. The callback URL *is* the service endpoint, so any SDK call redirects to snare.sh automatically.
 
-**Medium reliability** canaries fire conditionally — they require the agent to both read the credential file *and* honor the base URL override in the same process. Still valuable coverage, especially for Python and Node agents that load dotenv files.
+Medium reliability canaries fire conditionally. They require the agent to read the credential file *and* honor the base URL override in the same process. Still useful, especially for Python and Node agents that load dotenv files.
 
-### awsproc: the crown jewel
+### awsproc
 
-`awsproc` is the most technically sophisticated canary in Snare. It uses AWS `credential_process` — a shell command that runs when the SDK resolves credentials, before any API call is made.
+`awsproc` uses AWS `credential_process` — a shell command that runs when the SDK resolves credentials, before any API call is made.
 
-Here's the exact timeline when a compromised agent runs `aws s3 ls --profile prod-admin`:
+Timeline when a compromised agent runs `aws s3 ls --profile prod-admin`:
 
 ```
 T+0.00s  aws s3 ls --profile prod-admin
 T+0.01s  AWS SDK begins credential resolution
 T+0.01s  credential_process shell command executes
-T+0.01s  curl fires to snare.sh → alert in your webhook
+T+0.01s  curl fires to snare.sh -> alert in your webhook
 T+0.02s  SDK receives fake JSON credentials
-T+0.03s  SDK attempts s3.ListBuckets() → fails (fake creds)
+T+0.03s  SDK attempts s3.ListBuckets() -> fails (fake creds)
 T+0.03s  Agent: "AWS error, credentials may be invalid"
 ```
 
 **The alert arrives before the agent knows the credentials don't work.** No other canary tool does this.
 
-The two-profile pattern makes it look like a real assume-role configuration:
+The two-profile pattern looks like a real assume-role setup:
 
 ```ini
-# ~/.aws/config — looks like a legitimate assume-role profile
+# ~/.aws/config
 [profile prod-admin]
 role_arn       = arn:aws:iam::389844960505:role/OrganizationAccountAccessRole
 source_profile = prod-admin-source
@@ -171,33 +167,34 @@ source_profile = prod-admin-source
 credential_process = sh -c 'curl -sf https://snare.sh/c/{token} >/dev/null 2>&1; echo "{\"Version\":1,\"AccessKeyId\":\"AKIA...\",\"SecretAccessKey\":\"...\"}"'
 ```
 
-**Why Canarytokens can't do this:** Canarytokens is a hosted service — you visit their site, download a token. They can't embed a shell command in your local AWS config. Their AWS canary creates a real IAM user in their account and monitors CloudTrail, which introduces minutes of lag and requires external AWS infrastructure. `awsproc` requires running code locally — which is exactly what Snare is built to do.
+Canarytokens can't do this. Their AWS canary creates a real IAM user and monitors CloudTrail, which adds minutes of lag and requires external AWS infrastructure. `awsproc` runs locally, which is the whole point.
 
-**On network-restricted machines:** Even if the callback can't reach snare.sh (firewall, airgap), the shell command still outputs the fake credential JSON. The agent receives apparently-valid credentials and continues — it doesn't know the canary fired and the callback failed silently. If the attacker later tries to use those credentials against real AWS from outside your network, that's a separate signal.
+On airgapped or firewalled machines: even if the callback can't reach snare.sh, the shell command still returns fake credential JSON. The agent gets apparently-valid creds and keeps going. If it later tries to use them from outside your network, that fires separately.
 
-**Precision mode** — if you only want awsproc and the other near-zero false-positive canaries:
+If you want near-zero false positives and only the highest-signal canaries:
 
 ```sh
 snare arm --precision --webhook <url>
-# Plants: awsproc, ssh (ProxyCommand), k8s (kubeconfig server URL)
-# Skips: everything that might fire on casual reads or dotenv loading
+# Plants: awsproc, ssh, k8s
+# Skips: dotenv-based canaries that fire conditionally
 ```
 
-### mcp: first MCP config canary
+### mcp
 
-The `mcp` canary plants a fake MCP server config in a discoverable but non-auto-loaded location. A compromised agent scanning the filesystem for MCP servers will find it and attempt to connect — the HTTP transport URL points to snare.sh. This is standalone from your active Claude/Cursor/VS Code configs and won't interfere with running tools.
+Plants a fake MCP server config in a discoverable but non-auto-loaded location. A compromised agent scanning for MCP servers will find it and attempt to connect. The HTTP transport URL points to snare.sh. It won't interfere with your active Claude/Cursor/VS Code configs.
 
 ---
 
 ## Alerts
 
 Each alert includes:
-- **Type + label** — which canary fired, what machine it was on
-- **Timestamp** — exact UTC time
-- **IP + location** — city, country
-- **ASN** — hosting org (`Amazon Technologies Inc` = cloud agent, `Hetzner` = VPS, etc.)
-- **User agent** — identifies exactly which SDK fired (`Boto3/1.34.46`, `kubectl/v1.35.1`, etc.)
-- **"Likely AI agent"** — flagged when request originates from cloud infrastructure
+
+- Which canary fired and what machine it was on
+- Timestamp (UTC)
+- IP, city, country
+- ASN (hosting org — `Amazon Technologies Inc` = cloud agent, `Hetzner` = VPS, etc.)
+- User agent (identifies the exact SDK: `Boto3/1.34.46`, `kubectl/v1.35.1`, etc.)
+- "Likely AI agent" flag when the request comes from cloud infrastructure
 
 Alerts are signed with `X-Snare-Signature` (HMAC-SHA256) so you can verify they came from snare.sh.
 
@@ -205,28 +202,25 @@ Alerts are signed with `X-Snare-Signature` (HMAC-SHA256) so you can verify they 
 
 ## Privacy
 
-**Snare never reads request bodies.** When a canary fires, the worker returns a response before consuming the request body. Canary callbacks may carry real credentials or prompts in their body — we never see them.
+Snare never reads request bodies. When a canary fires, the worker returns a response before the body is consumed. Canary callbacks can carry real credentials or prompts in their body — we never see them.
 
-Each fired alert stores only:
-- Token ID, timestamp, IP, user agent, method, path, country, ASN
+Each alert stores only: token ID, timestamp, IP, user agent, method, path, country, ASN.
 
-Your fake credential content is stored locally in `~/.snare/manifest.json` (0600) and never sent to snare.sh. Token IDs are 128-bit random hex — they can't be reversed to identify you or your configuration.
-
-API access to your events requires authentication. Each machine gets a unique device secret (`~/.snare/config.json`, 0600). Other users of snare.sh cannot query your events.
+Fake credential content lives locally in `~/.snare/manifest.json` (0600) and is never sent to snare.sh. Token IDs are 128-bit random hex. Other snare.sh users can't query your events.
 
 ---
 
 ## Side effects
 
-> **PyPI:** `snare plant --type pypi` adds an `extra-index-url` to your pip config. Every `pip install` will also query snare.sh as an additional index. This means package names are visible in snare.sh request metadata when the canary fires. Use `snare teardown --type pypi` to revert.
+> **PyPI:** `snare plant --type pypi` adds an `extra-index-url` to your pip config. Every `pip install` will query snare.sh as an additional index, which means package names show up in request metadata when the canary fires. Run `snare teardown --type pypi` to remove it.
 
-> **npm:** `snare plant --type npm` adds a scoped registry entry. Only packages under the fake scope are affected — not all npm packages. Use `snare teardown --type npm` to revert.
+> **npm:** `snare plant --type npm` adds a scoped registry entry. Only packages under the fake scope are affected. Run `snare teardown --type npm` to remove it.
 
 ---
 
-## How it differs from canarytokens.org
+## vs. canarytokens.org
 
-[Canarytokens](https://canarytokens.org) is great. Snare is built for AI agents specifically:
+[Canarytokens](https://canarytokens.org) is good. Snare is built specifically for AI agents:
 
 | | Canarytokens | Snare |
 |---|---|---|
@@ -234,37 +228,30 @@ API access to your events requires authentication. Each machine gets a unique de
 | AWS detection | CloudTrail (minutes lag) | Direct SDK callback (sub-second) |
 | Credential types | AWS + a few others | 13 types: AWS, GCP, GitHub, Stripe, OpenAI, Anthropic, SSH, k8s, npm, PyPI, MCP, and more |
 | AI agent context | None | Cloud ASN detection, SDK user-agent parsing, `credential_process` timing |
-| Fires on | Read or use (varies) | Use only — active exploitation, not passive scanning |
+| Fires on | Read or use (varies) | Use only |
 
 ---
 
 ## Relationship to Rampart
 
-Snare and [Rampart](https://rampart.sh) are complementary:
-
-- **Rampart** enforces policy — it blocks agents from making calls they shouldn't
-- **Snare** detects compromise — it catches agents that have been hijacked
-
-Rampart blocks. Snare catches what gets through.
-
-Neither requires the other. Both are stronger together.
+[Rampart](https://rampart.sh) enforces policy and blocks agents from making calls they shouldn't. Snare detects when an agent has already been compromised. They solve different parts of the problem and work fine independently.
 
 ---
 
 ## Self-hosting
 
-The Cloudflare Worker is open source in this repo (`worker/`). Deploy to your own account:
+The Cloudflare Worker is open source in this repo (`worker/`). Deploy it to your own account:
 
 ```sh
 cd worker
 npx wrangler deploy
 ```
 
-Set `WEBHOOK_URLS` as a Cloudflare Worker secret for alert delivery. Optionally set `WEBHOOK_SIGNING_SECRET` to sign outbound webhook requests.
+Set `WEBHOOK_URLS` as a Cloudflare Worker secret for alert delivery. Set `WEBHOOK_SIGNING_SECRET` to sign outbound requests.
 
-To use a custom callback server, edit `callback_base` in `~/.snare/config.json` after `snare init`.
+To point canaries at your own server instead of snare.sh, edit `callback_base` in `~/.snare/config.json` after `snare init`.
 
-**Dashboard auth required:** `snare serve` requires `--dashboard-token` (or `SNARE_DASHBOARD_TOKEN` env var) to protect the alert dashboard. Generate one with `openssl rand -hex 32`.
+`snare serve` requires `--dashboard-token` (or `SNARE_DASHBOARD_TOKEN`) to protect the dashboard. Generate one with `openssl rand -hex 32`.
 
 ---
 
