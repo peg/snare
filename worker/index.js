@@ -73,6 +73,62 @@ const PREVIEW_BOTS = [
   "Googlebot", "bingbot", "DuckDuckBot",
 ];
 
+// Known security scanner org names (substring match against cf.asOrganization).
+// These generate high-volume false positives with no security value.
+// List is intentionally conservative — only well-known, confirmed scanner orgs.
+const SCANNER_ORGS = [
+  "shodan",
+  "censys",
+  "rapid7",
+  "shadowserver",
+  "binaryedge",
+  "intrinsec",
+  "internet measurement",
+  "stretchoid",
+  "internet census",
+  "ipip.net",
+  "onyphe",
+];
+
+// Per-canary-type false-positive filtering.
+// Returns true if the request should be DROPPED (not an alert).
+// Philosophy: hard gates where SDK signal is unambiguous (zero false-negative risk),
+// scanner blocklist everywhere else.
+function shouldFilter(canaryType, metadata) {
+  const asnLower = (metadata.asnOrg || "").toLowerCase();
+  const ua = metadata.userAgent || "";
+  const hints = metadata.sdkHints || {};
+
+  // Always drop known security scanners — they produce zero actionable signal.
+  // A real attacker using a scanner IP is pathological; if worried, disable this.
+  if (SCANNER_ORGS.some(s => asnLower.includes(s))) return true;
+
+  switch (canaryType) {
+    case "aws":
+      // AWS SDK ALWAYS sends AWS4-HMAC-SHA256 Authorization signature.
+      // A plain HTTP GET with no Authorization header is a crawler, not boto3/aws-sdk.
+      // This is the single safest hard gate — every AWS SDK on every language/version signs.
+      return !hints.hasAwsSig;
+
+    case "awsproc":
+      // awsproc fires via shell ProxyCommand — always a curl POST or GET with no browser UA.
+      // Crawlers use Mozilla/5.0 — safe to drop browser-like UAs.
+      return /^mozilla\//i.test(ua) && !hints.hasAwsSig;
+
+    case "gcp":
+      // GCP OAuth token_uri exchange is always a POST.
+      // Crawlers use GET. Any GET on a GCP canary callback is a bot/scanner.
+      return !hints.isPost;
+
+    default:
+      // For all other types (github, openai, anthropic, ssh, k8s, npm, pypi, mcp, stripe, generic):
+      // scanner blocklist already applied above; no additional hard gate.
+      // These canaries may be triggered via GET by non-SDK clients (legitimate attack paths),
+      // so we don't gate on method or auth headers.
+      return false;
+  }
+}
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -254,11 +310,19 @@ function extractMetadata(request, url) {
     asn:       cf.asn            || null,
     asnOrg:    cf.asOrganization || null,
     botScore:  cf.botManagement?.score ?? null,
-    // Capture specific safe headers that indicate SDK type
+    // Capture specific safe headers that indicate SDK type.
+    // IMPORTANT: we check for the PRESENCE of auth headers, never their value.
+    // The Authorization header may contain signed credential material — we only
+    // record a boolean, never the header value itself.
     sdkHints: {
       amzSdkRequest: request.headers.get("x-amz-sdk-request") || null,
       amzTarget:     request.headers.get("x-amz-target") || null,
       contentType:   request.headers.get("content-type") || null,
+      // Boolean: does this request look like a real AWS SDK call?
+      // AWS4-HMAC-SHA256 is sent by every AWS SDK on every language/version.
+      hasAwsSig:  (request.headers.get("authorization") || "").startsWith("AWS4-HMAC-SHA256"),
+      // Boolean: is this a POST? GCP token_uri exchange is always POST.
+      isPost: request.method === "POST",
     },
   };
 }
@@ -273,6 +337,13 @@ async function processAlert(token, metadata, env) {
 
   // Deduplicate: same token+IP within 60 seconds fires only once
   if (await isDuplicate(env, token, metadata.ip)) return;
+
+  // Resolve webhook + canary metadata (single KV fetch for both filtering and delivery)
+  const { webhooks, meta } = await resolveWebhooks(token, env);
+
+  // Per-type false-positive filtering: drop scanner orgs and requests
+  // that lack expected SDK signatures for high-confidence canary types.
+  if (shouldFilter(meta.canaryType, metadata)) return;
 
   const isTest = token.startsWith("snare-test-");
 
@@ -311,9 +382,6 @@ async function processAlert(token, metadata, env) {
       expirationTtl: 60 * 60 * 24 * 90,
     });
   }
-
-  // Resolve webhook + metadata
-  const { webhooks, meta } = await resolveWebhooks(token, env);
 
   const results = await Promise.allSettled(
     webhooks.map(wh => forwardAlert(wh, event, meta, env))
