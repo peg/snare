@@ -434,8 +434,8 @@ func cmdDisarm(args []string) {
 			}
 			_ = m.Deactivate(c.ID, "disarm")
 
-			// Deregister webhook (best-effort)
-			if cfg, err := config.Load(); err == nil && cfg != nil && cfg.WebhookURL != "" {
+			// Deregister webhook (best-effort) — auth uses device secret, not webhook URL
+			if cfg, err := config.Load(); err == nil && cfg != nil {
 				_ = revokeToken(cfg, c.ID)
 			}
 
@@ -1318,8 +1318,8 @@ func cmdTeardown(args []string) {
 			if err := m.Deactivate(c.ID, "teardown"); err != nil {
 				fmt.Fprintf(os.Stderr, "  ⚠️  removed from disk but manifest update failed for %s: %v\n", c.ID, err)
 			}
-			// Best-effort webhook deregistration — ignore errors
-			if cfg, err := config.Load(); err == nil && cfg != nil && cfg.WebhookURL != "" {
+			// Best-effort webhook deregistration — auth uses device secret, not webhook URL
+			if cfg, err := config.Load(); err == nil && cfg != nil {
 				_ = revokeToken(cfg, c.ID)
 			}
 		}
