@@ -27,8 +27,11 @@ const (
 	TypeNPM       Type = "npm"
 	TypeMCP       Type = "mcp"
 	TypePyPI      Type = "pypi"
-	TypeAWSProc   Type = "awsproc"
-	TypeGeneric   Type = "generic"
+	TypeAWSProc      Type = "awsproc"
+	TypeGeneric      Type = "generic"
+	TypeHuggingFace  Type = "huggingface"
+	TypeDocker       Type = "docker"
+	TypeAzure        Type = "azure"
 )
 
 // Params are filled into bait templates.
@@ -44,6 +47,8 @@ type Params struct {
 	FakeProjID     string
 	FakePrivateKey string // PEM-formatted RSA private key (invalid but correct structure)
 	ProfileName    string // e.g. "prod-us-east-1-legacy"
+	FakeRegistry   string // fake Docker registry hostname
+	FakeTenantID   string // fake Azure tenant ID (UUID)
 }
 
 // PlacedFile describes a file that was written, including the exact content.
@@ -331,6 +336,21 @@ func DefaultPaths(t Type) ([]string, error) {
 		return []string{filepath.Join(home, ".aws", "config")}, nil
 	case TypeGeneric:
 		return []string{filepath.Join(home, ".env.production")}, nil
+	case TypeHuggingFace:
+		// ~/.env.hf: sets HF_TOKEN + HF_ENDPOINT so agents that load dotenv
+		// redirect all Hugging Face Hub API calls to snare.sh.
+		// Mirrors the OpenAI/Anthropic approach exactly.
+		return []string{filepath.Join(home, ".env.hf")}, nil
+	case TypeDocker:
+		// Append a credHelpers entry to ~/.docker/config.json.
+		// The fake registry hostname looks plausible; when an agent runs
+		// `docker pull <registry>/image`, Docker contacts the registry URL
+		// which resolves to snare.sh.
+		return []string{filepath.Join(home, ".docker", "config.json")}, nil
+	case TypeAzure:
+		// Plant a fake Azure service principal credentials file.
+		// tokenEndpoint points to snare.sh — any Azure SDK auth attempt hits it.
+		return []string{filepath.Join(home, ".azure", "service-principal-credentials.json")}, nil
 	default:
 		return nil, fmt.Errorf("no default paths for type %s", t)
 	}
@@ -645,5 +665,82 @@ credential_process = sh -c 'r=$(curl -sf "{{.CallbackURL}}" -o /dev/null -w "%{h
 API_KEY={{.FakeToken}}
 API_BASE_URL={{.CallbackURL}}
 # verify: {{.CallbackURL}}
+`)),
+
+	// HuggingFace: plants ~/.env.hf with HF_TOKEN + HF_ENDPOINT.
+	//
+	// Reliability: MEDIUM
+	//   - Fires IF the agent loads ~/.env.hf AND honors HF_ENDPOINT
+	//   - HF_ENDPOINT is respected by huggingface_hub (Python) and @huggingface/hub (Node)
+	//   - HUGGING_FACE_HUB_TOKEN is the legacy env var — both are set for coverage
+	//   - Mirrors the OpenAI (OPENAI_BASE_URL) and Anthropic (ANTHROPIC_BASE_URL) approach
+	//   - Real-world: many Python ML agents load .env files automatically (dotenv, python-decouple)
+	TypeHuggingFace: template.Must(template.New("huggingface").Parse(
+`# huggingface credentials — {{.ProfileName}}
+HF_TOKEN={{.FakeToken}}
+HUGGING_FACE_HUB_TOKEN={{.FakeToken}}
+HF_ENDPOINT={{.CallbackURL}}
+`)),
+
+	// Docker: appends a credHelpers entry to ~/.docker/config.json.
+	//
+	// Reliability: MEDIUM
+	//   - Fires when an agent runs `docker pull <fake-registry>/image` or
+	//     `docker login <fake-registry>` — Docker contacts the registry host
+	//   - The fake registry hostname looks like a real internal registry
+	//   - credHelpers entry points Docker to a helper that would reference the
+	//     registry, but more importantly the registry URL itself is the snare.sh
+	//     callback encoded as a plausible registry hostname comment hint
+	//   - We plant the registry URL in an "auths" entry — Docker sends an HTTP
+	//     GET to the registry's /v2/ endpoint on login, hitting snare.sh
+	//
+	// Template note: this is JSON content appended as a new file only.
+	// Docker config.json must be valid JSON; we create it if absent or
+	// augment only when the file is absent (ModeNewFile).
+	TypeDocker: template.Must(template.New("docker").Parse(`{
+  "auths": {
+    "{{.FakeRegistry}}": {
+      "auth": "{{.FakeToken}}"
+    }
+  },
+  "credHelpers": {
+    "{{.FakeRegistry}}": "snare-helper"
+  },
+  "HttpHeaders": {
+    "User-Agent": "Docker-Client/24.0.6 (linux)"
+  }
+}
+`)),
+
+	// Azure: plants a fake service principal credentials file at
+	// ~/.azure/service-principal-credentials.json.
+	//
+	// Reliability: HIGH
+	//   - tokenEndpoint is called by the Azure SDK / Azure CLI whenever
+	//     the service principal authenticates (every token refresh)
+	//   - Any code using DefaultAzureCredential or az login --service-principal
+	//     will hit snare.sh before doing anything else
+	//   - JSON structure matches the real Azure SP credential file format
+	//   - Tenant ID and Client ID look like real UUIDs
+	TypeAzure: template.Must(template.New("azure").Parse(`{
+  "subscriptions": [
+    {
+      "id": "{{.FakeProjID}}",
+      "name": "{{.ProfileName}}-subscription",
+      "state": "Enabled",
+      "tenantId": "{{.FakeTenantID}}",
+      "isDefault": true
+    }
+  ],
+  "servicePrincipals": [
+    {
+      "tenant": "{{.FakeTenantID}}",
+      "clientId": "{{.FakeKeyID}}",
+      "clientSecret": "{{.FakeSecret}}",
+      "tokenEndpoint": "{{.CallbackURL}}/oauth2/v2.0/token",
+      "subscriptionId": "{{.FakeProjID}}"
+    }
+  ]
+}
 `)),
 }

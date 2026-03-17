@@ -280,6 +280,60 @@ func base64url(data []byte) string {
 	return result.String()
 }
 
+// NewHuggingFaceToken generates a realistic Hugging Face API token.
+// Format: hf_ + 37 alphanumeric chars (matches real HF token format).
+func NewHuggingFaceToken() (string, error) {
+	const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	b := make([]byte, 37)
+	for i := range b {
+		n, err := rand.Int(rand.Reader, big.NewInt(int64(len(chars))))
+		if err != nil {
+			return "", err
+		}
+		b[i] = chars[n.Int64()]
+	}
+	return "hf_" + string(b), nil
+}
+
+// NewDockerRegistryName generates a convincing fake Docker registry hostname.
+// Format: registry.prod-services-XXXXX.io
+func NewDockerRegistryName() string {
+	b := make([]byte, 4)
+	if _, err := rand.Read(b); err != nil {
+		panic(fmt.Sprintf("crypto/rand failure: %v", err))
+	}
+	return fmt.Sprintf("registry.prod-services-%x.io", b)
+}
+
+// NewAzureClientID generates a realistic Azure AD application (client) ID.
+// Format: UUID v4.
+func NewAzureClientID() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	// Set version 4 and variant bits
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
+}
+
+// NewAzureClientSecret generates a realistic Azure AD client secret.
+// Format: 40 chars of mixed alphanumeric + punctuation.
+func NewAzureClientSecret() (string, error) {
+	const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789~._-"
+	b := make([]byte, 40)
+	for i := range b {
+		n, err := rand.Int(rand.Reader, big.NewInt(int64(len(chars))))
+		if err != nil {
+			return "", err
+		}
+		b[i] = chars[n.Int64()]
+	}
+	return string(b), nil
+}
+
 // MustRandInt returns a random int in [0, max). Exported for use by CLI.
 func MustRandInt(max int) int {
 	return mustRandInt(max)

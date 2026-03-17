@@ -131,6 +131,9 @@ snare teardown --dry-run     # preview what would be removed
 | `mcp` | `~/.config/mcp-servers*.json` | MCP client connects to fake HTTP server | Medium |
 | `github` | `~/.config/gh/hosts.yml` | `gh` CLI targeting fake Enterprise host | Medium |
 | `stripe` | `~/.config/stripe/config.toml` | Stripe CLI or agent following verify URL | Medium |
+| `huggingface` | `~/.env.hf` | Any HF Hub SDK call via `HF_ENDPOINT` | Medium |
+| `docker` | `~/.docker/config.json` | `docker pull`/`login` to fake registry | Medium |
+| `azure` | `~/.azure/service-principal-credentials.json` | Azure SDK token fetch via `tokenEndpoint` | High |
 | `generic` | `~/.env.production` | Any SDK reading `API_BASE_URL` | Medium |
 
 High reliability canaries fire whenever the credential is used. The callback URL *is* the service endpoint, so any SDK call redirects to snare.sh automatically.
