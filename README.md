@@ -47,6 +47,12 @@ The Boto3 user agent tells you which SDK fired it. The ASN tells you it came fro
 curl -fsSL https://snare.sh/install | sh
 ```
 
+Or with Homebrew:
+
+```sh
+brew install peg/tap/snare
+```
+
 Or download a binary from [releases](https://github.com/peg/snare/releases).
 
 Requires Linux or macOS. No other dependencies.
