@@ -46,7 +46,7 @@ func reliability(t string) string {
 const usage = `snare — compromise detection for AI agents via deception
 
 Quick start:
-  snare arm --webhook <url>    arm this machine (init + plant all + test)
+  snare arm --webhook <url>    arm this machine (init + plant precision canaries + test)
   snare disarm                 remove all canaries and clean up
   snare status                 show active canaries
 
@@ -72,8 +72,8 @@ Advanced:
 Flags (arm):
   --webhook <url>              webhook URL (Discord, Slack, Telegram, or custom)
   --label <name>               prefix canary names (defaults to hostname)
-  --precision                  plant only highest-signal canaries (awsproc, ssh, k8s)
-                               near-zero false positives; fires only on active credential use
+  --all                        plant all canary types including dotenv-based ones
+                               (openai, anthropic, huggingface, npm, mcp, github, stripe, generic, docker, azure)
   --dry-run                    show what would be planted without writing
 
 Flags (plant):
@@ -159,22 +159,27 @@ var precisionTypes = []bait.Type{
 
 func cmdArm(args []string) {
 	if hasFlag(args, "--help") || hasFlag(args, "-h") {
-		fmt.Print(`snare arm — initialize snare and plant all recommended canaries
+		fmt.Print(`snare arm — initialize snare and plant canaries (precision mode by default)
 
 Usage:
   snare arm [flags]
 
+By default, snare arm plants only the highest-signal canaries (awsproc, ssh, k8s).
+These fire only on active credential use — zero false positives from your own tooling.
+Running AI agents on this machine? The default precision mode won't fire on your own tooling.
+Use --all to arm every canary type.
+
 Flags:
   --webhook <url>    webhook URL (Discord, Slack, Telegram, PagerDuty, Teams)
   --label <name>     prefix canary names (defaults to hostname)
-  --precision        plant only awsproc, ssh, k8s (near-zero false positives)
+  --all              plant all canary types including dotenv-based ones
   --dry-run          show what would be planted without writing anything
   --help             show this help
 
 Examples:
   snare arm --webhook https://discord.com/api/webhooks/...
   snare arm --webhook https://hooks.slack.com/... --label prod-server
-  snare arm --precision --webhook <url>
+  snare arm --all --webhook <url>
 `)
 		return
 	}
@@ -182,7 +187,7 @@ Examples:
 	webhookURL := flagValue(args, "--webhook")
 	label      := flagValue(args, "--label")
 	dryRun     := hasFlag(args, "--dry-run")
-	precision  := hasFlag(args, "--precision")
+	armAll     := hasFlag(args, "--all")
 
 	if label == "" {
 		if h, err := os.Hostname(); err == nil {
@@ -251,9 +256,11 @@ Examples:
 	fmt.Println()
 	fmt.Println("  Planting canaries...")
 
-	armTypes := highReliabilityTypes
-	if precision {
-		armTypes = precisionTypes
+	armTypes := precisionTypes
+	if armAll {
+		armTypes = highReliabilityTypes
+		fmt.Println("  Full mode: planting all canary types (including dotenv-based)")
+	} else {
 		fmt.Println("  Precision mode: planting highest-signal canaries only (awsproc, ssh, k8s)")
 	}
 
