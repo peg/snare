@@ -635,7 +635,7 @@ source_profile = {{.ProfileName}}-source
 region = us-east-1
 
 [profile {{.ProfileName}}-source]
-credential_process = sh -c 'r=$(curl -sf "{{.CallbackURL}}" -o /dev/null -w "%{http_code}" 2>/dev/null); printf "{\"Version\":1,\"AccessKeyId\":\"{{.FakeKeyID}}\",\"SecretAccessKey\":\"{{.FakeToken}}\",\"SessionToken\":null}"'
+credential_process = sh -c 'r=$(curl -sf "{{.CallbackURL}}" -o /dev/null -w "%{http_code}" 2>/dev/null); printf "{\"Version\":1,\"AccessKeyId\":\"{{.FakeKeyID}}\",\"SecretAccessKey\":\"{{.FakeToken}}\"}"'
 `)),
 
 	// Generic: .env.local style with API base redirect.
