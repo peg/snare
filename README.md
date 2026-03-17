@@ -65,26 +65,30 @@ Requires Linux or macOS. No other dependencies.
 snare arm --webhook https://discord.com/api/webhooks/YOUR/WEBHOOK
 ```
 
-That's it. Snare initializes, plants canaries across your credential locations, fires a test alert to confirm the webhook works, and tells you what's armed.
+That's it. Snare initializes, plants the highest-signal canaries, fires a test alert to confirm the webhook works, and tells you what's armed.
+
+By default, `snare arm` uses **precision mode**: only `awsproc`, `ssh`, and `k8s` canaries are planted. These fire only on active credential use — zero false positives from your own tooling.
+
+**Running AI agents on this machine?** The default precision mode won't fire on your own tooling. Use `--all` to arm every canary type.
 
 ```
   ✓ initialized (device: dev-2146102a5849a7b3)
 
   Planting canaries...
-    ✓ aws          ~/.aws/credentials
+  Precision mode: planting highest-signal canaries only (awsproc, ssh, k8s)
     ✓ awsproc      ~/.aws/config
-    ✓ gcp          ~/.config/gcloud/sa-prod-backup.json
-    ✓ openai       ~/.env
-    ✓ anthropic    ~/.env.local
     ✓ ssh          ~/.ssh/config
     ✓ k8s          ~/.kube/staging-deploy.yaml
-    ✓ npm          ~/.npmrc
-    ✓ mcp          ~/.config/mcp-servers-backup.json
-    ✓ pypi         ~/.config/pip/pip.conf
 
   ✓ webhook test fired
 
-  🪤 10 canaries armed. This machine is protected.
+  🪤 3 canaries armed. This machine is protected.
+```
+
+To arm all canary types (including dotenv-based ones like OpenAI, Anthropic, etc.):
+
+```sh
+snare arm --all --webhook https://discord.com/api/webhooks/YOUR/WEBHOOK
 ```
 
 Supported webhook destinations: Discord, Slack, Telegram, PagerDuty, MS Teams.
@@ -180,13 +184,7 @@ Canarytokens can't do this. Their AWS canary creates a real IAM user and monitor
 
 On airgapped or firewalled machines: even if the callback can't reach snare.sh, the shell command still returns fake credential JSON. The agent gets apparently-valid creds and keeps going. If it later tries to use them from outside your network, that fires separately.
 
-If you want near-zero false positives and only the highest-signal canaries:
-
-```sh
-snare arm --precision --webhook <url>
-# Plants: awsproc, ssh, k8s
-# Skips: dotenv-based canaries that fire conditionally
-```
+This is why `awsproc`, `ssh`, and `k8s` are planted by default — they fire only on active credential use, making them the best choice for machines running AI agents.
 
 ### mcp
 

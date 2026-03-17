@@ -116,8 +116,8 @@ func TestCmdArmHelp(t *testing.T) {
 	if !strings.Contains(stdout, "--webhook") {
 		t.Errorf("arm --help: expected '--webhook' in output, got:\n%s", stdout)
 	}
-	if !strings.Contains(stdout, "--precision") {
-		t.Errorf("arm --help: expected '--precision' in output, got:\n%s", stdout)
+	if !strings.Contains(stdout, "--all") {
+		t.Errorf("arm --help: expected '--all' in output, got:\n%s", stdout)
 	}
 
 	// Verify no config was written
@@ -261,25 +261,24 @@ func TestRegisterTokenErrorBody(t *testing.T) {
 	}
 }
 
-// TestPrecisionMode verifies that --precision flag selects only awsproc, ssh, k8s
-// canary types. We test this by checking that precisionTypes matches expectations
-// via the exported behavior of bait.Type constants.
-func TestPrecisionMode(t *testing.T) {
-	// Expected precision types per the CLI implementation
+// TestDefaultPrecisionMode verifies that the default arm behavior selects only
+// awsproc, ssh, k8s (precision mode). The full set is opt-in via --all.
+func TestDefaultPrecisionMode(t *testing.T) {
+	// Expected default (precision) types
 	wantTypes := map[bait.Type]bool{
 		bait.TypeAWSProc: true,
 		bait.TypeSSH:     true,
 		bait.TypeK8s:     true,
 	}
 
-	// Verify the precision types are distinct from full arm types
+	// Types present in --all but not in default
 	allTypes := []bait.Type{
 		bait.TypeAWS, bait.TypeAWSProc, bait.TypeGCP,
 		bait.TypeSSH, bait.TypeK8s, bait.TypePyPI,
 		bait.TypeOpenAI, bait.TypeAnthropic, bait.TypeNPM, bait.TypeMCP,
 	}
 
-	// Count types that would NOT be planted under --precision
+	// Default (precision) set excludes non-high-signal types
 	excluded := 0
 	for _, bt := range allTypes {
 		if !wantTypes[bt] {
@@ -287,32 +286,32 @@ func TestPrecisionMode(t *testing.T) {
 		}
 	}
 	if excluded == 0 {
-		t.Error("precision mode should exclude at least some types from the full arm set")
+		t.Error("default precision mode should exclude at least some types from the full set")
 	}
 
-	// Precision set should have exactly 3 types
+	// Default set should have exactly 3 types
 	if len(wantTypes) != 3 {
-		t.Errorf("precision mode: expected 3 types, definition has %d", len(wantTypes))
+		t.Errorf("default precision mode: expected 3 types, got %d", len(wantTypes))
 	}
 
-	// Verify precision types are the highest-signal ones
+	// Verify the right 3 types are included
 	for _, bt := range []bait.Type{bait.TypeAWSProc, bait.TypeSSH, bait.TypeK8s} {
 		if !wantTypes[bt] {
-			t.Errorf("precision mode: expected %s to be in precision set", bt)
+			t.Errorf("default precision mode: expected %s to be included", bt)
 		}
 	}
 
-	// Verify lower-signal types are NOT in precision set
+	// Verify lower-signal types are excluded by default
 	for _, bt := range []bait.Type{bait.TypeAWS, bait.TypeGCP, bait.TypeOpenAI, bait.TypeNPM} {
 		if wantTypes[bt] {
-			t.Errorf("precision mode: expected %s to be excluded (lower signal)", bt)
+			t.Errorf("default precision mode: expected %s to be excluded", bt)
 		}
 	}
 }
 
-// TestPrecisionModeOutput verifies that `snare arm --precision --dry-run` output
-// only mentions awsproc, ssh, and k8s — not aws, gcp, openai, etc.
-func TestPrecisionModeOutput(t *testing.T) {
+// TestDefaultArmOutput verifies that `snare arm --dry-run` (no flags) uses precision
+// mode by default and only mentions awsproc, ssh, and k8s — not aws, gcp, openai, etc.
+func TestDefaultArmOutput(t *testing.T) {
 	home := t.TempDir()
 
 	// Pre-initialize config to avoid interactive prompts
@@ -336,23 +335,56 @@ func TestPrecisionModeOutput(t *testing.T) {
 		t.Fatalf("WriteFile manifest: %v", err)
 	}
 
-	stdout, _, _ := runSnare(t, home, "arm", "--precision", "--dry-run")
+	stdout, _, _ := runSnare(t, home, "arm", "--dry-run")
 
-	// Should mention precision mode
+	// Should mention precision mode (default behavior)
 	if !strings.Contains(stdout, "precision") && !strings.Contains(strings.ToLower(stdout), "awsproc") {
-		t.Logf("arm --precision --dry-run output:\n%s", stdout)
-		t.Error("expected precision mode output to mention awsproc or precision")
+		t.Logf("arm --dry-run output:\n%s", stdout)
+		t.Error("expected default arm output to mention awsproc or precision")
 	}
 
 	// Should NOT plant full set types like gcp, openai
 	if strings.Contains(stdout, "→") || strings.Contains(stdout, "would plant") {
 		// dry-run output present — check it doesn't include non-precision types
 		if strings.Contains(stdout, "openai") {
-			t.Error("precision mode output mentioned openai — should be excluded")
+			t.Error("default arm output mentioned openai — should be excluded (use --all)")
 		}
 		if strings.Contains(stdout, " gcp ") {
-			t.Error("precision mode output mentioned gcp — should be excluded")
+			t.Error("default arm output mentioned gcp — should be excluded (use --all)")
 		}
+	}
+}
+
+// TestAllFlagOutput verifies that `snare arm --all --dry-run` includes the full
+// canary set (gcp, openai, etc.) and mentions "Full mode".
+func TestAllFlagOutput(t *testing.T) {
+	home := t.TempDir()
+
+	snareDir := filepath.Join(home, ".snare")
+	if err := os.MkdirAll(snareDir, 0700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	cfg := map[string]string{
+		"device_id":     "dev-all-test",
+		"device_secret": "deadbeefdeadbeefdeadbeefdeadbeef",
+		"callback_base": "https://snare.sh/c",
+		"webhook_url":   "https://hooks.example.com/test",
+	}
+	data, _ := json.MarshalIndent(cfg, "", "  ")
+	if err := os.WriteFile(filepath.Join(snareDir, "config.json"), data, 0600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	emptyManifest := `{"canaries":[]}`
+	if err := os.WriteFile(filepath.Join(snareDir, "manifest.json"), []byte(emptyManifest), 0600); err != nil {
+		t.Fatalf("WriteFile manifest: %v", err)
+	}
+
+	stdout, _, _ := runSnare(t, home, "arm", "--all", "--dry-run")
+
+	// Should mention full mode
+	if !strings.Contains(strings.ToLower(stdout), "full mode") && !strings.Contains(strings.ToLower(stdout), "all canary") {
+		t.Logf("arm --all --dry-run output:\n%s", stdout)
+		t.Error("expected --all output to mention full mode or all canary types")
 	}
 }
 
