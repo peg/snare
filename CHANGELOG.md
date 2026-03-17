@@ -9,6 +9,27 @@ Versioning: [Semantic Versioning](https://semver.org/)
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-03-17
+
+### Added
+- `snare scan` — check canary integrity on disk; detects OK, MODIFIED, MISSING, and ORPHANED canaries
+- Hugging Face canary (`huggingface`) — `~/.env.hf` with `HF_TOKEN` + `HF_ENDPOINT` redirect
+- Docker canary (`docker`) — fake registry entry in `~/.docker/config.json`
+- Azure canary (`azure`) — fake service principal credentials file with `tokenEndpoint` redirect (high reliability)
+- Homebrew tap: `brew install peg/tap/snare`
+
+### Changed
+- `snare arm` now defaults to precision mode (awsproc, ssh, k8s only) — zero false positives from your own AI tooling
+- `snare arm --all` opts into all canary types including dotenv-based ones
+- `--precision` flag removed (precision is now the default)
+
+### Fixed
+- Worker: false-positive filtering — AWS canaries require AWS4-HMAC-SHA256 signature, GCP canaries require POST, known scanner orgs (Shodan, Censys, Rapid7, etc.) silently dropped
+- `install.sh`: checksum verification now fails closed
+- `snare disarm`: now revokes token registrations even when no local webhook is configured
+- `awsproc`: removed `SessionToken: null` from credential JSON output (broke strict SDK parsers)
+- Removed unused `listTokens` and `alertPayload` dead code
+
 ## [0.1.1] - 2026-03-16
 
 ### Fixed
