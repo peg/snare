@@ -9,7 +9,7 @@ Versioning: [Semantic Versioning](https://semver.org/)
 
 ## [Unreleased]
 
-## [0.2.0] - 2026-03-17
+## [0.1.2] - 2026-03-17
 
 ### Added
 - `snare scan` — check canary integrity on disk; detects OK, MODIFIED, MISSING, and ORPHANED canaries

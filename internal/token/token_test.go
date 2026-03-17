@@ -6,13 +6,6 @@ import (
 	"testing"
 )
 
-// giveawayStrings are patterns that should never appear in generated tokens.
-// A real attacker would grep for these to identify fakes.
-var giveawayStrings = []string{
-	"SNARE", "snare", "FAKE", "fake", "TEST", "test",
-	"CANARY", "canary", "HONEY", "honey", "DECOY", "decoy",
-	"DUMMY", "dummy", "EXAMPLE", "example",
-}
 
 func TestNewID(t *testing.T) {
 	t.Run("format with label", func(t *testing.T) {

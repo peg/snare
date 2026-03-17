@@ -20,6 +20,43 @@ const (
 	MinTokenLen = 32
 )
 
+// giveawayStrings are substrings that must never appear in generated tokens.
+// A credential containing these would be an obvious giveaway to an attacker.
+// Case-insensitive matching is used so only lowercase entries are needed.
+var giveawayStrings = []string{"snare", "fake", "test", "canary", "honey", "decoy", "dummy", "example"}
+
+// containsGiveaway returns true if s contains any giveaway substring.
+func containsGiveaway(s string) bool {
+	lower := strings.ToLower(s)
+	for _, g := range giveawayStrings {
+		if strings.Contains(lower, strings.ToLower(g)) {
+			return true
+		}
+	}
+	return false
+}
+
+// randString generates a random string of n chars from charset, retrying until
+// the result contains no giveaway substrings. Panics after 1000 attempts
+// (astronomically unlikely with any reasonable charset and length).
+func randString(n int, chars string) (string, error) {
+	for attempt := 0; attempt < 1000; attempt++ {
+		b := make([]byte, n)
+		for i := range b {
+			idx, err := rand.Int(rand.Reader, big.NewInt(int64(len(chars))))
+			if err != nil {
+				return "", err
+			}
+			b[i] = chars[idx.Int64()]
+		}
+		s := string(b)
+		if !containsGiveaway(s) {
+			return s, nil
+		}
+	}
+	return "", fmt.Errorf("failed to generate giveaway-free token after 1000 attempts")
+}
+
 // NewID generates a cryptographically random canary token ID.
 // Format: <label>-<hex> e.g. "openclaw-aws-a3f9b2c1d4e5f6a7b8c9d0e1f2a3b4c5"
 func NewID(label string) (string, error) {
@@ -38,61 +75,37 @@ func NewID(label string) (string, error) {
 // Format: AKIA + 16 uppercase alphanumeric chars (matches real AWS key format).
 // Does NOT contain "SNARE", "FAKE", "TEST", or any giveaway string.
 func NewAWSKeyID() (string, error) {
-	const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-	b := make([]byte, 16)
-	for i := range b {
-		n, err := rand.Int(rand.Reader, big.NewInt(int64(len(chars))))
-		if err != nil {
-			return "", err
-		}
-		b[i] = chars[n.Int64()]
+	s, err := randString(16, "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
+	if err != nil {
+		return "", err
 	}
-	return "AKIA" + string(b), nil
+	return "AKIA" + s, nil
 }
 
 // NewAWSSecretKey generates a realistic AWS secret access key.
 // Format: 40 chars of base64url-like characters (matches real AWS secret format).
 func NewAWSSecretKey() (string, error) {
-	const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+/"
-	b := make([]byte, 40)
-	for i := range b {
-		n, err := rand.Int(rand.Reader, big.NewInt(int64(len(chars))))
-		if err != nil {
-			return "", err
-		}
-		b[i] = chars[n.Int64()]
-	}
-	return string(b), nil
+	return randString(40, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+/")
 }
 
 // NewGitHubToken generates a realistic GitHub PAT.
 // Format: ghp_ + 36 alphanumeric chars (matches classic PAT format).
 func NewGitHubToken() (string, error) {
-	const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-	b := make([]byte, 36)
-	for i := range b {
-		n, err := rand.Int(rand.Reader, big.NewInt(int64(len(chars))))
-		if err != nil {
-			return "", err
-		}
-		b[i] = chars[n.Int64()]
+	s, err := randString(36, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
+	if err != nil {
+		return "", err
 	}
-	return "ghp_" + string(b), nil
+	return "ghp_" + s, nil
 }
 
 // NewStripeKey generates a realistic Stripe secret key.
 // Format: sk_live_ + 24 alphanumeric chars.
 func NewStripeKey() (string, error) {
-	const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-	b := make([]byte, 24)
-	for i := range b {
-		n, err := rand.Int(rand.Reader, big.NewInt(int64(len(chars))))
-		if err != nil {
-			return "", err
-		}
-		b[i] = chars[n.Int64()]
+	s, err := randString(24, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
+	if err != nil {
+		return "", err
 	}
-	return "sk_live_" + string(b), nil
+	return "sk_live_" + s, nil
 }
 
 // NewGCPProjectID generates a realistic GCP project ID.
@@ -141,31 +154,21 @@ func NewGCPPrivateKeyID() (string, error) {
 // NewOpenAIKey generates a realistic OpenAI API key.
 // Format: sk-proj- + 48 alphanumeric chars (matches current OpenAI key format).
 func NewOpenAIKey() (string, error) {
-	const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-	b := make([]byte, 48)
-	for i := range b {
-		n, err := rand.Int(rand.Reader, big.NewInt(int64(len(chars))))
-		if err != nil {
-			return "", err
-		}
-		b[i] = chars[n.Int64()]
+	s, err := randString(48, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
+	if err != nil {
+		return "", err
 	}
-	return "sk-proj-" + string(b), nil
+	return "sk-proj-" + s, nil
 }
 
 // NewAnthropicKey generates a realistic Anthropic API key.
 // Format: sk-ant-api03- + 48 alphanumeric chars.
 func NewAnthropicKey() (string, error) {
-	const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
-	b := make([]byte, 48)
-	for i := range b {
-		n, err := rand.Int(rand.Reader, big.NewInt(int64(len(chars))))
-		if err != nil {
-			return "", err
-		}
-		b[i] = chars[n.Int64()]
+	s, err := randString(48, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
+	if err != nil {
+		return "", err
 	}
-	return "sk-ant-api03-" + string(b), nil
+	return "sk-ant-api03-" + s, nil
 }
 
 // NewFakeRSAPrivateKey generates a fully valid RSA-2048 PEM key for use as a
@@ -283,16 +286,11 @@ func base64url(data []byte) string {
 // NewHuggingFaceToken generates a realistic Hugging Face API token.
 // Format: hf_ + 37 alphanumeric chars (matches real HF token format).
 func NewHuggingFaceToken() (string, error) {
-	const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-	b := make([]byte, 37)
-	for i := range b {
-		n, err := rand.Int(rand.Reader, big.NewInt(int64(len(chars))))
-		if err != nil {
-			return "", err
-		}
-		b[i] = chars[n.Int64()]
+	s, err := randString(37, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
+	if err != nil {
+		return "", err
 	}
-	return "hf_" + string(b), nil
+	return "hf_" + s, nil
 }
 
 // NewDockerRegistryName generates a convincing fake Docker registry hostname.
@@ -322,16 +320,7 @@ func NewAzureClientID() (string, error) {
 // NewAzureClientSecret generates a realistic Azure AD client secret.
 // Format: 40 chars of mixed alphanumeric + punctuation.
 func NewAzureClientSecret() (string, error) {
-	const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789~._-"
-	b := make([]byte, 40)
-	for i := range b {
-		n, err := rand.Int(rand.Reader, big.NewInt(int64(len(chars))))
-		if err != nil {
-			return "", err
-		}
-		b[i] = chars[n.Int64()]
-	}
-	return string(b), nil
+	return randString(40, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789~._-")
 }
 
 // MustRandInt returns a random int in [0, max). Exported for use by CLI.
