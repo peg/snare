@@ -67,7 +67,7 @@ snare arm --webhook https://discord.com/api/webhooks/YOUR/WEBHOOK
 
 That's it. Snare initializes, plants the highest-signal canaries, fires a test alert to confirm the webhook works, and tells you what's armed.
 
-By default, `snare arm` uses **precision mode**: only `awsproc`, `ssh`, and `k8s` canaries are planted. These fire only on active credential use — zero false positives from your own tooling.
+By default, `snare arm` uses **precision mode**: only `awsproc`, `ssh`, `k8s`, and `azure` canaries are planted. These fire only on active credential use — zero false positives from your own tooling.
 
 **Running AI agents on this machine?** The default precision mode won't fire on your own tooling. Use `--all` to arm every canary type.
 
@@ -75,7 +75,7 @@ By default, `snare arm` uses **precision mode**: only `awsproc`, `ssh`, and `k8s
   ✓ initialized (device: dev-2146102a5849a7b3)
 
   Planting canaries...
-  Precision mode: planting highest-signal canaries only (awsproc, ssh, k8s)
+  Precision mode: planting highest-signal canaries only (awsproc, ssh, k8s, azure)
     ✓ awsproc      ~/.aws/config
     ✓ ssh          ~/.ssh/config
     ✓ k8s          ~/.kube/staging-deploy.yaml
@@ -136,7 +136,7 @@ snare teardown --dry-run     # preview what would be removed
 | `anthropic` | `~/.env.local` | Any Anthropic SDK call via `ANTHROPIC_BASE_URL` | Medium |
 | `ssh` | `~/.ssh/config` | SSH connection via `ProxyCommand` callback | High |
 | `k8s` | `~/.kube/<name>.yaml` | Any `kubectl` call to fake cluster | High |
-| `npm` | `~/.npmrc` | `npm install` of scoped package from fake registry | Medium |
+| `npm` | `~/.npmrc` | `npm install` of scoped package from fake registry | High |
 | `pypi` | `~/.config/pip/pip.conf` | `pip install` queries fake extra index | High |
 | `mcp` | `~/.config/mcp-servers*.json` | MCP client connects to fake HTTP server | Medium |
 | `github` | `~/.config/gh/hosts.yml` | `gh` CLI targeting fake Enterprise host | Medium |
