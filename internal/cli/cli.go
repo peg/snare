@@ -31,10 +31,12 @@ func reliability(t string) string {
 	switch bait.Type(t) {
 	// High: callback URL is the real SDK service endpoint — fires on any use
 	case bait.TypeAWS, bait.TypeAWSProc, bait.TypeGCP,
-		bait.TypeSSH, bait.TypeK8s, bait.TypePyPI:
+		bait.TypeSSH, bait.TypeK8s, bait.TypePyPI,
+		bait.TypeAzure:
 		return "high"
 	// Medium-high: fires reliably but requires specific agent behavior
-	case bait.TypeOpenAI, bait.TypeAnthropic, bait.TypeNPM, bait.TypeMCP:
+	case bait.TypeOpenAI, bait.TypeAnthropic, bait.TypeNPM, bait.TypeMCP,
+		bait.TypeHuggingFace, bait.TypeDocker:
 		return "medium"
 	default:
 		return "medium"
@@ -76,7 +78,7 @@ Flags (arm):
 
 Flags (plant):
   --label <name>               prefix canary names (defaults to hostname)
-  --type <type>                canary type: aws, awsproc, gcp, github, stripe, openai, anthropic, ssh, k8s, npm, mcp, pypi, generic
+  --type <type>                canary type: aws, awsproc, gcp, github, stripe, openai, anthropic, ssh, k8s, npm, mcp, pypi, huggingface, docker, azure, generic
   --all                        plant all high-reliability canary types at once
   --dry-run                    show what would be planted without writing anything
 
@@ -914,6 +916,7 @@ var highReliabilityTypes = []bait.Type{
 	bait.TypeAWS, bait.TypeAWSProc, bait.TypeGCP,
 	bait.TypeSSH, bait.TypeK8s, bait.TypePyPI,
 	bait.TypeOpenAI, bait.TypeAnthropic, bait.TypeNPM, bait.TypeMCP,
+	bait.TypeHuggingFace, bait.TypeDocker, bait.TypeAzure,
 }
 
 // cmdPlant deploys canary credentials to this machine.
@@ -1966,6 +1969,60 @@ func buildParams(bt bait.Type, label string, cfg *config.Config) (bait.Params, e
 			return p, err
 		}
 		p.ProfileName = label
+
+	case bait.TypeHuggingFace:
+		p.FakeToken, err = token.NewHuggingFaceToken()
+		if err != nil {
+			return p, err
+		}
+		// ProfileName used as a comment label in the .env.hf file
+		if label != "" {
+			p.ProfileName = label + "-hf"
+		} else {
+			p.ProfileName = "ml-team"
+		}
+
+	case bait.TypeDocker:
+		p.FakeRegistry = token.NewDockerRegistryName()
+		// FakeToken used as a base64-encoded "auth" value (username:password)
+		// Docker stores base64(user:pass) in the auths section
+		rawToken, err2 := token.NewNPMToken() // reuse a random token format
+		if err2 != nil {
+			return p, err2
+		}
+		p.FakeToken = rawToken
+		p.ProfileName = label
+
+	case bait.TypeAzure:
+		// FakeKeyID = client ID (UUID)
+		p.FakeKeyID, err = token.NewAzureClientID()
+		if err != nil {
+			return p, err
+		}
+		// FakeTenantID = tenant ID (UUID)
+		p.FakeTenantID, err = token.NewAzureClientID()
+		if err != nil {
+			return p, err
+		}
+		// FakeSecret = client secret
+		p.FakeSecret, err = token.NewAzureClientSecret()
+		if err != nil {
+			return p, err
+		}
+		// FakeProjID = subscription ID (UUID, reusing GCPClientID format for numeric look
+		// — actually Azure subscription IDs are UUIDs, so generate one)
+		p.FakeProjID, err = token.NewAzureClientID()
+		if err != nil {
+			return p, err
+		}
+		// ProfileName is a friendly name for the subscription
+		envs := []string{"prod", "staging", "dev", "platform", "infra"}
+		e := envs[token.MustRandInt(len(envs))]
+		if label != "" {
+			p.ProfileName = label + "-" + e
+		} else {
+			p.ProfileName = e
+		}
 	}
 
 	return p, nil
