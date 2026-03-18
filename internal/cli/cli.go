@@ -18,6 +18,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"github.com/peg/snare/internal/bait"
 	"github.com/peg/snare/internal/config"
@@ -25,6 +26,46 @@ import (
 	"github.com/peg/snare/internal/serve"
 	"github.com/peg/snare/internal/token"
 )
+
+// termios holds terminal attributes for raw mode.
+type termios struct {
+	Iflag  uint32
+	Oflag  uint32
+	Cflag  uint32
+	Lflag  uint32
+	Cc     [20]uint8
+	Ispeed uint32
+	Ospeed uint32
+}
+
+func makeRaw(fd int) (*termios, error) {
+	var old termios
+	if _, _, errno := syscall.Syscall(syscall.SYS_IOCTL,
+		uintptr(fd), syscall.TCGETS, uintptr(unsafe.Pointer(&old))); errno != 0 {
+		return nil, errno
+	}
+	raw := old
+	// Disable echo, canonical mode, signals from input
+	raw.Lflag &^= syscall.ECHO | syscall.ICANON | syscall.ISIG | syscall.IEXTEN
+	raw.Iflag &^= syscall.IXON | syscall.ICRNL | syscall.BRKINT | syscall.INPCK | syscall.ISTRIP
+	raw.Cflag |= syscall.CS8
+	raw.Oflag &^= syscall.OPOST
+	raw.Cc[syscall.VMIN] = 1
+	raw.Cc[syscall.VTIME] = 0
+	if _, _, errno := syscall.Syscall(syscall.SYS_IOCTL,
+		uintptr(fd), syscall.TCSETS, uintptr(unsafe.Pointer(&raw))); errno != 0 {
+		return nil, errno
+	}
+	return &old, nil
+}
+
+func restoreTerminal(fd int, old *termios) {
+	if old == nil {
+		return
+	}
+	syscall.Syscall(syscall.SYS_IOCTL, //nolint:errcheck
+		uintptr(fd), syscall.TCSETS, uintptr(unsafe.Pointer(old)))
+}
 
 // reliability returns a human-readable reliability label per canary type.
 func reliability(t string) string {
@@ -160,6 +201,175 @@ var precisionTypes = []bait.Type{
 	// hunts and parses the file, making it medium reliability, not precision.
 }
 
+// selectEntry describes one row in the --select TUI.
+type selectEntry struct {
+	t     bait.Type
+	tier  string // "precision", "high", "medium"
+	path  string // short description of where it plants
+}
+
+// allSelectEntries is the canonical ordered list for --select mode.
+var allSelectEntries = []selectEntry{
+	{bait.TypeAWSProc,    "precision", "~/.aws/config (credential_process)"},
+	{bait.TypeSSH,        "precision", "~/.ssh/config (ProxyCommand)"},
+	{bait.TypeK8s,        "precision", "~/.kube/<name>.yaml (server URL)"},
+	{bait.TypeAWS,        "high",      "~/.aws/credentials (endpoint_url)"},
+	{bait.TypeGCP,        "high",      "~/.config/gcloud/sa-*.json (token_uri)"},
+	{bait.TypeAzure,      "high",      "~/.azure/service-principal-credentials.json"},
+	{bait.TypePyPI,       "high",      "~/.config/pip/pip.conf (extra-index-url)"},
+	{bait.TypeNPM,        "high",      "~/.npmrc (scoped registry)"},
+	{bait.TypeOpenAI,     "medium",    "~/.env (OPENAI_BASE_URL)"},
+	{bait.TypeAnthropic,  "medium",    "~/.env.local (ANTHROPIC_BASE_URL)"},
+	{bait.TypeMCP,        "medium",    "~/.config/mcp-servers*.json"},
+	{bait.TypeGitHub,     "medium",    "~/.config/gh/hosts.yml"},
+	{bait.TypeStripe,     "medium",    "~/.config/stripe/config.toml"},
+	{bait.TypeHuggingFace,"medium",    "~/.env.hf (HF_ENDPOINT)"},
+	{bait.TypeDocker,     "medium",    "~/.docker/config.json"},
+	{bait.TypeGeneric,    "medium",    "~/.env.production (API_BASE_URL)"},
+}
+
+// runSelectTUI shows an interactive checklist and returns the chosen types.
+// Precision types are pre-checked. Space toggles, Enter confirms, q/Ctrl-C aborts.
+func runSelectTUI() ([]bait.Type, error) {
+	// Check for TTY — can't run interactive mode without one
+	fi, err := os.Stdin.Stat()
+	if err != nil || (fi.Mode()&os.ModeCharDevice) == 0 {
+		return nil, fmt.Errorf("--select requires an interactive terminal")
+	}
+
+	// Build checked state: precision = on by default
+	checked := make([]bool, len(allSelectEntries))
+	for i, e := range allSelectEntries {
+		checked[i] = e.tier == "precision"
+	}
+
+	cursor := 0
+	tierColors := map[string]string{
+		"precision": "\033[33m", // amber
+		"high":      "\033[32m", // green
+		"medium":    "\033[36m", // cyan
+	}
+	reset := "\033[0m"
+	bold  := "\033[1m"
+	dim   := "\033[2m"
+
+	// Put terminal in raw mode
+	oldState, err := makeRaw(int(os.Stdin.Fd()))
+	if err != nil {
+		return nil, fmt.Errorf("setting raw mode: %w", err)
+	}
+	defer restoreTerminal(int(os.Stdin.Fd()), oldState)
+
+	clearLines := func(n int) {
+		for i := 0; i < n; i++ {
+			fmt.Print("\033[A\033[2K") // up one line, clear it
+		}
+	}
+
+	render := func() {
+		fmt.Println()
+		fmt.Printf("  %sSelect canaries to arm%s  %sSpace toggle · Enter confirm · q abort%s\n\n",
+			bold, reset, dim, reset)
+		lastTier := ""
+		for i, e := range allSelectEntries {
+			if e.tier != lastTier {
+				lastTier = e.tier
+				color := tierColors[e.tier]
+				fmt.Printf("  %s%s%s\n", color, strings.ToUpper(e.tier), reset)
+			}
+			check := "○"
+			if checked[i] {
+				check = "✓"
+			}
+			pointer := "  "
+			if i == cursor {
+				pointer = "\033[7m→\033[27m "
+			}
+			fmt.Printf("  %s %s %-12s  %s%s%s\n",
+				pointer, check, e.t, dim, e.path, reset)
+		}
+		fmt.Println()
+	}
+
+	// Count lines rendered so we can redraw in-place
+	// header(3) + tier headers + entries + footer(1)
+	countLines := func() int {
+		tiers := map[string]bool{}
+		for _, e := range allSelectEntries {
+			tiers[e.tier] = true
+		}
+		return 3 + len(tiers) + len(allSelectEntries) + 1
+	}
+
+	render()
+	buf := make([]byte, 4)
+
+	for {
+		n, err := os.Stdin.Read(buf)
+		if err != nil {
+			break
+		}
+		b := buf[:n]
+
+		clearLines(countLines())
+
+		switch {
+		case n == 1 && b[0] == ' ':
+			checked[cursor] = !checked[cursor]
+		case n == 1 && (b[0] == '\r' || b[0] == '\n'):
+			// confirm
+			restoreTerminal(int(os.Stdin.Fd()), oldState)
+			fmt.Println()
+			var selected []bait.Type
+			for i, e := range allSelectEntries {
+				if checked[i] {
+					selected = append(selected, e.t)
+				}
+			}
+			if len(selected) == 0 {
+				return nil, fmt.Errorf("no canaries selected")
+			}
+			return selected, nil
+		case n == 1 && (b[0] == 'q' || b[0] == 3): // q or Ctrl-C
+			restoreTerminal(int(os.Stdin.Fd()), oldState)
+			fmt.Println()
+			return nil, fmt.Errorf("aborted")
+		case n == 3 && b[0] == 27 && b[1] == '[' && b[2] == 'A': // up arrow
+			if cursor > 0 {
+				cursor--
+			}
+		case n == 3 && b[0] == 27 && b[1] == '[' && b[2] == 'B': // down arrow
+			if cursor < len(allSelectEntries)-1 {
+				cursor++
+			}
+		case n == 1 && b[0] == 'j': // vim down
+			if cursor < len(allSelectEntries)-1 {
+				cursor++
+			}
+		case n == 1 && b[0] == 'k': // vim up
+			if cursor > 0 {
+				cursor--
+			}
+		case n == 1 && b[0] == 'a': // select all
+			for i := range checked {
+				checked[i] = true
+			}
+		case n == 1 && b[0] == 'n': // select none
+			for i := range checked {
+				checked[i] = false
+			}
+		case n == 1 && b[0] == 'p': // select precision only
+			for i, e := range allSelectEntries {
+				checked[i] = e.tier == "precision"
+			}
+		}
+
+		render()
+	}
+
+	return nil, fmt.Errorf("interrupted")
+}
+
 func cmdArm(args []string) {
 	if hasFlag(args, "--help") || hasFlag(args, "-h") {
 		fmt.Print(`snare arm — initialize snare and plant canaries (precision mode by default)
@@ -170,12 +380,13 @@ Usage:
 By default, snare arm plants only the highest-signal canaries (awsproc, ssh, k8s).
 These fire only on active credential use — zero false positives from your own tooling.
 Running AI agents on this machine? The default precision mode won't fire on your own tooling.
-Use --all to arm every canary type.
+Use --all to arm every canary type, or --select to pick interactively.
 
 Flags:
   --webhook <url>    webhook URL (Discord, Slack, Telegram, PagerDuty, Teams)
   --label <name>     prefix canary names (defaults to hostname)
   --all              plant all canary types including dotenv-based ones
+  --select           interactive checklist to pick which canaries to arm
   --dry-run          show what would be planted without writing anything
   --help             show this help
 
@@ -183,6 +394,7 @@ Examples:
   snare arm --webhook https://discord.com/api/webhooks/...
   snare arm --webhook https://hooks.slack.com/... --label prod-server
   snare arm --all --webhook <url>
+  snare arm --select --webhook <url>
 `)
 		return
 	}
@@ -191,6 +403,7 @@ Examples:
 	label      := flagValue(args, "--label")
 	dryRun     := hasFlag(args, "--dry-run")
 	armAll     := hasFlag(args, "--all")
+	armSelect  := hasFlag(args, "--select")
 
 	if label == "" {
 		if h, err := os.Hostname(); err == nil {
@@ -260,10 +473,22 @@ Examples:
 	fmt.Println("  Planting canaries...")
 
 	armTypes := precisionTypes
-	if armAll {
+	switch {
+	case armSelect:
+		selected, err := runSelectTUI()
+		if err != nil {
+			fatal(err)
+		}
+		armTypes = selected
+		names := make([]string, len(selected))
+		for i, t := range selected {
+			names[i] = string(t)
+		}
+		fmt.Printf("  Custom mode: planting %s\n", strings.Join(names, ", "))
+	case armAll:
 		armTypes = highReliabilityTypes
 		fmt.Println("  Full mode: planting all canary types (including dotenv-based)")
-	} else {
+	default:
 		fmt.Println("  Precision mode: planting highest-signal canaries only (awsproc, ssh, k8s)")
 	}
 
