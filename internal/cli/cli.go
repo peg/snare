@@ -68,17 +68,27 @@ func restoreTerminal(fd int, old *termios) {
 }
 
 // reliability returns a human-readable reliability label per canary type.
+//
+// Tiers:
+//   precision — fires via existing SDK/OS plumbing, no agent hunting needed,
+//               no DNS dependency, zero false positives
+//   high      — fires when credential is actively used, but requires agent to
+//               find and use it, or has a DNS/runtime dependency
+//   medium    — fires conditionally: depends on dotenv loading, base URL
+//               override support, or agent doing explicit credential scanning
 func reliability(t string) string {
 	switch bait.Type(t) {
-	// High: callback URL is the real SDK service endpoint — fires on any use
-	case bait.TypeAWS, bait.TypeAWSProc, bait.TypeGCP,
-		bait.TypeSSH, bait.TypeK8s, bait.TypePyPI,
-		bait.TypeAzure, bait.TypeGit:
+	// Precision: fires via SDK/OS hooks before or during connection, no DNS needed
+	case bait.TypeAWSProc, bait.TypeSSH, bait.TypeK8s:
+		return "precision"
+	// High: fires on active credential use, requires agent to find+use the cred
+	case bait.TypeAWS,   // endpoint_url fires on any AWS SDK call with that profile
+		bait.TypeGCP,    // token_uri fires on GCP SDK auth (needs explicit file load)
+		bait.TypePyPI,   // extra-index-url fires on pip install (own installs too — see warning)
+		bait.TypeNPM,    // scoped registry fires on npm install (scoped packages only)
+		bait.TypeGit:    // credential.helper fires if agent does git credential fill
 		return "high"
-	// Medium-high: fires reliably but requires specific agent behavior
-	case bait.TypeOpenAI, bait.TypeAnthropic, bait.TypeNPM, bait.TypeMCP,
-		bait.TypeHuggingFace, bait.TypeDocker, bait.TypeTerraform:
-		return "medium"
+	// Medium: dotenv-dependent, DNS-dependent, or requires explicit credential scanning
 	default:
 		return "medium"
 	}
@@ -212,16 +222,18 @@ type selectEntry struct {
 
 // allSelectEntries is the canonical ordered list for --select mode.
 var allSelectEntries = []selectEntry{
+	// Precision: fire via SDK/OS hooks, no DNS dependency, zero false positives
 	{bait.TypeAWSProc,    "precision", "~/.aws/config (credential_process)"},
 	{bait.TypeSSH,        "precision", "~/.ssh/config (ProxyCommand)"},
 	{bait.TypeK8s,        "precision", "~/.kube/<name>.yaml (server URL)"},
-	{bait.TypeGit,        "high",      "~/.gitconfig (credential.helper)"},
+	// High: fires on active use, agent must find+use the credential
 	{bait.TypeAWS,        "high",      "~/.aws/credentials (endpoint_url)"},
 	{bait.TypeGCP,        "high",      "~/.config/gcloud/sa-*.json (token_uri)"},
-	{bait.TypeAzure,      "high",      "~/.azure/service-principal-credentials.json"},
-	{bait.TypePyPI,       "high",      "~/.config/pip/pip.conf (extra-index-url)"},
 	{bait.TypeNPM,        "high",      "~/.npmrc (scoped registry)"},
-	{bait.TypeTerraform,  "high",      "~/.terraformrc (network_mirror)"},
+	{bait.TypeGit,        "high",      "~/.gitconfig (credential.helper)"},
+	{bait.TypePyPI,       "high",      "~/.config/pip/pip.conf (extra-index-url) ⚠ side effect"},
+	// Medium: dotenv-dependent, DNS-dependent, or needs explicit credential scanning
+	{bait.TypeAzure,      "medium",    "~/.azure/service-principal-credentials.json"},
 	{bait.TypeOpenAI,     "medium",    "~/.env (OPENAI_BASE_URL)"},
 	{bait.TypeAnthropic,  "medium",    "~/.env.local (ANTHROPIC_BASE_URL)"},
 	{bait.TypeMCP,        "medium",    "~/.config/mcp-servers*.json"},
@@ -229,6 +241,7 @@ var allSelectEntries = []selectEntry{
 	{bait.TypeStripe,     "medium",    "~/.config/stripe/config.toml"},
 	{bait.TypeHuggingFace,"medium",    "~/.env.hf (HF_ENDPOINT)"},
 	{bait.TypeDocker,     "medium",    "~/.docker/config.json"},
+	{bait.TypeTerraform,  "medium",    "~/.terraformrc (network_mirror)"},
 	{bait.TypeGeneric,    "medium",    "~/.env.production (API_BASE_URL)"},
 }
 
