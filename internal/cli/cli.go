@@ -84,13 +84,13 @@ Advanced:
 
 Flags (arm):
   --webhook <url>              webhook URL (Discord, Slack, Telegram, or custom)
-  --label <name>               prefix canary names (defaults to hostname)
+  --label <name>               name your canary (e.g. prod-admin-legacy-2024) — defaults to hostname
   --all                        plant all canary types including dotenv-based ones
                                (openai, anthropic, huggingface, npm, mcp, github, stripe, generic, docker, azure)
   --dry-run                    show what would be planted without writing
 
 Flags (plant):
-  --label <name>               prefix canary names (defaults to hostname)
+  --label <name>               name your canary (e.g. prod-admin-legacy-2024) — defaults to hostname
   --type <type>                canary type: aws, awsproc, gcp, github, stripe, openai, anthropic, ssh, k8s, npm, mcp, pypi, huggingface, docker, azure, generic
   --all                        plant all high-reliability canary types at once
   --dry-run                    show what would be planted without writing anything
@@ -363,7 +363,7 @@ Use --all to arm every canary type, or --select to pick interactively.
 
 Flags:
   --webhook <url>    webhook URL (Discord, Slack, Telegram, PagerDuty, Teams)
-  --label <name>     prefix canary names (defaults to hostname)
+  --label <name>     name your canary (e.g. prod-admin-legacy-2024) — defaults to hostname
   --all              plant all canary types including dotenv-based ones
   --select           interactive checklist to pick which canaries to arm
   --dry-run          show what would be planted without writing anything
@@ -371,9 +371,14 @@ Flags:
 
 Examples:
   snare arm --webhook https://discord.com/api/webhooks/...
-  snare arm --webhook https://hooks.slack.com/... --label prod-server
+  snare arm --webhook https://hooks.slack.com/... --label prod-admin-legacy-2024
   snare arm --all --webhook <url>
   snare arm --select --webhook <url>
+
+Naming tip:
+  Use --label to make canaries look like real dormant infrastructure credentials.
+  A name like "prod-admin-legacy-2024" looks plausible to a compromised agent
+  and is something you'd never invoke yourself — maximizing signal quality.
 `)
 		return
 	}
