@@ -365,6 +365,112 @@ func TestRemoveModifiedContent(t *testing.T) {
 	}
 }
 
+// TestBackupCreatedOnAppend verifies that a .snare.bak file is created when appending.
+func TestBackupCreatedOnAppend(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "credentials")
+	existing := "[real-profile]\naws_access_key_id = AKIAREALKEY\n"
+
+	if err := os.WriteFile(path, []byte(existing), 0600); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	params := testParams(t, bait.TypeAWS)
+	_, err := bait.Plant(bait.TypeAWS, params, path, false)
+	if err != nil {
+		t.Fatalf("Plant: %v", err)
+	}
+
+	// .snare.bak must exist with original content
+	bakPath := bait.BackupPath(path)
+	bakData, err := os.ReadFile(bakPath)
+	if err != nil {
+		t.Fatalf("backup file not created: %v", err)
+	}
+	if string(bakData) != existing {
+		t.Errorf("backup content mismatch\nwant: %q\ngot:  %q", existing, string(bakData))
+	}
+}
+
+// TestBackupNotCreatedForNewFile verifies no .snare.bak for new files.
+func TestBackupNotCreatedForNewFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sa.json")
+
+	params := testParams(t, bait.TypeGCP)
+	_, err := bait.Plant(bait.TypeGCP, params, path, false)
+	if err != nil {
+		t.Fatalf("Plant: %v", err)
+	}
+
+	bakPath := bait.BackupPath(path)
+	if _, err := os.Stat(bakPath); !os.IsNotExist(err) {
+		t.Error("backup file should not exist for new files")
+	}
+}
+
+// TestBackupRemovedOnDisarm verifies .snare.bak is cleaned up after successful removal.
+func TestBackupRemovedOnDisarm(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "credentials")
+	existing := "[real-profile]\naws_access_key_id = AKIAREALKEY\n"
+
+	if err := os.WriteFile(path, []byte(existing), 0600); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	params := testParams(t, bait.TypeAWS)
+	placed, err := bait.Plant(bait.TypeAWS, params, path, false)
+	if err != nil {
+		t.Fatalf("Plant: %v", err)
+	}
+
+	// Backup must exist after plant
+	bakPath := bait.BackupPath(path)
+	if _, err := os.Stat(bakPath); err != nil {
+		t.Fatalf("backup not found after plant: %v", err)
+	}
+
+	c := manifest.Canary{
+		ID:          params.TokenID,
+		Path:        placed.Path,
+		Mode:        placed.Mode,
+		Content:     placed.Content,
+		ContentHash: manifest.HashContent(placed.Content),
+	}
+
+	if err := bait.Remove(c, false, false); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+
+	// Backup must be gone after disarm
+	if _, err := os.Stat(bakPath); !os.IsNotExist(err) {
+		t.Error("backup file should be removed after successful disarm")
+	}
+}
+
+// TestBackupNotCreatedOnDryRun verifies dry-run does not create .snare.bak.
+func TestBackupNotCreatedOnDryRun(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "credentials")
+	existing := "[real-profile]\naws_access_key_id = AKIAREALKEY\n"
+
+	if err := os.WriteFile(path, []byte(existing), 0600); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	params := testParams(t, bait.TypeAWS)
+	_, err := bait.Plant(bait.TypeAWS, params, path, true)
+	if err != nil {
+		t.Fatalf("Plant dry-run: %v", err)
+	}
+
+	bakPath := bait.BackupPath(path)
+	if _, err := os.Stat(bakPath); !os.IsNotExist(err) {
+		t.Error("backup file should not be created during dry-run")
+	}
+}
+
 // TestNoGiveawayStrings verifies generated credentials don't contain project identifiers.
 func TestNoGiveawayStrings(t *testing.T) {
 	giveaways := []string{"SNARE", "snare", "FAKE", "fake", "TEST", "canary", "CANARY"}
