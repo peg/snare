@@ -327,8 +327,10 @@ func TestLoginPost_validToken(t *testing.T) {
 			if !c.HttpOnly {
 				t.Error("cookie should be HttpOnly")
 			}
-			if !c.Secure {
-				t.Error("cookie should be Secure")
+			// Secure flag is only set when TLSDomain is configured;
+			// test server has no TLSDomain so Secure should be false here.
+			if c.Secure {
+				t.Error("cookie should not be Secure when TLSDomain is empty")
 			}
 			if c.SameSite != http.SameSiteStrictMode {
 				t.Error("cookie should be SameSite=Strict")

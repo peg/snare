@@ -115,25 +115,27 @@ func (s *Server) validSession(r *http.Request) bool {
 }
 
 // setSessionCookie writes the session cookie to the response.
+// Secure flag is only set when TLS is configured — plain HTTP self-hosted
+// instances (localhost, internal servers) would break with Secure=true.
 func (s *Server) setSessionCookie(w http.ResponseWriter) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    s.sessionMAC(),
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   true,
+		Secure:   s.cfg.TLSDomain != "",
 		SameSite: http.SameSiteStrictMode,
 	})
 }
 
 // clearSessionCookie removes the session cookie.
-func clearSessionCookie(w http.ResponseWriter) {
+func (s *Server) clearSessionCookie(w http.ResponseWriter) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    "",
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   true,
+		Secure:   s.cfg.TLSDomain != "",
 		SameSite: http.SameSiteStrictMode,
 		MaxAge:   -1,
 	})
@@ -188,7 +190,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 // handleLogout clears the session cookie.
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
-	clearSessionCookie(w)
+	s.clearSessionCookie(w)
 	if r.Method == http.MethodGet && strings.Contains(r.Header.Get("Accept"), "text/html") {
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
