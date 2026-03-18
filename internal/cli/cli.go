@@ -155,7 +155,9 @@ var precisionTypes = []bait.Type{
 	bait.TypeAWSProc, // fires at credential resolution — before any API call
 	bait.TypeSSH,     // fires on SSH connection attempt via ProxyCommand
 	bait.TypeK8s,     // fires on any kubectl/SDK call to fake cluster
-	bait.TypeAzure,   // fires on Azure SDK token refresh via tokenEndpoint
+	// TypeAzure excluded: service-principal-credentials.json is not in the
+	// standard Azure SDK credential chain — fires only if an agent explicitly
+	// hunts and parses the file, making it medium reliability, not precision.
 }
 
 func cmdArm(args []string) {
@@ -165,7 +167,7 @@ func cmdArm(args []string) {
 Usage:
   snare arm [flags]
 
-By default, snare arm plants only the highest-signal canaries (awsproc, ssh, k8s, azure).
+By default, snare arm plants only the highest-signal canaries (awsproc, ssh, k8s).
 These fire only on active credential use — zero false positives from your own tooling.
 Running AI agents on this machine? The default precision mode won't fire on your own tooling.
 Use --all to arm every canary type.
@@ -262,7 +264,7 @@ Examples:
 		armTypes = highReliabilityTypes
 		fmt.Println("  Full mode: planting all canary types (including dotenv-based)")
 	} else {
-		fmt.Println("  Precision mode: planting highest-signal canaries only (awsproc, ssh, k8s, azure)")
+		fmt.Println("  Precision mode: planting highest-signal canaries only (awsproc, ssh, k8s)")
 	}
 
 	planted := 0
