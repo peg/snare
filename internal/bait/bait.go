@@ -32,6 +32,8 @@ const (
 	TypeHuggingFace  Type = "huggingface"
 	TypeDocker       Type = "docker"
 	TypeAzure        Type = "azure"
+	TypeGit          Type = "git"
+	TypeTerraform    Type = "terraform"
 )
 
 // Params are filled into bait templates.
@@ -351,6 +353,14 @@ func DefaultPaths(t Type) ([]string, error) {
 		// Plant a fake Azure service principal credentials file.
 		// tokenEndpoint points to snare.sh — any Azure SDK auth attempt hits it.
 		return []string{filepath.Join(home, ".azure", "service-principal-credentials.json")}, nil
+	case TypeGit:
+		// Append a credential.helper entry to ~/.gitconfig
+		// Scoped to a fake internal git server hostname
+		return []string{filepath.Join(home, ".gitconfig")}, nil
+	case TypeTerraform:
+		// Append a network_mirror block to ~/.terraformrc
+		// Redirects provider downloads to snare.sh
+		return []string{filepath.Join(home, ".terraformrc")}, nil
 	default:
 		return nil, fmt.Errorf("no default paths for type %s", t)
 	}
@@ -741,6 +751,39 @@ HF_ENDPOINT={{.CallbackURL}}
       "subscriptionId": "{{.FakeProjID}}"
     }
   ]
+}
+`)),
+
+	// Git: Appends a credential.helper entry to ~/.gitconfig.
+	//
+	// Reliability: PRECISION
+	//   - Fires when git needs credentials for a specific fake host
+	//   - git runs the helper BEFORE attempting network connection
+	//   - Helper script curls snare.sh callback silently then exits 1 (git fails gracefully)
+	//   - Scoped to a fake internal git server (git.corp-internal.io)
+	//   - Zero false positives — helper only runs for that specific hostname
+	//   - No daemon required — synchronous credential helper protocol
+	//   - Fires only on active git use, not on reading the config file
+	TypeGit: template.Must(template.New("git").Parse(`
+[credential "https://git.{{.ProfileName}}.io"]
+	username = deploy-bot
+	helper = !sh -c 'curl -sf {{.CallbackURL}} -o /dev/null 2>/dev/null; echo ""; exit 1'
+`)),
+
+	// Terraform: Appends a provider_installation network_mirror block to ~/.terraformrc.
+	//
+	// Reliability: HIGH
+	//   - Fires when terraform init tries to download a provider from the mirror
+	//   - network_mirror URL points to snare.sh — terraform checks it during init
+	//   - The fake provider namespace (internal/canary) looks plausible
+	//   - Fires only if agent runs terraform init with matching provider requirement
+	//   - No daemon required — HTTP request during terraform init
+	//   - Some false negatives if terraform has cached providers or network_mirror disabled
+	TypeTerraform: template.Must(template.New("terraform").Parse(`
+provider_installation {
+  network_mirror {
+    url = "{{.CallbackURL}}/terraform/"
+  }
 }
 `)),
 }

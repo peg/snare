@@ -70,10 +70,13 @@ func restoreTerminal(fd int, old *termios) {
 // reliability returns a human-readable reliability label per canary type.
 func reliability(t string) string {
 	switch bait.Type(t) {
+	// Precision: fires only on active credential use, zero false positives, no daemon
+	case bait.TypeGit:
+		return "precision"
 	// High: callback URL is the real SDK service endpoint — fires on any use
 	case bait.TypeAWS, bait.TypeAWSProc, bait.TypeGCP,
 		bait.TypeSSH, bait.TypeK8s, bait.TypePyPI,
-		bait.TypeAzure:
+		bait.TypeAzure, bait.TypeTerraform:
 		return "high"
 	// Medium-high: fires reliably but requires specific agent behavior
 	case bait.TypeOpenAI, bait.TypeAnthropic, bait.TypeNPM, bait.TypeMCP,
@@ -196,6 +199,7 @@ var precisionTypes = []bait.Type{
 	bait.TypeAWSProc, // fires at credential resolution — before any API call
 	bait.TypeSSH,     // fires on SSH connection attempt via ProxyCommand
 	bait.TypeK8s,     // fires on any kubectl/SDK call to fake cluster
+	bait.TypeGit,     // fires via credential.helper on git operation with fake host
 	// TypeAzure excluded: service-principal-credentials.json is not in the
 	// standard Azure SDK credential chain — fires only if an agent explicitly
 	// hunts and parses the file, making it medium reliability, not precision.
@@ -213,11 +217,13 @@ var allSelectEntries = []selectEntry{
 	{bait.TypeAWSProc,    "precision", "~/.aws/config (credential_process)"},
 	{bait.TypeSSH,        "precision", "~/.ssh/config (ProxyCommand)"},
 	{bait.TypeK8s,        "precision", "~/.kube/<name>.yaml (server URL)"},
+	{bait.TypeGit,        "precision", "~/.gitconfig (credential.helper)"},
 	{bait.TypeAWS,        "high",      "~/.aws/credentials (endpoint_url)"},
 	{bait.TypeGCP,        "high",      "~/.config/gcloud/sa-*.json (token_uri)"},
 	{bait.TypeAzure,      "high",      "~/.azure/service-principal-credentials.json"},
 	{bait.TypePyPI,       "high",      "~/.config/pip/pip.conf (extra-index-url)"},
 	{bait.TypeNPM,        "high",      "~/.npmrc (scoped registry)"},
+	{bait.TypeTerraform,  "high",      "~/.terraformrc (network_mirror)"},
 	{bait.TypeOpenAI,     "medium",    "~/.env (OPENAI_BASE_URL)"},
 	{bait.TypeAnthropic,  "medium",    "~/.env.local (ANTHROPIC_BASE_URL)"},
 	{bait.TypeMCP,        "medium",    "~/.config/mcp-servers*.json"},
@@ -1151,7 +1157,7 @@ var highReliabilityTypes = []bait.Type{
 	bait.TypeAWS, bait.TypeAWSProc, bait.TypeGCP,
 	bait.TypeSSH, bait.TypeK8s, bait.TypePyPI,
 	bait.TypeOpenAI, bait.TypeAnthropic, bait.TypeNPM, bait.TypeMCP,
-	bait.TypeHuggingFace, bait.TypeDocker, bait.TypeAzure,
+	bait.TypeHuggingFace, bait.TypeDocker, bait.TypeAzure, bait.TypeTerraform,
 }
 
 // cmdPlant deploys canary credentials to this machine.
@@ -2257,6 +2263,25 @@ func buildParams(bt bait.Type, label string, cfg *config.Config) (bait.Params, e
 			p.ProfileName = label + "-" + e
 		} else {
 			p.ProfileName = e
+		}
+
+	case bait.TypeGit:
+		// ProfileName is the fake git server domain component
+		// e.g. git.acme-internal.io becomes ProfileName = acme-internal
+		corps := []string{"acme", "contoso", "initech", "tyrell", "weyland"}
+		c := corps[token.MustRandInt(len(corps))]
+		if label != "" {
+			p.ProfileName = label + "-internal"
+		} else {
+			p.ProfileName = c + "-internal"
+		}
+
+	case bait.TypeTerraform:
+		// ProfileName is used as a comment label in the network_mirror block
+		if label != "" {
+			p.ProfileName = label + "-terraform"
+		} else {
+			p.ProfileName = "terraform-mirror"
 		}
 	}
 
