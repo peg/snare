@@ -13,19 +13,28 @@ Versioning: [Semantic Versioning](https://semver.org/)
 
 ### Added
 - **`snare arm --select`** — interactive TUI checklist for picking canaries. Arrow keys/j/k, Space to toggle, Enter to confirm. Precision canaries pre-checked. No new dependencies (raw terminal via syscall).
-- **`snare events --summary`** — ASN distribution, SDK/user-agent breakdown, likely-AI-agent count, and per-canary hit counts across all active tokens. Covers 12 cloud provider ASNs.
-- **`git` canary** (high reliability) — `credential.helper` entry in `~/.gitconfig`, scoped to a fake internal git hostname. Fires when an agent runs `git credential fill` against the URL.
-- **`terraform` canary** (medium reliability) — `network_mirror` block in `~/.terraformrc` with a fake provider namespace. Fires on `terraform init`. New-file-only to avoid breaking existing HCL config.
-- Three-tier reliability system: **precision** (awsproc, ssh, k8s), **high**, **medium** — replacing the old high/medium split.
+- **`snare events --summary`** — ASN distribution, SDK/user-agent breakdown, likely-AI-agent count, and per-canary hit counts. Covers 12 cloud provider ASNs.
+- **`git` canary** (high reliability) — `credential.helper` entry in `~/.gitconfig`, scoped to a fake internal git hostname. Fires on `git credential fill`.
+- **`terraform` canary** (medium reliability) — `network_mirror` in `~/.terraformrc` with fake provider namespace. Fires on `terraform init`. New-file-only to avoid HCL conflicts.
+- Three-tier reliability system: **precision** (awsproc, ssh, k8s), **high**, **medium**.
+- `snare scan` — check canary integrity on disk; detects OK, MODIFIED, MISSING, and ORPHANED canaries.
+- Hugging Face canary (`huggingface`) — `~/.env.hf` with `HF_TOKEN` + `HF_ENDPOINT` redirect.
+- Docker canary (`docker`) — fake registry entry in `~/.docker/config.json`.
+- Azure canary (`azure`) — fake service principal credentials with `tokenEndpoint` redirect (medium reliability).
+- Homebrew tap: `brew install peg/tap/snare`.
 
 ### Changed
-- Azure removed from precision defaults — `service-principal-credentials.json` is not in the standard Azure SDK credential chain. Moves to medium reliability.
+- `snare arm` defaults to precision mode (awsproc, ssh, k8s). Use `--select` for interactive picker or `--all` for all 18 types.
+- `--precision` flag removed — precision is now the default.
+- Azure moved from precision to medium — not in standard Azure SDK credential chain.
 - `npm` promoted from medium to high — scoped registry fires reliably on `npm install`.
-- Token generation: `randString()` helper centralizes giveaway-free generation across all token types. Generated credentials no longer contain SNARE, FAKE, TEST, CANARY, HONEY, DECOY, DUMMY, or EXAMPLE as substrings.
-- README: corrected precision mode canary list, updated false positive claim to "near-zero", added `--select` mention.
+- Token generation: `randString()` centralizes giveaway-free generation. Generated credentials no longer contain SNARE, FAKE, TEST, CANARY, HONEY, DECOY, DUMMY, or EXAMPLE.
 
 ### Fixed
-- `awsproc` template comment: correctly labeled as high, not precision (DNS limitation on git canary noted).
+- Worker: false-positive filtering — AWS canaries require AWS4-HMAC-SHA256 signature, GCP require POST, known scanner orgs (Shodan, Censys, Rapid7) silently dropped.
+- `install.sh`: checksum verification fails closed.
+- `snare disarm`: revokes token registrations even when no local webhook configured.
+- `awsproc`: removed `SessionToken: null` from credential JSON (broke strict SDK parsers).
 
 ## [0.1.1] - 2026-03-16
 
