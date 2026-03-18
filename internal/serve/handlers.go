@@ -81,9 +81,16 @@ func (s *Server) processAlert(token, ip, ua, method, path, timestamp string, isT
 		log.Printf("get token error: %v", err)
 	}
 
+	// Unregistered tokens never fire webhooks — avoids false alerts from
+	// probe traffic hitting random/partial token URLs.
+	if reg == nil {
+		log.Printf("UNREGISTERED token=%s — skipping webhook", token)
+		return
+	}
+
 	// Determine webhook target
 	webhookURL := s.cfg.WebhookURL // global fallback
-	if reg != nil && reg.WebhookURL != "" && reg.WebhookURL != "use-global" {
+	if reg.WebhookURL != "" && reg.WebhookURL != "use-global" {
 		webhookURL = reg.WebhookURL
 	}
 
