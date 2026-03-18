@@ -70,13 +70,10 @@ func restoreTerminal(fd int, old *termios) {
 // reliability returns a human-readable reliability label per canary type.
 func reliability(t string) string {
 	switch bait.Type(t) {
-	// Precision: fires only on active credential use, zero false positives, no daemon
-	case bait.TypeGit:
-		return "precision"
 	// High: callback URL is the real SDK service endpoint — fires on any use
 	case bait.TypeAWS, bait.TypeAWSProc, bait.TypeGCP,
 		bait.TypeSSH, bait.TypeK8s, bait.TypePyPI,
-		bait.TypeAzure:
+		bait.TypeAzure, bait.TypeGit:
 		return "high"
 	// Medium-high: fires reliably but requires specific agent behavior
 	case bait.TypeOpenAI, bait.TypeAnthropic, bait.TypeNPM, bait.TypeMCP,
@@ -199,10 +196,11 @@ var precisionTypes = []bait.Type{
 	bait.TypeAWSProc, // fires at credential resolution — before any API call
 	bait.TypeSSH,     // fires on SSH connection attempt via ProxyCommand
 	bait.TypeK8s,     // fires on any kubectl/SDK call to fake cluster
-	bait.TypeGit,     // fires via credential.helper on git operation with fake host
-	// TypeAzure excluded: service-principal-credentials.json is not in the
-	// standard Azure SDK credential chain — fires only if an agent explicitly
-	// hunts and parses the file, making it medium reliability, not precision.
+	// TypeGit excluded: credential.helper requires HTTP 401 from the fake host,
+	// but the fake hostname has no DNS record so git errors at DNS resolution
+	// before ever asking for credentials. Medium-high reliability at best.
+	// TypeAzure excluded: service-principal-credentials.json not in standard
+	// Azure SDK credential chain — requires agent to explicitly hunt the file.
 }
 
 // selectEntry describes one row in the --select TUI.
@@ -217,7 +215,7 @@ var allSelectEntries = []selectEntry{
 	{bait.TypeAWSProc,    "precision", "~/.aws/config (credential_process)"},
 	{bait.TypeSSH,        "precision", "~/.ssh/config (ProxyCommand)"},
 	{bait.TypeK8s,        "precision", "~/.kube/<name>.yaml (server URL)"},
-	{bait.TypeGit,        "precision", "~/.gitconfig (credential.helper)"},
+	{bait.TypeGit,        "high",      "~/.gitconfig (credential.helper)"},
 	{bait.TypeAWS,        "high",      "~/.aws/credentials (endpoint_url)"},
 	{bait.TypeGCP,        "high",      "~/.config/gcloud/sa-*.json (token_uri)"},
 	{bait.TypeAzure,      "high",      "~/.azure/service-principal-credentials.json"},
