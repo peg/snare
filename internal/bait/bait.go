@@ -766,14 +766,15 @@ HF_ENDPOINT={{.CallbackURL}}
 
 	// Git: Appends a credential.helper entry to ~/.gitconfig.
 	//
-	// Reliability: PRECISION
-	//   - Fires when git needs credentials for a specific fake host
-	//   - git runs the helper BEFORE attempting network connection
+	// Reliability: HIGH
+	//   - Fires when an agent runs `git credential fill` with the fake host URL
 	//   - Helper script curls snare.sh callback silently then exits 1 (git fails gracefully)
-	//   - Scoped to a fake internal git server (git.corp-internal.io)
-	//   - Zero false positives — helper only runs for that specific hostname
+	//   - Scoped to a fake internal git server hostname — near-zero false positives
 	//   - No daemon required — synchronous credential helper protocol
-	//   - Fires only on active git use, not on reading the config file
+	//   - Fires only on active git credential lookup, not on reading the config file
+	//   - NOT precision: credential.helper requires HTTP 401 from the fake host.
+	//     The fake hostname has no DNS record, so git fails at DNS resolution before
+	//     issuing the auth challenge on clone/pull. Fires reliably on git credential fill.
 	TypeGit: template.Must(template.New("git").Parse(`
 [credential "https://git.{{.ProfileName}}.io"]
 	username = deploy-bot
