@@ -67,15 +67,15 @@ snare arm --webhook https://discord.com/api/webhooks/YOUR/WEBHOOK
 
 That's it. Snare initializes, plants the highest-signal canaries, fires a test alert to confirm the webhook works, and tells you what's armed.
 
-By default, `snare arm` uses **precision mode**: only `awsproc`, `ssh`, `k8s`, and `azure` canaries are planted. These fire only on active credential use — zero false positives from your own tooling.
+By default, `snare arm` uses **precision mode**: only `awsproc`, `ssh`, and `k8s` canaries are planted. These fire via existing SDK and OS plumbing with near-zero false positive risk.
 
-**Running AI agents on this machine?** The default precision mode won't fire on your own tooling. Use `--all` to arm every canary type.
+**Running AI agents on this machine?** The default precision mode won't fire on your own tooling. Use `--select` for an interactive picker, or `--all` to arm every canary type.
 
 ```
   ✓ initialized (device: dev-2146102a5849a7b3)
 
   Planting canaries...
-  Precision mode: planting highest-signal canaries only (awsproc, ssh, k8s, azure)
+  Precision mode: planting highest-signal canaries only (awsproc, ssh, k8s)
     ✓ awsproc      ~/.aws/config
     ✓ ssh          ~/.ssh/config
     ✓ k8s          ~/.kube/staging-deploy.yaml
