@@ -26,6 +26,9 @@ import (
 	"github.com/peg/snare/internal/token"
 )
 
+// httpClient is used for all outbound HTTP calls so they have a uniform timeout.
+var httpClient = &http.Client{Timeout: 15 * time.Second}
+
 // reliability returns a human-readable reliability label per canary type.
 //
 // Tiers:
@@ -774,7 +777,7 @@ func cmdDoctor(args []string) {
 
 	// 2. Callback base is reachable
 	healthURL := strings.Replace(cfg.CallbackBase, "/c", "/health", 1)
-	resp, err := http.Get(healthURL) //nolint:gosec
+	resp, err := httpClient.Get(healthURL) //nolint:gosec
 	if err != nil {
 		check("Callback server", "fail", fmt.Sprintf("unreachable (%s)", healthURL))
 	} else {
@@ -842,7 +845,7 @@ func cmdDoctor(args []string) {
 		fmt.Println()
 		fmt.Println("  Firing test alert...")
 		testURL := strings.Replace(cfg.CallbackBase, "/c", "/c/snare-test-"+cfg.DeviceID[len(cfg.DeviceID)-8:], 1)
-		resp, err := http.Get(testURL) //nolint:gosec
+		resp, err := httpClient.Get(testURL) //nolint:gosec
 		if err != nil {
 			check("Test alert", "fail", err.Error())
 		} else {
@@ -1574,7 +1577,7 @@ func cmdStatus(args []string) {
 				req.Header.Set("Authorization", "Bearer "+cfg.DeviceSecret)
 				req.Header.Set("X-Snare-Device-Id", cfg.DeviceID)
 			}
-			resp, err := http.DefaultClient.Do(req)
+			resp, err := httpClient.Do(req)
 			if err != nil || resp.StatusCode != 200 {
 				if resp != nil {
 					resp.Body.Close()
@@ -2473,7 +2476,7 @@ func authedGet(url string, cfg *config.Config) (*http.Response, error) {
 		req.Header.Set("Authorization", "Bearer "+cfg.DeviceSecret)
 		req.Header.Set("X-Snare-Device-Id", cfg.DeviceID)
 	}
-	return http.DefaultClient.Do(req)
+	return httpClient.Do(req)
 }
 
 func authedPost(url string, payload interface{}, cfg *config.Config) (*http.Response, error) {
@@ -2486,7 +2489,7 @@ func authedPost(url string, payload interface{}, cfg *config.Config) (*http.Resp
 	if cfg.DeviceSecret != "" {
 		req.Header.Set("Authorization", "Bearer "+cfg.DeviceSecret)
 	}
-	return http.DefaultClient.Do(req)
+	return httpClient.Do(req)
 }
 
 // registerToken registers a per-token webhook with snare.sh.
@@ -2536,7 +2539,7 @@ func revokeToken(cfg *config.Config, tokenID string) error {
 
 // httpGet fires a GET request to url using net/http.
 func httpGet(url string) error {
-	resp, err := http.Get(url) //nolint:noctx
+	resp, err := httpClient.Get(url) //nolint:noctx
 	if err != nil {
 		return err
 	}
