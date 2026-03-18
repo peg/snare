@@ -9,6 +9,16 @@ Versioning: [Semantic Versioning](https://semver.org/)
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-03-18
+
+### Fixed
+- Unregistered tokens no longer fire the global fallback webhook — probe traffic hitting random/partial token URLs is silently dropped (#23)
+- Added 15s timeout to all outbound HTTP clients — CLI no longer hangs forever if snare.sh is unreachable (#19)
+- Write `.snare.bak` backup before appending canary content to existing config files; backup cleaned up on successful disarm (#18)
+- Dashboard authentication replaced ?token= query param with HttpOnly session cookie — prevents token leakage to browser history and server logs (#22)
+- Session cookie Secure flag is conditional on TLSDomain — plain HTTP self-hosted deployments now work correctly
+- Release checksums signed with Sigstore/cosign for tamper verification (#21)
+
 ## [0.1.2] - 2026-03-18
 
 ### Added
