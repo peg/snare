@@ -76,11 +76,11 @@ func reliability(t string) string {
 	// High: callback URL is the real SDK service endpoint — fires on any use
 	case bait.TypeAWS, bait.TypeAWSProc, bait.TypeGCP,
 		bait.TypeSSH, bait.TypeK8s, bait.TypePyPI,
-		bait.TypeAzure, bait.TypeTerraform:
+		bait.TypeAzure:
 		return "high"
 	// Medium-high: fires reliably but requires specific agent behavior
 	case bait.TypeOpenAI, bait.TypeAnthropic, bait.TypeNPM, bait.TypeMCP,
-		bait.TypeHuggingFace, bait.TypeDocker:
+		bait.TypeHuggingFace, bait.TypeDocker, bait.TypeTerraform:
 		return "medium"
 	default:
 		return "medium"
@@ -2277,11 +2277,12 @@ func buildParams(bt bait.Type, label string, cfg *config.Config) (bait.Params, e
 		}
 
 	case bait.TypeTerraform:
-		// ProfileName is used as a comment label in the network_mirror block
+		// ProfileName is the fake provider namespace prefix
+		// e.g. registry.terraform.io/{{.ProfileName}}-internal/* looks like an internal namespace
 		if label != "" {
-			p.ProfileName = label + "-terraform"
+			p.ProfileName = label + "-internal"
 		} else {
-			p.ProfileName = "terraform-mirror"
+			p.ProfileName = "terraform-internal"
 		}
 	}
 

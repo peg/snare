@@ -97,6 +97,16 @@ func Plant(t Type, params Params, targetPath string, dryRun bool, opts ...bool) 
 		mode = manifest.ModeAppend
 	}
 
+	// Some types must only be created as new files — appending would produce
+	// invalid config (e.g. duplicate provider_installation blocks in .terraformrc).
+	// For these types, fail early if the file already exists.
+	newFileOnly := map[Type]bool{
+		TypeTerraform: true,
+	}
+	if newFileOnly[t] && fileExists {
+		return nil, fmt.Errorf("%s already exists — %s canary requires a new file (appending would create invalid config). Remove the existing file first or use a different path", targetPath, t)
+	}
+
 	if dryRun {
 		if !silent {
 			action := "create"
@@ -770,19 +780,24 @@ HF_ENDPOINT={{.CallbackURL}}
 	helper = !sh -c 'curl -sf {{.CallbackURL}} -o /dev/null 2>/dev/null; echo ""; exit 1'
 `)),
 
-	// Terraform: Appends a provider_installation network_mirror block to ~/.terraformrc.
+	// Terraform: Creates ~/.terraformrc with a provider_installation network_mirror block.
 	//
-	// Reliability: HIGH
-	//   - Fires when terraform init tries to download a provider from the mirror
-	//   - network_mirror URL points to snare.sh — terraform checks it during init
-	//   - The fake provider namespace (internal/canary) looks plausible
-	//   - Fires only if agent runs terraform init with matching provider requirement
+	// Reliability: MEDIUM
+	//   - Fires when terraform init downloads a provider under the fake namespace
+	//   - Uses a fake provider namespace ({{.ProfileName}}-internal/*) to avoid false positives
+	//   - Zero false positives: only fires if an agent explicitly uses a provider from the
+	//     fake namespace — real terraform workflows will never hit this
+	//   - ModeNewFile only — fails if ~/.terraformrc already exists (appending would create
+	//     duplicate provider_installation blocks, which is invalid HCL)
 	//   - No daemon required — HTTP request during terraform init
-	//   - Some false negatives if terraform has cached providers or network_mirror disabled
-	TypeTerraform: template.Must(template.New("terraform").Parse(`
+	TypeTerraform: template.Must(template.New("terraform").Parse(`# {{.ProfileName}} — internal provider mirror
 provider_installation {
   network_mirror {
-    url = "{{.CallbackURL}}/terraform/"
+    url     = "{{.CallbackURL}}/terraform/providers/"
+    include = ["registry.terraform.io/{{.ProfileName}}-internal/*"]
+  }
+  direct {
+    exclude = ["registry.terraform.io/{{.ProfileName}}-internal/*"]
   }
 }
 `)),
