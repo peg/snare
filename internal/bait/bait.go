@@ -132,6 +132,14 @@ func Plant(t Type, params Params, targetPath string, dryRun bool, opts ...bool) 
 		}
 	}
 
+	// Backup existing file before appending canary content.
+	// If snare crashes mid-operation, the user can restore from the .bak file.
+	if fileExists && mode == manifest.ModeAppend {
+		if err := writeBackup(targetPath); err != nil {
+			return nil, fmt.Errorf("creating backup of %s: %w", targetPath, err)
+		}
+	}
+
 	// Ensure parent directory exists with secure permissions
 	parentDir := filepath.Dir(targetPath)
 	if err := os.MkdirAll(parentDir, 0700); err != nil {
@@ -288,8 +296,35 @@ func removeAppended(c manifest.Canary, force bool, dryRun bool) error {
 		return fmt.Errorf("replacing %s: %w", c.Path, err)
 	}
 
+	// Clean up the .bak file now that the canary content has been safely removed.
+	removeBackup(c.Path)
+
 	fmt.Printf("  removed canary block from %s\n", c.Path)
 	return nil
+}
+
+// BackupPath returns the .snare.bak path for a given file path.
+func BackupPath(path string) string {
+	return path + ".snare.bak"
+}
+
+// writeBackup copies the contents of path to path.snare.bak.
+// The backup preserves the original file's permissions.
+func writeBackup(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(BackupPath(path), data, info.Mode())
+}
+
+// removeBackup deletes the .snare.bak file if it exists.
+func removeBackup(path string) {
+	_ = os.Remove(BackupPath(path))
 }
 
 // DefaultPaths returns the standard target paths for each bait type.
