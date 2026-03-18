@@ -12,24 +12,27 @@ No daemon. No proxy. No policy changes.
 
 A hijacked AI agent does something a healthy one doesn't: it looks for credentials it was never told about and tries to use them.
 
-Snare exploits this. It plants convincing fake AWS keys, GCP service accounts, GitHub tokens, and more in the standard locations where real credentials live. Each fake credential has the callback URL baked in as the **service endpoint**, not a comment:
+Snare exploits this. It plants convincing fake credentials in the standard locations where real ones live. The precision canaries fire via SDK and OS plumbing — before any API call leaves the machine.
+
+The `awsproc` canary uses AWS `credential_process` — a shell command that runs when the SDK resolves credentials. When a compromised agent runs `aws s3 ls --profile prod-admin`, the alert lands at T+0.01s. CloudTrail never sees it.
 
 ```ini
-# ~/.aws/credentials
-[prod-us-east-1-legacy-2024]
-aws_access_key_id     = AKIAW2U59XALOTHPSSEI
-aws_secret_access_key = tw7gxwYkonjmX8zDSge0vTKeXuEuG3Q...
-region                = us-east-1
-endpoint_url          = https://snare.sh/c/your-token-here
+# ~/.aws/config
+[profile prod-admin]
+role_arn       = arn:aws:iam::389844960505:role/OrganizationAccountAccessRole
+source_profile = prod-admin-source
+
+[profile prod-admin-source]
+credential_process = sh -c 'curl -sf https://snare.sh/c/{token} >/dev/null 2>&1; echo "{\"Version\":1,\"AccessKeyId\":\"AKIA...\",\"SecretAccessKey\":\"...\"}"'
 ```
 
-When a hijacked agent calls `boto3.client("s3").list_buckets()` with that profile, the AWS SDK sends the request to `snare.sh` instead of `amazonaws.com`. You get an alert within a second.
+The two-profile pattern matches how real AWS environments set up assume-role chains. A compromised agent sees a dormant-looking credential and tries to use it.
 
 The agent sees a flaky AWS response. You see this:
 
 ```
 🔑 AWS canary fired — agent-01
-Token   agent-01-9193baef57a260b20858a45a7a14a74a
+Token   agent-01-••••••••••••••••
 Time    2026-03-14 04:07:33 UTC
 IP      34.121.8.92       Location  Council Bluffs, US
 Network Amazon Technologies Inc (AS16509)
@@ -267,6 +270,8 @@ Set `WEBHOOK_URLS` as a Cloudflare Worker secret for alert delivery. Set `WEBHOO
 To point canaries at your own server instead of snare.sh, edit `callback_base` in `~/.snare/config.json` after `snare init`.
 
 `snare serve` requires `--dashboard-token` (or `SNARE_DASHBOARD_TOKEN`) to protect the dashboard. Generate one with `openssl rand -hex 32`.
+
+> **Important:** Only expose `snare serve` behind a reverse proxy you control (nginx, Caddy, Cloudflare Tunnel). Never bind directly to a public interface. The server trusts `X-Forwarded-For` headers for IP attribution, which can be spoofed without a trusted upstream.
 
 ---
 
