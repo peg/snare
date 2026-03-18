@@ -139,7 +139,7 @@ The alert arrives **before the attacker's first API call lands on AWS**. CloudTr
 
 **Network-restricted behavior:** If the callback URL is unreachable (firewall, airgap), curl fails silently and the shell command still outputs the fake credential JSON. The agent receives apparently-valid credentials and continues unaware. The canary remains deceptive on restricted networks.
 
-**Precision mode** — `snare arm --precision` plants only the three canaries with near-zero false positive risk:
+**Precision mode** — `snare arm` defaults to precision mode, planting only the three canaries with near-zero false positive risk:
 
 | Type | Fires when | False positive risk |
 |------|------------|---------------------|
