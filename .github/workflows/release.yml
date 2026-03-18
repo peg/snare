@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  id-token: write
 
 jobs:
   release:
@@ -23,6 +24,9 @@ jobs:
 
       - name: Run tests
         run: go test ./... -race -count=1
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
 
       - name: Build binaries
         run: |
@@ -51,11 +55,15 @@ jobs:
           echo "=== checksums.txt ==="
           cat dist/checksums.txt
 
+      - name: Sign checksums with cosign
+        run: cosign sign-blob --yes dist/checksums.txt --bundle dist/checksums.txt.bundle
+
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/*.tar.gz
             dist/checksums.txt
+            dist/checksums.txt.bundle
           generate_release_notes: true
           fail_on_unmatched_files: false

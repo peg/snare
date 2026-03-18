@@ -270,6 +270,18 @@ To point canaries at your own server instead of snare.sh, edit `callback_base` i
 
 ---
 
+## Verifying releases
+
+Release checksums are signed with [Sigstore/cosign](https://docs.sigstore.dev/) using keyless OIDC signing via GitHub Actions. To verify a downloaded release:
+
+```sh
+cosign verify-blob --bundle checksums.txt.bundle checksums.txt
+```
+
+This confirms the checksums file was produced by the official GitHub Actions release workflow and has not been tampered with.
+
+---
+
 ## License
 
 Apache 2.0 — see [LICENSE](./LICENSE).
