@@ -18,6 +18,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"github.com/peg/snare/internal/bait"
 	"github.com/peg/snare/internal/config"
@@ -26,18 +27,68 @@ import (
 	"github.com/peg/snare/internal/token"
 )
 
+// termios holds terminal attributes for raw mode.
+type termios struct {
+	Iflag  uint32
+	Oflag  uint32
+	Cflag  uint32
+	Lflag  uint32
+	Cc     [20]uint8
+	Ispeed uint32
+	Ospeed uint32
+}
+
+func makeRaw(fd int) (*termios, error) {
+	var old termios
+	if _, _, errno := syscall.Syscall(syscall.SYS_IOCTL,
+		uintptr(fd), syscall.TCGETS, uintptr(unsafe.Pointer(&old))); errno != 0 {
+		return nil, errno
+	}
+	raw := old
+	// Disable echo, canonical mode, signals from input
+	raw.Lflag &^= syscall.ECHO | syscall.ICANON | syscall.ISIG | syscall.IEXTEN
+	raw.Iflag &^= syscall.IXON | syscall.ICRNL | syscall.BRKINT | syscall.INPCK | syscall.ISTRIP
+	raw.Cflag |= syscall.CS8
+	raw.Oflag &^= syscall.OPOST
+	raw.Cc[syscall.VMIN] = 1
+	raw.Cc[syscall.VTIME] = 0
+	if _, _, errno := syscall.Syscall(syscall.SYS_IOCTL,
+		uintptr(fd), syscall.TCSETS, uintptr(unsafe.Pointer(&raw))); errno != 0 {
+		return nil, errno
+	}
+	return &old, nil
+}
+
+func restoreTerminal(fd int, old *termios) {
+	if old == nil {
+		return
+	}
+	syscall.Syscall(syscall.SYS_IOCTL, //nolint:errcheck
+		uintptr(fd), syscall.TCSETS, uintptr(unsafe.Pointer(old)))
+}
+
 // reliability returns a human-readable reliability label per canary type.
+//
+// Tiers:
+//   precision — fires via existing SDK/OS plumbing, no agent hunting needed,
+//               no DNS dependency, zero false positives
+//   high      — fires when credential is actively used, but requires agent to
+//               find and use it, or has a DNS/runtime dependency
+//   medium    — fires conditionally: depends on dotenv loading, base URL
+//               override support, or agent doing explicit credential scanning
 func reliability(t string) string {
 	switch bait.Type(t) {
-	// High: callback URL is the real SDK service endpoint — fires on any use
-	case bait.TypeAWS, bait.TypeAWSProc, bait.TypeGCP,
-		bait.TypeSSH, bait.TypeK8s, bait.TypePyPI,
-		bait.TypeAzure:
+	// Precision: fires via SDK/OS hooks before or during connection, no DNS needed
+	case bait.TypeAWSProc, bait.TypeSSH, bait.TypeK8s:
+		return "precision"
+	// High: fires on active credential use, requires agent to find+use the cred
+	case bait.TypeAWS,   // endpoint_url fires on any AWS SDK call with that profile
+		bait.TypeGCP,    // token_uri fires on GCP SDK auth (needs explicit file load)
+		bait.TypePyPI,   // extra-index-url fires on pip install (own installs too — see warning)
+		bait.TypeNPM,    // scoped registry fires on npm install (scoped packages only)
+		bait.TypeGit:    // credential.helper fires if agent does git credential fill
 		return "high"
-	// Medium-high: fires reliably but requires specific agent behavior
-	case bait.TypeOpenAI, bait.TypeAnthropic, bait.TypeNPM, bait.TypeMCP,
-		bait.TypeHuggingFace, bait.TypeDocker:
-		return "medium"
+	// Medium: dotenv-dependent, DNS-dependent, or requires explicit credential scanning
 	default:
 		return "medium"
 	}
@@ -155,6 +206,185 @@ var precisionTypes = []bait.Type{
 	bait.TypeAWSProc, // fires at credential resolution — before any API call
 	bait.TypeSSH,     // fires on SSH connection attempt via ProxyCommand
 	bait.TypeK8s,     // fires on any kubectl/SDK call to fake cluster
+	// TypeGit excluded: credential.helper requires HTTP 401 from the fake host,
+	// but the fake hostname has no DNS record so git errors at DNS resolution
+	// before ever asking for credentials. Medium-high reliability at best.
+	// TypeAzure excluded: service-principal-credentials.json not in standard
+	// Azure SDK credential chain — requires agent to explicitly hunt the file.
+}
+
+// selectEntry describes one row in the --select TUI.
+type selectEntry struct {
+	t     bait.Type
+	tier  string // "precision", "high", "medium"
+	path  string // short description of where it plants
+}
+
+// allSelectEntries is the canonical ordered list for --select mode.
+var allSelectEntries = []selectEntry{
+	// Precision: fire via SDK/OS hooks, no DNS dependency, zero false positives
+	{bait.TypeAWSProc,    "precision", "~/.aws/config (credential_process)"},
+	{bait.TypeSSH,        "precision", "~/.ssh/config (ProxyCommand)"},
+	{bait.TypeK8s,        "precision", "~/.kube/<name>.yaml (server URL)"},
+	// High: fires on active use, agent must find+use the credential
+	{bait.TypeAWS,        "high",      "~/.aws/credentials (endpoint_url)"},
+	{bait.TypeGCP,        "high",      "~/.config/gcloud/sa-*.json (token_uri)"},
+	{bait.TypeNPM,        "high",      "~/.npmrc (scoped registry)"},
+	{bait.TypeGit,        "high",      "~/.gitconfig (credential.helper)"},
+	{bait.TypePyPI,       "high",      "~/.config/pip/pip.conf (extra-index-url) ⚠ side effect"},
+	// Medium: dotenv-dependent, DNS-dependent, or needs explicit credential scanning
+	{bait.TypeAzure,      "medium",    "~/.azure/service-principal-credentials.json"},
+	{bait.TypeOpenAI,     "medium",    "~/.env (OPENAI_BASE_URL)"},
+	{bait.TypeAnthropic,  "medium",    "~/.env.local (ANTHROPIC_BASE_URL)"},
+	{bait.TypeMCP,        "medium",    "~/.config/mcp-servers*.json"},
+	{bait.TypeGitHub,     "medium",    "~/.config/gh/hosts.yml"},
+	{bait.TypeStripe,     "medium",    "~/.config/stripe/config.toml"},
+	{bait.TypeHuggingFace,"medium",    "~/.env.hf (HF_ENDPOINT)"},
+	{bait.TypeDocker,     "medium",    "~/.docker/config.json"},
+	{bait.TypeTerraform,  "medium",    "~/.terraformrc (network_mirror)"},
+	{bait.TypeGeneric,    "medium",    "~/.env.production (API_BASE_URL)"},
+}
+
+// runSelectTUI shows an interactive checklist and returns the chosen types.
+// Precision types are pre-checked. Space toggles, Enter confirms, q/Ctrl-C aborts.
+func runSelectTUI() ([]bait.Type, error) {
+	// Check for TTY — can't run interactive mode without one
+	fi, err := os.Stdin.Stat()
+	if err != nil || (fi.Mode()&os.ModeCharDevice) == 0 {
+		return nil, fmt.Errorf("--select requires an interactive terminal")
+	}
+
+	// Build checked state: precision = on by default
+	checked := make([]bool, len(allSelectEntries))
+	for i, e := range allSelectEntries {
+		checked[i] = e.tier == "precision"
+	}
+
+	cursor := 0
+	tierColors := map[string]string{
+		"precision": "\033[33m", // amber
+		"high":      "\033[32m", // green
+		"medium":    "\033[36m", // cyan
+	}
+	reset := "\033[0m"
+	bold  := "\033[1m"
+	dim   := "\033[2m"
+
+	// Put terminal in raw mode
+	oldState, err := makeRaw(int(os.Stdin.Fd()))
+	if err != nil {
+		return nil, fmt.Errorf("setting raw mode: %w", err)
+	}
+	defer restoreTerminal(int(os.Stdin.Fd()), oldState)
+
+	clearLines := func(n int) {
+		for i := 0; i < n; i++ {
+			fmt.Print("\033[A\033[2K") // up one line, clear it
+		}
+	}
+
+	render := func() {
+		fmt.Println()
+		fmt.Printf("  %sSelect canaries to arm%s  %sSpace toggle · Enter confirm · q abort%s\n\n",
+			bold, reset, dim, reset)
+		lastTier := ""
+		for i, e := range allSelectEntries {
+			if e.tier != lastTier {
+				lastTier = e.tier
+				color := tierColors[e.tier]
+				fmt.Printf("  %s%s%s\n", color, strings.ToUpper(e.tier), reset)
+			}
+			check := "○"
+			if checked[i] {
+				check = "✓"
+			}
+			pointer := "  "
+			if i == cursor {
+				pointer = "\033[7m→\033[27m "
+			}
+			fmt.Printf("  %s %s %-12s  %s%s%s\n",
+				pointer, check, e.t, dim, e.path, reset)
+		}
+		fmt.Println()
+	}
+
+	// Count lines rendered so we can redraw in-place
+	// header(3) + tier headers + entries + footer(1)
+	countLines := func() int {
+		tiers := map[string]bool{}
+		for _, e := range allSelectEntries {
+			tiers[e.tier] = true
+		}
+		return 3 + len(tiers) + len(allSelectEntries) + 1
+	}
+
+	render()
+	buf := make([]byte, 4)
+
+	for {
+		n, err := os.Stdin.Read(buf)
+		if err != nil {
+			break
+		}
+		b := buf[:n]
+
+		clearLines(countLines())
+
+		switch {
+		case n == 1 && b[0] == ' ':
+			checked[cursor] = !checked[cursor]
+		case n == 1 && (b[0] == '\r' || b[0] == '\n'):
+			// confirm
+			restoreTerminal(int(os.Stdin.Fd()), oldState)
+			fmt.Println()
+			var selected []bait.Type
+			for i, e := range allSelectEntries {
+				if checked[i] {
+					selected = append(selected, e.t)
+				}
+			}
+			if len(selected) == 0 {
+				return nil, fmt.Errorf("no canaries selected")
+			}
+			return selected, nil
+		case n == 1 && (b[0] == 'q' || b[0] == 3): // q or Ctrl-C
+			restoreTerminal(int(os.Stdin.Fd()), oldState)
+			fmt.Println()
+			return nil, fmt.Errorf("aborted")
+		case n == 3 && b[0] == 27 && b[1] == '[' && b[2] == 'A': // up arrow
+			if cursor > 0 {
+				cursor--
+			}
+		case n == 3 && b[0] == 27 && b[1] == '[' && b[2] == 'B': // down arrow
+			if cursor < len(allSelectEntries)-1 {
+				cursor++
+			}
+		case n == 1 && b[0] == 'j': // vim down
+			if cursor < len(allSelectEntries)-1 {
+				cursor++
+			}
+		case n == 1 && b[0] == 'k': // vim up
+			if cursor > 0 {
+				cursor--
+			}
+		case n == 1 && b[0] == 'a': // select all
+			for i := range checked {
+				checked[i] = true
+			}
+		case n == 1 && b[0] == 'n': // select none
+			for i := range checked {
+				checked[i] = false
+			}
+		case n == 1 && b[0] == 'p': // select precision only
+			for i, e := range allSelectEntries {
+				checked[i] = e.tier == "precision"
+			}
+		}
+
+		render()
+	}
+
+	return nil, fmt.Errorf("interrupted")
 }
 
 func cmdArm(args []string) {
@@ -167,12 +397,13 @@ Usage:
 By default, snare arm plants only the highest-signal canaries (awsproc, ssh, k8s).
 These fire only on active credential use — zero false positives from your own tooling.
 Running AI agents on this machine? The default precision mode won't fire on your own tooling.
-Use --all to arm every canary type.
+Use --all to arm every canary type, or --select to pick interactively.
 
 Flags:
   --webhook <url>    webhook URL (Discord, Slack, Telegram, PagerDuty, Teams)
   --label <name>     prefix canary names (defaults to hostname)
   --all              plant all canary types including dotenv-based ones
+  --select           interactive checklist to pick which canaries to arm
   --dry-run          show what would be planted without writing anything
   --help             show this help
 
@@ -180,6 +411,7 @@ Examples:
   snare arm --webhook https://discord.com/api/webhooks/...
   snare arm --webhook https://hooks.slack.com/... --label prod-server
   snare arm --all --webhook <url>
+  snare arm --select --webhook <url>
 `)
 		return
 	}
@@ -188,6 +420,7 @@ Examples:
 	label      := flagValue(args, "--label")
 	dryRun     := hasFlag(args, "--dry-run")
 	armAll     := hasFlag(args, "--all")
+	armSelect  := hasFlag(args, "--select")
 
 	if label == "" {
 		if h, err := os.Hostname(); err == nil {
@@ -257,10 +490,22 @@ Examples:
 	fmt.Println("  Planting canaries...")
 
 	armTypes := precisionTypes
-	if armAll {
+	switch {
+	case armSelect:
+		selected, err := runSelectTUI()
+		if err != nil {
+			fatal(err)
+		}
+		armTypes = selected
+		names := make([]string, len(selected))
+		for i, t := range selected {
+			names[i] = string(t)
+		}
+		fmt.Printf("  Custom mode: planting %s\n", strings.Join(names, ", "))
+	case armAll:
 		armTypes = highReliabilityTypes
 		fmt.Println("  Full mode: planting all canary types (including dotenv-based)")
-	} else {
+	default:
 		fmt.Println("  Precision mode: planting highest-signal canaries only (awsproc, ssh, k8s)")
 	}
 
@@ -923,7 +1168,7 @@ var highReliabilityTypes = []bait.Type{
 	bait.TypeAWS, bait.TypeAWSProc, bait.TypeGCP,
 	bait.TypeSSH, bait.TypeK8s, bait.TypePyPI,
 	bait.TypeOpenAI, bait.TypeAnthropic, bait.TypeNPM, bait.TypeMCP,
-	bait.TypeHuggingFace, bait.TypeDocker, bait.TypeAzure,
+	bait.TypeHuggingFace, bait.TypeDocker, bait.TypeAzure, bait.TypeTerraform,
 }
 
 // cmdPlant deploys canary credentials to this machine.
@@ -1444,8 +1689,37 @@ func cmdStatus(args []string) {
 	fmt.Println("  Run `snare events` to fetch recent alert history.")
 }
 
+// isLikelyAgentASN returns true if the ASN org string looks like a cloud provider
+// (which indicates an automated agent rather than a human).
+func isLikelyAgentASN(asnOrg string) bool {
+	providers := []string{
+		"Amazon", "Google", "Microsoft", "Cloudflare",
+		"Hetzner", "DigitalOcean", "Linode", "Vultr",
+		"OVH", "Oracle", "IBM", "Alibaba",
+	}
+	lower := strings.ToLower(asnOrg)
+	for _, p := range providers {
+		if strings.Contains(lower, strings.ToLower(p)) {
+			return true
+		}
+	}
+	return false
+}
+
 // cmdEvents fetches recent alert events from snare.sh for active canaries.
 func cmdEvents(args []string) {
+	// Parse --summary flag
+	summary := false
+	var rest []string
+	for _, a := range args {
+		if a == "--summary" {
+			summary = true
+		} else {
+			rest = append(rest, a)
+		}
+	}
+	_ = rest // reserved for future flags
+
 	cfg, err := requireConfig()
 	if err != nil {
 		fatal(err)
@@ -1465,9 +1739,30 @@ func cmdEvents(args []string) {
 	// Build API base from callback base
 	apiBase := strings.TrimSuffix(cfg.CallbackBase, "/c")
 
+	// eventRecord holds a single event with canary context.
+	type eventRecord struct {
+		Timestamp string
+		IP        string
+		City      string
+		Country   string
+		AsnOrg    string
+		UserAgent string
+		Method    string
+		CanaryID  string
+	}
+
+	type canaryEvents struct {
+		ID     string
+		Label  string
+		Events []eventRecord
+	}
+
 	fmt.Printf("Fetching events for %d canary(s)...\n\n", len(active))
 
-	found := 0
+	var allCanaries []canaryEvents
+	totalEvents := 0
+	authFailed := false
+
 	for _, c := range active {
 		url := apiBase + "/api/events/" + c.ID
 		resp, err := authedGet(url, cfg)
@@ -1479,11 +1774,17 @@ func cmdEvents(args []string) {
 
 		if resp.StatusCode == 401 || resp.StatusCode == 403 {
 			fmt.Fprintf(os.Stderr, "  ✗ auth failed — run `snare init --force` to re-register\n")
+			authFailed = true
 			break
 		}
 
 		if resp.StatusCode == 404 {
-			continue // no events for this token
+			label := c.Label
+			if label == "" {
+				label = c.Type
+			}
+			allCanaries = append(allCanaries, canaryEvents{ID: c.ID, Label: label})
+			continue
 		}
 
 		var result struct {
@@ -1503,17 +1804,153 @@ func cmdEvents(args []string) {
 			continue
 		}
 
-		if len(result.Events) == 0 {
-			continue
-		}
-
-		found++
 		label := c.Label
 		if label == "" {
 			label = c.Type
 		}
-		fmt.Printf("  🪤 %s (%s)\n", c.ID, label)
+
+		ce := canaryEvents{ID: c.ID, Label: label}
 		for _, e := range result.Events {
+			ce.Events = append(ce.Events, eventRecord{
+				Timestamp: e.Timestamp,
+				IP:        e.IP,
+				City:      e.City,
+				Country:   e.Country,
+				AsnOrg:    e.AsnOrg,
+				UserAgent: e.UserAgent,
+				Method:    e.Method,
+				CanaryID:  c.ID,
+			})
+		}
+		allCanaries = append(allCanaries, ce)
+		totalEvents += len(ce.Events)
+	}
+
+	if authFailed {
+		return
+	}
+
+	if summary {
+		// Aggregate summary across all canaries
+		asnCount := map[string]int{}
+		uaCount := map[string]int{}
+		agentHits := 0
+
+		for _, ce := range allCanaries {
+			for _, e := range ce.Events {
+				if e.AsnOrg != "" {
+					asnCount[e.AsnOrg]++
+				}
+				ua := e.UserAgent
+				if ua == "" {
+					ua = "(unknown)"
+				}
+				uaCount[ua]++
+				if isLikelyAgentASN(e.AsnOrg) {
+					agentHits++
+				}
+			}
+		}
+
+		fmt.Printf("Event summary (last %d events across %d canaries):\n\n", totalEvents, len(allCanaries))
+
+		// ASN distribution — sorted by count desc
+		fmt.Println("  ASN distribution:")
+		if len(asnCount) == 0 {
+			fmt.Println("    (none)")
+		} else {
+			type kv struct {
+				key string
+				val int
+			}
+			var asnList []kv
+			for k, v := range asnCount {
+				asnList = append(asnList, kv{k, v})
+			}
+			// sort descending by count, then alphabetically
+			for i := 0; i < len(asnList); i++ {
+				for j := i + 1; j < len(asnList); j++ {
+					if asnList[j].val > asnList[i].val ||
+						(asnList[j].val == asnList[i].val && asnList[j].key < asnList[i].key) {
+						asnList[i], asnList[j] = asnList[j], asnList[i]
+					}
+				}
+			}
+			for _, kv := range asnList {
+				fmt.Printf("    %-44s %d\n", kv.key, kv.val)
+			}
+		}
+		fmt.Println()
+
+		// User-Agent breakdown
+		fmt.Println("  SDK / User-Agent:")
+		if len(uaCount) == 0 {
+			fmt.Println("    (none)")
+		} else {
+			type kv struct {
+				key string
+				val int
+			}
+			var uaList []kv
+			for k, v := range uaCount {
+				uaList = append(uaList, kv{k, v})
+			}
+			for i := 0; i < len(uaList); i++ {
+				for j := i + 1; j < len(uaList); j++ {
+					if uaList[j].val > uaList[i].val ||
+						(uaList[j].val == uaList[i].val && uaList[j].key < uaList[i].key) {
+						uaList[i], uaList[j] = uaList[j], uaList[i]
+					}
+				}
+			}
+			for _, kv := range uaList {
+				ua := kv.key
+				if len(ua) > 60 {
+					ua = ua[:60] + "..."
+				}
+				fmt.Printf("    %-44s %d\n", ua, kv.val)
+			}
+		}
+		fmt.Println()
+
+		// Likely AI agent count
+		fmt.Printf("  Likely AI agent:  %d of %d events\n\n", agentHits, totalEvents)
+
+		// Per-canary hit counts
+		fmt.Println("  Per canary:")
+		for _, ce := range allCanaries {
+			hits := len(ce.Events)
+			label := ce.Label
+			if label == "" {
+				label = ce.ID
+			}
+			display := ce.ID
+			if label != ce.ID && label != "" {
+				display = ce.ID
+			}
+			if hits == 0 {
+				fmt.Printf("    %-44s 0 hits\n", display)
+			} else {
+				last := ce.Events[0].Timestamp
+				hitWord := "hits"
+				if hits == 1 {
+					hitWord = "hit"
+				}
+				fmt.Printf("    %-44s %d %s  (last: %s)\n", display, hits, hitWord, last)
+			}
+		}
+		return
+	}
+
+	// Default: per-event detail view
+	found := 0
+	for _, ce := range allCanaries {
+		if len(ce.Events) == 0 {
+			continue
+		}
+		found++
+		fmt.Printf("  🪤 %s (%s)\n", ce.ID, ce.Label)
+		for _, e := range ce.Events {
 			loc := strings.Join(filterEmpty(e.City, e.Country), ", ")
 			if loc == "" {
 				loc = "unknown location"
@@ -2029,6 +2466,26 @@ func buildParams(bt bait.Type, label string, cfg *config.Config) (bait.Params, e
 			p.ProfileName = label + "-" + e
 		} else {
 			p.ProfileName = e
+		}
+
+	case bait.TypeGit:
+		// ProfileName is the fake git server domain component
+		// e.g. git.acme-internal.io becomes ProfileName = acme-internal
+		corps := []string{"acme", "contoso", "initech", "tyrell", "weyland"}
+		c := corps[token.MustRandInt(len(corps))]
+		if label != "" {
+			p.ProfileName = label + "-internal"
+		} else {
+			p.ProfileName = c + "-internal"
+		}
+
+	case bait.TypeTerraform:
+		// ProfileName is the fake provider namespace prefix
+		// e.g. registry.terraform.io/{{.ProfileName}}-internal/* looks like an internal namespace
+		if label != "" {
+			p.ProfileName = label + "-internal"
+		} else {
+			p.ProfileName = "terraform-internal"
 		}
 	}
 

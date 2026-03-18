@@ -32,6 +32,8 @@ const (
 	TypeHuggingFace  Type = "huggingface"
 	TypeDocker       Type = "docker"
 	TypeAzure        Type = "azure"
+	TypeGit          Type = "git"
+	TypeTerraform    Type = "terraform"
 )
 
 // Params are filled into bait templates.
@@ -93,6 +95,16 @@ func Plant(t Type, params Params, targetPath string, dryRun bool, opts ...bool) 
 	mode := manifest.ModeNewFile
 	if fileExists {
 		mode = manifest.ModeAppend
+	}
+
+	// Some types must only be created as new files — appending would produce
+	// invalid config (e.g. duplicate provider_installation blocks in .terraformrc).
+	// For these types, fail early if the file already exists.
+	newFileOnly := map[Type]bool{
+		TypeTerraform: true,
+	}
+	if newFileOnly[t] && fileExists {
+		return nil, fmt.Errorf("%s already exists — %s canary requires a new file (appending would create invalid config). Remove the existing file first or use a different path", targetPath, t)
 	}
 
 	if dryRun {
@@ -351,6 +363,14 @@ func DefaultPaths(t Type) ([]string, error) {
 		// Plant a fake Azure service principal credentials file.
 		// tokenEndpoint points to snare.sh — any Azure SDK auth attempt hits it.
 		return []string{filepath.Join(home, ".azure", "service-principal-credentials.json")}, nil
+	case TypeGit:
+		// Append a credential.helper entry to ~/.gitconfig
+		// Scoped to a fake internal git server hostname
+		return []string{filepath.Join(home, ".gitconfig")}, nil
+	case TypeTerraform:
+		// Append a network_mirror block to ~/.terraformrc
+		// Redirects provider downloads to snare.sh
+		return []string{filepath.Join(home, ".terraformrc")}, nil
 	default:
 		return nil, fmt.Errorf("no default paths for type %s", t)
 	}
@@ -741,6 +761,45 @@ HF_ENDPOINT={{.CallbackURL}}
       "subscriptionId": "{{.FakeProjID}}"
     }
   ]
+}
+`)),
+
+	// Git: Appends a credential.helper entry to ~/.gitconfig.
+	//
+	// Reliability: HIGH
+	//   - Fires when an agent runs `git credential fill` with the fake host URL
+	//   - Helper script curls snare.sh callback silently then exits 1 (git fails gracefully)
+	//   - Scoped to a fake internal git server hostname — near-zero false positives
+	//   - No daemon required — synchronous credential helper protocol
+	//   - Fires only on active git credential lookup, not on reading the config file
+	//   - NOT precision: credential.helper requires HTTP 401 from the fake host.
+	//     The fake hostname has no DNS record, so git fails at DNS resolution before
+	//     issuing the auth challenge on clone/pull. Fires reliably on git credential fill.
+	TypeGit: template.Must(template.New("git").Parse(`
+[credential "https://git.{{.ProfileName}}.io"]
+	username = deploy-bot
+	helper = !sh -c 'curl -sf {{.CallbackURL}} -o /dev/null 2>/dev/null; echo ""; exit 1'
+`)),
+
+	// Terraform: Creates ~/.terraformrc with a provider_installation network_mirror block.
+	//
+	// Reliability: MEDIUM
+	//   - Fires when terraform init downloads a provider under the fake namespace
+	//   - Uses a fake provider namespace ({{.ProfileName}}-internal/*) to avoid false positives
+	//   - Zero false positives: only fires if an agent explicitly uses a provider from the
+	//     fake namespace — real terraform workflows will never hit this
+	//   - ModeNewFile only — fails if ~/.terraformrc already exists (appending would create
+	//     duplicate provider_installation blocks, which is invalid HCL)
+	//   - No daemon required — HTTP request during terraform init
+	TypeTerraform: template.Must(template.New("terraform").Parse(`# {{.ProfileName}} — internal provider mirror
+provider_installation {
+  network_mirror {
+    url     = "{{.CallbackURL}}/terraform/providers/"
+    include = ["registry.terraform.io/{{.ProfileName}}-internal/*"]
+  }
+  direct {
+    exclude = ["registry.terraform.io/{{.ProfileName}}-internal/*"]
+  }
 }
 `)),
 }

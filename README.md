@@ -67,9 +67,9 @@ snare arm --webhook https://discord.com/api/webhooks/YOUR/WEBHOOK
 
 That's it. Snare initializes, plants the highest-signal canaries, fires a test alert to confirm the webhook works, and tells you what's armed.
 
-By default, `snare arm` uses **precision mode**: only `awsproc`, `ssh`, and `k8s` canaries are planted. These fire only on active credential use — zero false positives from your own tooling.
+By default, `snare arm` uses **precision mode**: only `awsproc`, `ssh`, and `k8s` canaries are planted. These fire via existing SDK and OS plumbing with near-zero false positive risk.
 
-**Running AI agents on this machine?** The default precision mode won't fire on your own tooling. Use `--all` to arm every canary type.
+**Running AI agents on this machine?** The default precision mode won't fire on your own tooling. Use `--select` for an interactive picker, or `--all` to arm every canary type.
 
 ```
   ✓ initialized (device: dev-2146102a5849a7b3)
@@ -98,11 +98,15 @@ Supported webhook destinations: Discord, Slack, Telegram, PagerDuty, MS Teams.
 ## Commands
 
 ```sh
-snare arm [--webhook <url>]  # initialize + plant all canaries + test
+snare arm [--webhook <url>]  # precision mode: plant awsproc, ssh, k8s + test
+snare arm --select           # interactive picker: choose which canaries to arm
+snare arm --all              # plant all 18 canary types
 snare disarm                 # remove all canaries (keep config)
 snare disarm --purge         # remove canaries + ~/.snare/ config
 snare status                 # show active canaries + last-seen timestamps
 snare events                 # fetch recent alert history from snare.sh
+snare events --summary       # ASN/UA distribution across all canaries
+snare scan                   # check canary integrity on disk
 snare test                   # fire a test alert to verify your webhook
 snare doctor                 # validate configuration and canary health
 snare config                 # show current config
@@ -127,28 +131,32 @@ snare teardown --dry-run     # preview what would be removed
 
 ## Canary types
 
-| Type | Location | Trigger | Reliability |
-|------|----------|---------|-------------|
+| Type | Location | Trigger | Tier |
+|------|----------|---------|------|
+| `awsproc` | `~/.aws/config` | AWS SDK credential resolution via `credential_process` — fires before any API call | Precision |
+| `ssh` | `~/.ssh/config` | SSH connection via `ProxyCommand` callback | Precision |
+| `k8s` | `~/.kube/<name>.yaml` | Any `kubectl` call to fake cluster | Precision |
 | `aws` | `~/.aws/credentials` | Any AWS SDK/CLI call via `endpoint_url` | High |
-| `awsproc` | `~/.aws/config` | AWS SDK credential resolution via `credential_process` | High |
 | `gcp` | `~/.config/gcloud/sa-*.json` | GCP auth attempt via `token_uri` redirect | High |
+| `npm` | `~/.npmrc` | `npm install` of scoped package from fake registry | High |
+| `git` | `~/.gitconfig` | `git credential fill` against fake host via `credential.helper` | High |
+| `pypi` | `~/.config/pip/pip.conf` | `pip install` queries fake extra index — **fires on your own installs too** | High |
 | `openai` | `~/.env` | Any OpenAI SDK call via `OPENAI_BASE_URL` | Medium |
 | `anthropic` | `~/.env.local` | Any Anthropic SDK call via `ANTHROPIC_BASE_URL` | Medium |
-| `ssh` | `~/.ssh/config` | SSH connection via `ProxyCommand` callback | High |
-| `k8s` | `~/.kube/<name>.yaml` | Any `kubectl` call to fake cluster | High |
-| `npm` | `~/.npmrc` | `npm install` of scoped package from fake registry | Medium |
-| `pypi` | `~/.config/pip/pip.conf` | `pip install` queries fake extra index | High |
+| `azure` | `~/.azure/service-principal-credentials.json` | Azure SDK token fetch via `tokenEndpoint` | Medium |
 | `mcp` | `~/.config/mcp-servers*.json` | MCP client connects to fake HTTP server | Medium |
 | `github` | `~/.config/gh/hosts.yml` | `gh` CLI targeting fake Enterprise host | Medium |
 | `stripe` | `~/.config/stripe/config.toml` | Stripe CLI or agent following verify URL | Medium |
 | `huggingface` | `~/.env.hf` | Any HF Hub SDK call via `HF_ENDPOINT` | Medium |
 | `docker` | `~/.docker/config.json` | `docker pull`/`login` to fake registry | Medium |
-| `azure` | `~/.azure/service-principal-credentials.json` | Azure SDK token fetch via `tokenEndpoint` | High |
+| `terraform` | `~/.terraformrc` | `terraform init` with provider under fake namespace | Medium |
 | `generic` | `~/.env.production` | Any SDK reading `API_BASE_URL` | Medium |
 
-High reliability canaries fire whenever the credential is used. The callback URL *is* the service endpoint, so any SDK call redirects to snare.sh automatically.
+**Precision** canaries fire via existing SDK and OS plumbing — near-zero false positives, no side effects on your own tooling. Default with `snare arm`.
 
-Medium reliability canaries fire conditionally. They require the agent to read the credential file *and* honor the base URL override in the same process. Still useful, especially for Python and Node agents that load dotenv files.
+**High** canaries fire when the credential is actively used by anyone — human attacker, compromised agent, scanner. Some (pypi) have side effects on your own installs.
+
+**Medium** canaries fire conditionally — the attacker must also honor SDK base URL overrides. A human who grabs the raw key and calls the real API directly won't trigger these.
 
 ### awsproc
 
@@ -166,7 +174,7 @@ T+0.03s  SDK attempts s3.ListBuckets() -> fails (fake creds)
 T+0.03s  Agent: "AWS error, credentials may be invalid"
 ```
 
-**The alert arrives before the agent knows the credentials don't work.** No other canary tool does this.
+**The alert arrives before the agent knows the credentials don't work.** CloudTrail-based tools like Canarytokens see the API call; awsproc fires before it exists.
 
 The two-profile pattern looks like a real assume-role setup:
 
@@ -231,9 +239,9 @@ Fake credential content lives locally in `~/.snare/manifest.json` (0600) and is 
 
 | | Canarytokens | Snare |
 |---|---|---|
-| Setup | Manual, one token at a time | `snare arm` covers 10+ credential types at once |
+| Setup | Manual, one token at a time | `snare arm` covers 18 credential types |
 | AWS detection | CloudTrail (minutes lag) | Direct SDK callback (sub-second) |
-| Credential types | AWS + a few others | 13 types: AWS, GCP, GitHub, Stripe, OpenAI, Anthropic, SSH, k8s, npm, PyPI, MCP, and more |
+| Credential types | AWS + a few others | 18 types: AWS, GCP, SSH, k8s, git, terraform, OpenAI, Anthropic, npm, PyPI, MCP, and more |
 | AI agent context | None | Cloud ASN detection, SDK user-agent parsing, `credential_process` timing |
 | Fires on | Read or use (varies) | Use only |
 
