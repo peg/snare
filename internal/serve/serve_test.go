@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -282,6 +284,201 @@ func TestDB_tokenRoundtrip(t *testing.T) {
 	if got.CanaryType != "aws" || got.Label != "prod" {
 		t.Errorf("round-trip mismatch: %+v", got)
 	}
+}
+
+// ─── Dashboard session auth ──────────────────────────────────────────────────
+
+const testDashToken = "test-dashboard-token-0123456789abcdef"
+
+// testDashServer creates a Server with DashboardToken set.
+func testDashServer(t *testing.T) *Server {
+	t.Helper()
+	dir := t.TempDir()
+	cfg := Config{
+		Port:           0,
+		DBPath:         filepath.Join(dir, "test.db"),
+		DashboardToken: testDashToken,
+	}
+	s, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { s.db.close() })
+	return s
+}
+
+func TestLoginPost_validToken(t *testing.T) {
+	s := testDashServer(t)
+
+	form := url.Values{"token": {testDashToken}}
+	req := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr := httptest.NewRecorder()
+	s.handleLogin(rr, req)
+
+	if rr.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303, got %d: %s", rr.Code, rr.Body.String())
+	}
+	cookies := rr.Result().Cookies()
+	found := false
+	for _, c := range cookies {
+		if c.Name == sessionCookieName {
+			found = true
+			if !c.HttpOnly {
+				t.Error("cookie should be HttpOnly")
+			}
+			if !c.Secure {
+				t.Error("cookie should be Secure")
+			}
+			if c.SameSite != http.SameSiteStrictMode {
+				t.Error("cookie should be SameSite=Strict")
+			}
+		}
+	}
+	if !found {
+		t.Error("session cookie not set")
+	}
+}
+
+func TestLoginPost_invalidToken(t *testing.T) {
+	s := testDashServer(t)
+
+	form := url.Values{"token": {"wrong-token"}}
+	req := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr := httptest.NewRecorder()
+	s.handleLogin(rr, req)
+
+	if rr.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303 redirect, got %d", rr.Code)
+	}
+	if loc := rr.Header().Get("Location"); !strings.Contains(loc, "error=invalid") {
+		t.Errorf("expected redirect to /?error=invalid, got %q", loc)
+	}
+}
+
+func TestLoginPost_JSON(t *testing.T) {
+	s := testDashServer(t)
+
+	body, _ := json.Marshal(map[string]string{"token": testDashToken})
+	req := httptest.NewRequest(http.MethodPost, "/login", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	s.handleLogin(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestLogin_methodNotAllowed(t *testing.T) {
+	s := testDashServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/login", nil)
+	rr := httptest.NewRecorder()
+	s.handleLogin(rr, req)
+
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d", rr.Code)
+	}
+}
+
+func TestDashboard_sessionCookie(t *testing.T) {
+	s := testDashServer(t)
+
+	// First, login to get the cookie
+	form := url.Values{"token": {testDashToken}}
+	loginReq := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(form.Encode()))
+	loginReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	loginRR := httptest.NewRecorder()
+	s.handleLogin(loginRR, loginReq)
+
+	// Extract session cookie
+	var sessionCookie *http.Cookie
+	for _, c := range loginRR.Result().Cookies() {
+		if c.Name == sessionCookieName {
+			sessionCookie = c
+		}
+	}
+	if sessionCookie == nil {
+		t.Fatal("no session cookie after login")
+	}
+
+	// Access dashboard with cookie
+	dashReq := httptest.NewRequest(http.MethodGet, "/", nil)
+	dashReq.AddCookie(sessionCookie)
+	dashRR := httptest.NewRecorder()
+	s.mux.ServeHTTP(dashRR, dashReq)
+
+	if dashRR.Code != http.StatusOK {
+		t.Errorf("expected 200 with session cookie, got %d", dashRR.Code)
+	}
+}
+
+func TestDashboard_bearerStillWorks(t *testing.T) {
+	s := testDashServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer "+testDashToken)
+	rr := httptest.NewRecorder()
+	s.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("expected 200 with Bearer token, got %d", rr.Code)
+	}
+}
+
+func TestDashboard_queryParamRejected(t *testing.T) {
+	s := testDashServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/?token="+testDashToken, nil)
+	req.Header.Set("Accept", "text/html")
+	rr := httptest.NewRecorder()
+	s.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 for query param auth (removed), got %d", rr.Code)
+	}
+}
+
+func TestDashboard_noCreds(t *testing.T) {
+	s := testDashServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Accept", "text/html")
+	rr := httptest.NewRecorder()
+	s.mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d", rr.Code)
+	}
+	// Login form should POST to /login, not GET with ?token=
+	body := rr.Body.String()
+	if !strings.Contains(body, `action="/login"`) {
+		t.Error("login form should POST to /login")
+	}
+	if !strings.Contains(body, `method="POST"`) {
+		t.Error("login form should use POST method")
+	}
+}
+
+func TestLogout_clearsCookie(t *testing.T) {
+	s := testDashServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/logout", nil)
+	req.Header.Set("Accept", "text/html")
+	rr := httptest.NewRecorder()
+	s.handleLogout(rr, req)
+
+	if rr.Code != http.StatusSeeOther {
+		t.Errorf("expected 303, got %d", rr.Code)
+	}
+	for _, c := range rr.Result().Cookies() {
+		if c.Name == sessionCookieName && c.MaxAge == -1 {
+			return // cookie cleared
+		}
+	}
+	t.Error("session cookie not cleared on logout")
 }
 
 // TestMain ensures any temp test databases are cleaned up.

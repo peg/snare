@@ -2,7 +2,9 @@ package serve
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -16,6 +18,8 @@ import (
 
 	"golang.org/x/crypto/acme/autocert"
 )
+
+const sessionCookieName = "snare_session"
 
 // Config holds the server configuration.
 type Config struct {
@@ -37,9 +41,10 @@ func DefaultConfig() Config {
 
 // Server is the snare self-hosted server.
 type Server struct {
-	cfg Config
-	db  *DB
-	mux *http.ServeMux
+	cfg           Config
+	db            *DB
+	mux           *http.ServeMux
+	sessionSecret []byte // random secret generated at startup for HMAC session cookies
 }
 
 // tokenPattern validates token IDs in URL paths.
@@ -61,7 +66,12 @@ func New(cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("opening database: %w", err)
 	}
 
-	s := &Server{cfg: cfg, db: db, mux: http.NewServeMux()}
+	secret := make([]byte, 32)
+	if _, err := rand.Read(secret); err != nil {
+		return nil, fmt.Errorf("generating session secret: %w", err)
+	}
+
+	s := &Server{cfg: cfg, db: db, mux: http.NewServeMux(), sessionSecret: secret}
 	s.routes()
 	return s, nil
 }
@@ -78,13 +88,115 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/revoke", s.handleRevoke)
 	s.mux.HandleFunc("/api/events/", s.handleEvents)
 
-	// Dashboard: authenticated by DashboardToken (operator-level access)
+	// Dashboard auth: login / logout
+	s.mux.HandleFunc("/login", s.handleLogin)
+	s.mux.HandleFunc("/logout", s.handleLogout)
+
+	// Dashboard: authenticated by session cookie or Bearer token (operator-level access)
 	s.mux.HandleFunc("/api/dashboard/alerts", s.requireDashboardAuth(s.handleDashboardAlerts))
 	s.mux.HandleFunc("/api/dashboard/devices", s.requireDashboardAuth(s.handleDashboardDevices))
 	s.mux.HandleFunc("/", s.requireDashboardAuth(s.handleDashboard))
 }
 
-// requireDashboardAuth wraps a handler to require Bearer token authentication.
+// sessionMAC returns the expected session cookie value for the current server instance.
+func (s *Server) sessionMAC() string {
+	mac := hmac.New(sha256.New, s.sessionSecret)
+	mac.Write([]byte("snare_session"))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// validSession checks whether the request carries a valid session cookie.
+func (s *Server) validSession(r *http.Request) bool {
+	c, err := r.Cookie(sessionCookieName)
+	if err != nil {
+		return false
+	}
+	return hmac.Equal([]byte(c.Value), []byte(s.sessionMAC()))
+}
+
+// setSessionCookie writes the session cookie to the response.
+func (s *Server) setSessionCookie(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     sessionCookieName,
+		Value:    s.sessionMAC(),
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteStrictMode,
+	})
+}
+
+// clearSessionCookie removes the session cookie.
+func clearSessionCookie(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     sessionCookieName,
+		Value:    "",
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteStrictMode,
+		MaxAge:   -1,
+	})
+}
+
+// handleLogin accepts a POST with the dashboard token and sets a session cookie.
+func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.cfg.DashboardToken == "" {
+		http.Error(w, "dashboard auth not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	var token string
+	if strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
+		var body struct {
+			Token string `json:"token"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		token = body.Token
+	} else {
+		token = r.FormValue("token")
+	}
+
+	if token != s.cfg.DashboardToken {
+		// For HTML form submissions, redirect back to / which shows the login form
+		if strings.Contains(r.Header.Get("Accept"), "text/html") ||
+			r.Header.Get("Content-Type") == "application/x-www-form-urlencoded" {
+			http.Redirect(w, r, "/?error=invalid", http.StatusSeeOther)
+			return
+		}
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	s.setSessionCookie(w)
+
+	// For HTML form submissions, redirect to dashboard
+	if r.Header.Get("Content-Type") == "application/x-www-form-urlencoded" {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+
+	jsonResp(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// handleLogout clears the session cookie.
+func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	clearSessionCookie(w)
+	if r.Method == http.MethodGet && strings.Contains(r.Header.Get("Accept"), "text/html") {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+	jsonResp(w, http.StatusOK, map[string]string{"status": "logged out"})
+}
+
+// requireDashboardAuth wraps a handler to require a valid session cookie or Bearer token.
 // The token must match cfg.DashboardToken. If DashboardToken is empty, the
 // server refuses to start (enforced in cmdServe).
 func (s *Server) requireDashboardAuth(next http.HandlerFunc) http.HandlerFunc {
@@ -93,13 +205,13 @@ func (s *Server) requireDashboardAuth(next http.HandlerFunc) http.HandlerFunc {
 			http.Error(w, "dashboard auth not configured", http.StatusServiceUnavailable)
 			return
 		}
-		auth := r.Header.Get("Authorization")
-		if auth == "Bearer "+s.cfg.DashboardToken {
+		// Accept Bearer token in Authorization header (for API clients)
+		if r.Header.Get("Authorization") == "Bearer "+s.cfg.DashboardToken {
 			next(w, r)
 			return
 		}
-		// Also accept token as query param for browser access to the dashboard
-		if r.URL.Query().Get("token") == s.cfg.DashboardToken {
+		// Accept valid session cookie (for browser sessions)
+		if s.validSession(r) {
 			next(w, r)
 			return
 		}
@@ -111,8 +223,9 @@ func (s *Server) requireDashboardAuth(next http.HandlerFunc) http.HandlerFunc {
 <style>body{background:#0a0a0b;color:#f0f0f2;font-family:monospace;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}
 form{background:#111113;border:1px solid #232328;border-radius:8px;padding:2rem;display:flex;flex-direction:column;gap:1rem;min-width:320px}
 input{background:#0a0a0b;border:1px solid #232328;color:#f0f0f2;padding:.625rem .875rem;border-radius:5px;font-family:monospace}
-button{background:#f5a623;color:#0a0a0b;border:none;padding:.625rem 1.25rem;border-radius:5px;font-weight:600;cursor:pointer}</style></head>
-<body><form method="GET"><h2 style="margin:0">🪤 snare</h2>
+button{background:#f5a623;color:#0a0a0b;border:none;padding:.625rem 1.25rem;border-radius:5px;font-weight:600;cursor:pointer}
+.error{color:#e84040;font-size:12px}</style></head>
+<body><form method="POST" action="/login"><h2 style="margin:0">🪤 snare</h2>
 <input type="password" name="token" placeholder="Dashboard token" autofocus>
 <button>Access dashboard</button></form></body></html>`)
 			return
