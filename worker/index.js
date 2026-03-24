@@ -339,7 +339,14 @@ async function processAlert(token, metadata, env) {
   if (await isDuplicate(env, token, metadata.ip)) return;
 
   // Resolve webhook + canary metadata (single KV fetch for both filtering and delivery)
-  const { webhooks, meta } = await resolveWebhooks(token, env);
+  const { webhooks, meta, registered } = await resolveWebhooks(token, env);
+
+  // Unregistered tokens must never fire webhooks — prevents false alerts from
+  // probe traffic hitting random/partial token URLs (e.g. snare.sh/c/agent-01-).
+  if (!registered && !token.startsWith("snare-test-")) {
+    console.log("UNREGISTERED_TOKEN", token, metadata.ip);
+    return;
+  }
 
   // Per-type false-positive filtering: drop scanner orgs and requests
   // that lack expected SDK signatures for high-confidence canary types.
@@ -595,6 +602,7 @@ async function handleRotateSecret(request, env) {
 async function resolveWebhooks(token, env) {
   let meta = {};
   let perTokenWebhook = null;
+  let registered = false;
 
   // Always try to load registration metadata (type, label, device)
   if (env.SNARE_KV) {
@@ -602,6 +610,7 @@ async function resolveWebhooks(token, env) {
     if (raw) {
       try {
         const reg = JSON.parse(raw);
+        registered = true;
         meta = { canaryType: reg.canary_type, label: reg.label, deviceId: reg.device_id };
         // Use per-token webhook if it's a valid https URL
         // (fixed: proper parentheses for operator precedence)
@@ -619,7 +628,7 @@ async function resolveWebhooks(token, env) {
     ? [perTokenWebhook]
     : (env.WEBHOOK_URLS || "").split(",").filter(Boolean);
 
-  return { webhooks, meta };
+  return { webhooks, meta, registered };
 }
 
 // ─── Alert formatting ────────────────────────────────────────────────────────
