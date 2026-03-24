@@ -54,6 +54,11 @@ const CANARY_TYPES = {
   awsproc:   { emoji: "⚙️",  color: 0xFF9900, name: "AWS (credential_process)" },
   docker:    { emoji: "🐳", color: 0x2496ED, name: "Docker"    },
   generic:   { emoji: "🗝️",  color: 0x888888, name: "Generic"   },
+  huggingface: { emoji: "🤗", color: 0xFFD21E, name: "Hugging Face" },
+  azure:     { emoji: "☁️",  color: 0x0078D4, name: "Azure"      },
+  git:       { emoji: "🌿", color: 0xF05033, name: "Git"         },
+  terraform: { emoji: "🏗️",  color: 0x7B42BC, name: "Terraform"  },
+  stripe:    { emoji: "💳", color: 0x6772E5, name: "Stripe"      },
 };
 
 const DEFAULT_TYPE = { emoji: "🪤", color: 0xB2121A, name: "Canary" };
@@ -372,7 +377,7 @@ async function processAlert(token, metadata, env) {
   };
 
   // Log metadata only — never body content
-  console.log("CANARY_FIRED", JSON.stringify({
+  console.log(isTest ? "CANARY_TEST" : "CANARY_FIRED", JSON.stringify({
     token: event.token,
     is_test: event.is_test,
     ip: event.ip,
@@ -735,7 +740,7 @@ function buildDiscordPayload(event, meta, type, fromCloud) {
       title,
       color:     isTest ? 0x888888 : type.color,
       fields,
-      footer:    { text: "snare.sh · request body was never captured" },
+      footer:    { text: "snare.sh · IP, UA, timestamp only — no request body" },
       timestamp: event.timestamp,
     }],
   };
@@ -770,7 +775,7 @@ function buildSlackPayload(event, meta, type, fromCloud) {
     attachments: [{
       color:  isTest ? "#888888" : `#${type.color.toString(16).padStart(6, "0")}`,
       fields,
-      footer: "snare.sh · request body was never captured",
+      footer: "snare.sh · IP, UA, timestamp only — no request body",
       ts:     Math.floor(new Date(event.timestamp).getTime() / 1000),
     }],
   };

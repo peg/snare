@@ -9,6 +9,16 @@ Versioning: [Semantic Versioning](https://semver.org/)
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-03-24
+
+### Fixed
+- Worker: unregistered tokens no longer fire the global fallback webhook — probe traffic hitting partial/random token URLs (e.g. `/c/agent-01-`) is silently dropped
+- Worker: alert footer text updated to "IP, UA, timestamp only — no request body" (matches website copy)
+- Worker: test token callbacks now logged as `CANARY_TEST` instead of `CANARY_FIRED` for cleaner production logs
+- Worker: added missing canary types to `CANARY_TYPES` map (huggingface, azure, git, terraform)
+- README: replaced example AWS account ID `389844960505` with canonical `123456789012`
+
+
 ## [0.1.3] - 2026-03-18
 
 ### Fixed
