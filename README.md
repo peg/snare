@@ -19,7 +19,7 @@ The `awsproc` canary uses AWS `credential_process` — a shell command that runs
 ```ini
 # ~/.aws/config
 [profile prod-admin]
-role_arn       = arn:aws:iam::389844960505:role/OrganizationAccountAccessRole
+role_arn       = arn:aws:iam::123456789012:role/OrganizationAccountAccessRole
 source_profile = prod-admin-source
 
 [profile prod-admin-source]
@@ -184,7 +184,7 @@ The two-profile pattern looks like a real assume-role setup:
 ```ini
 # ~/.aws/config
 [profile prod-admin]
-role_arn       = arn:aws:iam::389844960505:role/OrganizationAccountAccessRole
+role_arn       = arn:aws:iam::123456789012:role/OrganizationAccountAccessRole
 source_profile = prod-admin-source
 
 [profile prod-admin-source]

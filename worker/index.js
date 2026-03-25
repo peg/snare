@@ -54,6 +54,11 @@ const CANARY_TYPES = {
   awsproc:   { emoji: "⚙️",  color: 0xFF9900, name: "AWS (credential_process)" },
   docker:    { emoji: "🐳", color: 0x2496ED, name: "Docker"    },
   generic:   { emoji: "🗝️",  color: 0x888888, name: "Generic"   },
+  huggingface: { emoji: "🤗", color: 0xFFD21E, name: "Hugging Face" },
+  azure:     { emoji: "☁️",  color: 0x0078D4, name: "Azure"      },
+  git:       { emoji: "🌿", color: 0xF05033, name: "Git"         },
+  terraform: { emoji: "🏗️",  color: 0x7B42BC, name: "Terraform"  },
+  stripe:    { emoji: "💳", color: 0x6772E5, name: "Stripe"      },
 };
 
 const DEFAULT_TYPE = { emoji: "🪤", color: 0xB2121A, name: "Canary" };
@@ -339,7 +344,14 @@ async function processAlert(token, metadata, env) {
   if (await isDuplicate(env, token, metadata.ip)) return;
 
   // Resolve webhook + canary metadata (single KV fetch for both filtering and delivery)
-  const { webhooks, meta } = await resolveWebhooks(token, env);
+  const { webhooks, meta, registered } = await resolveWebhooks(token, env);
+
+  // Unregistered tokens must never fire webhooks — prevents false alerts from
+  // probe traffic hitting random/partial token URLs (e.g. snare.sh/c/agent-01-).
+  if (!registered && !token.startsWith("snare-test-")) {
+    console.log("UNREGISTERED_TOKEN", token, metadata.ip);
+    return;
+  }
 
   // Per-type false-positive filtering: drop scanner orgs and requests
   // that lack expected SDK signatures for high-confidence canary types.
@@ -365,7 +377,7 @@ async function processAlert(token, metadata, env) {
   };
 
   // Log metadata only — never body content
-  console.log("CANARY_FIRED", JSON.stringify({
+  console.log(isTest ? "CANARY_TEST" : "CANARY_FIRED", JSON.stringify({
     token: event.token,
     is_test: event.is_test,
     ip: event.ip,
@@ -595,6 +607,7 @@ async function handleRotateSecret(request, env) {
 async function resolveWebhooks(token, env) {
   let meta = {};
   let perTokenWebhook = null;
+  let registered = false;
 
   // Always try to load registration metadata (type, label, device)
   if (env.SNARE_KV) {
@@ -602,6 +615,7 @@ async function resolveWebhooks(token, env) {
     if (raw) {
       try {
         const reg = JSON.parse(raw);
+        registered = true;
         meta = { canaryType: reg.canary_type, label: reg.label, deviceId: reg.device_id };
         // Use per-token webhook if it's a valid https URL
         // (fixed: proper parentheses for operator precedence)
@@ -619,7 +633,7 @@ async function resolveWebhooks(token, env) {
     ? [perTokenWebhook]
     : (env.WEBHOOK_URLS || "").split(",").filter(Boolean);
 
-  return { webhooks, meta };
+  return { webhooks, meta, registered };
 }
 
 // ─── Alert formatting ────────────────────────────────────────────────────────
@@ -726,7 +740,7 @@ function buildDiscordPayload(event, meta, type, fromCloud) {
       title,
       color:     isTest ? 0x888888 : type.color,
       fields,
-      footer:    { text: "snare.sh · request body was never captured" },
+      footer:    { text: "snare.sh · IP, UA, timestamp only — no request body" },
       timestamp: event.timestamp,
     }],
   };
@@ -761,7 +775,7 @@ function buildSlackPayload(event, meta, type, fromCloud) {
     attachments: [{
       color:  isTest ? "#888888" : `#${type.color.toString(16).padStart(6, "0")}`,
       fields,
-      footer: "snare.sh · request body was never captured",
+      footer: "snare.sh · IP, UA, timestamp only — no request body",
       ts:     Math.floor(new Date(event.timestamp).getTime() / 1000),
     }],
   };
