@@ -45,6 +45,16 @@ func testParams(t *testing.T, bt bait.Type) bait.Params {
 		p.FakeKeyID = "abc123def456789012345678"
 	case bait.TypeGeneric:
 		p.FakeToken, e = token.NewGitHubToken()
+	case bait.TypeAWSProc:
+		p.FakeKeyID, e = token.NewAWSKeyID()
+		p.FakeSecret, _ = token.NewAWSSecretKey()
+		p.FakeToken, _ = token.NewAWSSecretKey()
+	case bait.TypeSSH:
+		// SSH template only needs ProfileName and CallbackURL
+	case bait.TypeK8s:
+		p.FakeToken, e = token.NewGitHubToken()
+	case bait.TypeGit:
+		// Git template only needs ProfileName and CallbackURL
 	}
 	if e != nil {
 		t.Fatalf("generating params for %s: %v", bt, e)
@@ -542,6 +552,201 @@ func TestStripeKeyFormat(t *testing.T) {
 		if !strings.HasPrefix(tok, "sk_live_") {
 			t.Errorf("Stripe key missing sk_live_ prefix: %s", tok)
 		}
+	}
+}
+
+// TestAWSProcTemplate verifies the awsproc canary template generates correct content.
+func TestAWSProcTemplate(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config")
+	params := testParams(t, bait.TypeAWSProc)
+
+	placed, err := bait.Plant(bait.TypeAWSProc, params, path, false)
+	if err != nil {
+		t.Fatalf("Plant: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading planted file: %v", err)
+	}
+	content := string(data)
+
+	// Must contain credential_process
+	if !strings.Contains(content, "credential_process") {
+		t.Error("missing credential_process in awsproc template")
+	}
+
+	// Must contain role_arn with IAM ARN prefix
+	if !strings.Contains(content, "role_arn = arn:aws:iam::") {
+		t.Error("missing role_arn = arn:aws:iam:: in awsproc template")
+	}
+
+	// Must contain source_profile
+	if !strings.Contains(content, "source_profile") {
+		t.Error("missing source_profile in awsproc template")
+	}
+
+	// Must NOT contain giveaway words (strip test-injected values first)
+	stripped := content
+	for _, s := range []string{params.CallbackURL, params.TokenID, params.ProfileName} {
+		stripped = strings.ReplaceAll(stripped, s, "")
+	}
+	for _, g := range []string{"SNARE", "FAKE", "TEST", "CANARY"} {
+		if strings.Contains(strings.ToUpper(stripped), g) {
+			t.Errorf("template contains giveaway word %q", g)
+		}
+	}
+
+	// The content must contain a curl command with the callback URL in the credential_process block
+	if !strings.Contains(content, "curl") {
+		t.Error("credential_process block does not contain curl")
+	}
+	if !strings.Contains(content, params.CallbackURL) {
+		t.Error("credential_process block does not contain callback URL")
+	}
+
+	_ = placed
+}
+
+// TestSSHTemplate verifies the SSH canary template generates correct content.
+func TestSSHTemplate(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config")
+	params := testParams(t, bait.TypeSSH)
+
+	_, err := bait.Plant(bait.TypeSSH, params, path, false)
+	if err != nil {
+		t.Fatalf("Plant: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading planted file: %v", err)
+	}
+	content := string(data)
+
+	// Must contain ProxyCommand
+	if !strings.Contains(content, "ProxyCommand") {
+		t.Error("missing ProxyCommand in SSH template")
+	}
+
+	// Must contain "Host "
+	if !strings.Contains(content, "Host ") {
+		t.Error("missing 'Host ' in SSH template")
+	}
+
+	// ProxyCommand must contain curl to the callback URL
+	for _, line := range strings.Split(content, "\n") {
+		if strings.Contains(line, "ProxyCommand") {
+			if !strings.Contains(line, "curl") {
+				t.Error("ProxyCommand does not contain curl")
+			}
+			if !strings.Contains(line, params.CallbackURL) {
+				t.Error("ProxyCommand does not contain callback URL")
+			}
+		}
+	}
+}
+
+// TestK8sTemplate verifies the k8s canary template generates correct content.
+func TestK8sTemplate(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "staging.yaml")
+	params := testParams(t, bait.TypeK8s)
+
+	_, err := bait.Plant(bait.TypeK8s, params, path, false)
+	if err != nil {
+		t.Fatalf("Plant: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading planted file: %v", err)
+	}
+	content := string(data)
+
+	// Must contain server URL with https://
+	if !strings.Contains(content, "server: https://") {
+		// The callback URL is https://snare.sh/c/..., so server: {{.CallbackURL}} should match
+		if !strings.Contains(content, "server:") {
+			t.Error("missing server: in k8s template")
+		}
+	}
+
+	// Must contain current-context
+	if !strings.Contains(content, "current-context:") {
+		t.Error("missing current-context: in k8s template")
+	}
+
+	// Validate basic YAML structure via key fields
+	requiredFields := []string{"apiVersion:", "kind: Config", "clusters:", "contexts:", "users:"}
+	for _, field := range requiredFields {
+		if !strings.Contains(content, field) {
+			t.Errorf("missing required YAML field %q", field)
+		}
+	}
+}
+
+// TestGitTemplate verifies the git canary template generates correct content.
+func TestGitTemplate(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".gitconfig")
+	params := testParams(t, bait.TypeGit)
+
+	_, err := bait.Plant(bait.TypeGit, params, path, false)
+	if err != nil {
+		t.Fatalf("Plant: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading planted file: %v", err)
+	}
+	content := string(data)
+
+	// Must contain [credential section
+	if !strings.Contains(content, "[credential") {
+		t.Error("missing [credential in git template")
+	}
+
+	// Must contain helper =
+	if !strings.Contains(content, "helper =") {
+		t.Error("missing helper = in git template")
+	}
+}
+
+// TestTokenURLFormat verifies that for each canary type, the callback URL
+// embedded in the planted file matches the token ID in the params.
+func TestTokenURLFormat(t *testing.T) {
+	types := []bait.Type{
+		bait.TypeAWSProc, bait.TypeSSH, bait.TypeK8s, bait.TypeGit,
+		bait.TypeAWS, bait.TypeGCP, bait.TypeGitHub, bait.TypeStripe,
+		bait.TypeGeneric,
+	}
+
+	for _, bt := range types {
+		t.Run(string(bt), func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "canary-file")
+			params := testParams(t, bt)
+
+			placed, err := bait.Plant(bt, params, path, false)
+			if err != nil {
+				t.Fatalf("Plant: %v", err)
+			}
+
+			// The planted content must contain the callback URL with the token ID
+			expectedURL := "https://snare.sh/c/" + params.TokenID
+			if !strings.Contains(placed.Content, expectedURL) {
+				t.Errorf("planted content does not contain expected callback URL %q", expectedURL)
+			}
+
+			// The callback URL in params must match the expected format
+			if params.CallbackURL != expectedURL {
+				t.Errorf("CallbackURL = %q, want %q", params.CallbackURL, expectedURL)
+			}
+		})
 	}
 }
 
