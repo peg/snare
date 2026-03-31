@@ -58,7 +58,6 @@ const CANARY_TYPES = {
   azure:     { emoji: "☁️",  color: 0x0078D4, name: "Azure"      },
   git:       { emoji: "🌿", color: 0xF05033, name: "Git"         },
   terraform: { emoji: "🏗️",  color: 0x7B42BC, name: "Terraform"  },
-  stripe:    { emoji: "💳", color: 0x6772E5, name: "Stripe"      },
 };
 
 const DEFAULT_TYPE = { emoji: "🪤", color: 0xB2121A, name: "Canary" };
