@@ -900,3 +900,6 @@ function json(body, status = 200) {
     headers: { "content-type": "application/json" },
   });
 }
+
+// Named exports for unit testing — not used by the worker runtime
+export { CANARY_TYPES, shouldFilter, resolveWebhooks, SCANNER_ORGS };
