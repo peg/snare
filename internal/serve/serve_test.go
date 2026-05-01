@@ -225,6 +225,92 @@ func TestHandleHealth(t *testing.T) {
 	}
 }
 
+// ─── Webhook gating on token registration ────────────────────────────────────
+
+func TestHandleCanary_unregisteredTokenNoWebhook(t *testing.T) {
+	// Stand up a webhook endpoint that records whether it was called.
+	called := false
+	whServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer whServer.Close()
+
+	dir := t.TempDir()
+	cfg := Config{
+		Port:       0,
+		DBPath:     filepath.Join(dir, "test.db"),
+		WebhookURL: whServer.URL, // global webhook configured
+	}
+	s, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { s.db.close() })
+
+	// Fire a canary hit via the HTTP handler — token is valid format but NOT registered.
+	req := httptest.NewRequest(http.MethodGet, "/c/some-unregistered-token-abc123", nil)
+	rr := httptest.NewRecorder()
+	s.handleCanary(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+	if ct := rr.Header().Get("Content-Type"); ct != "image/gif" {
+		t.Errorf("Content-Type = %q, want image/gif", ct)
+	}
+
+	// handleCanary fires processAlert in a goroutine; call it synchronously
+	// to deterministically verify webhook behaviour.
+	s.processAlert("some-unregistered-token-abc123", "1.2.3.4", "TestAgent/1.0", "GET", "/c/some-unregistered-token-abc123", "2024-01-01T00:00:00Z", false)
+
+	if called {
+		t.Error("webhook was called for an unregistered token — expected no webhook")
+	}
+}
+
+func TestHandleCanary_registeredTokenFiresWebhook(t *testing.T) {
+	called := false
+	whServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer whServer.Close()
+
+	dir := t.TempDir()
+	cfg := Config{
+		Port:       0,
+		DBPath:     filepath.Join(dir, "test.db"),
+		WebhookURL: whServer.URL,
+	}
+	s, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { s.db.close() })
+
+	// Register the token so processAlert finds it in the DB.
+	if err := s.db.createDevice("dev-wh-test", "secret0000000000000000000000001"); err != nil {
+		t.Fatalf("createDevice: %v", err)
+	}
+	if err := s.db.upsertToken(tokenReg{
+		TokenID:      "registered-token-abc123",
+		DeviceID:     "dev-wh-test",
+		WebhookURL:   "use-global",
+		CanaryType:   "aws",
+		Label:        "test-label",
+		RegisteredAt: "2024-01-01T00:00:00Z",
+	}); err != nil {
+		t.Fatalf("upsertToken: %v", err)
+	}
+
+	s.processAlert("registered-token-abc123", "1.2.3.4", "TestAgent/1.0", "GET", "/c/registered-token-abc123", "2024-01-01T00:00:00Z", false)
+
+	if !called {
+		t.Error("webhook was NOT called for a registered token — expected webhook delivery")
+	}
+}
+
 // ─── hashSecret ──────────────────────────────────────────────────────────────
 
 func TestHashSecret_deterministic(t *testing.T) {
