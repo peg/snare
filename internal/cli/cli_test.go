@@ -386,6 +386,35 @@ func TestAllFlagOutput(t *testing.T) {
 		t.Logf("arm --all --dry-run output:\n%s", stdout)
 		t.Error("expected --all output to mention full mode or all canary types")
 	}
+
+	// --all should really mean every implemented canary type, not just the
+	// old high-coverage subset.
+	wantTypes := []bait.Type{
+		bait.TypeAWSProc,
+		bait.TypeSSH,
+		bait.TypeK8s,
+		bait.TypeAWS,
+		bait.TypeGCP,
+		bait.TypeNPM,
+		bait.TypeGit,
+		bait.TypePyPI,
+		bait.TypeAzure,
+		bait.TypeOpenAI,
+		bait.TypeAnthropic,
+		bait.TypeMCP,
+		bait.TypeGitHub,
+		bait.TypeStripe,
+		bait.TypeHuggingFace,
+		bait.TypeDocker,
+		bait.TypeTerraform,
+		bait.TypeGeneric,
+	}
+	for _, bt := range wantTypes {
+		needle := fmt.Sprintf("%s →", bt)
+		if !strings.Contains(stdout, needle) {
+			t.Errorf("arm --all --dry-run missing %s; output:\n%s", bt, stdout)
+		}
+	}
 }
 
 // TestManifestIsolation verifies that tests use t.TempDir() for HOME and that

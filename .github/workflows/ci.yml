@@ -18,6 +18,16 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: worker/package-lock.json
+
+      - name: Install worker deps
+        working-directory: worker
+        run: npm ci
+
       - name: Build
         run: go build ./...
 
@@ -26,6 +36,10 @@ jobs:
 
       - name: Test
         run: go test ./... -v -race -count=1
+
+      - name: Test worker
+        working-directory: worker
+        run: npm test
 
       - name: staticcheck
         uses: dominikh/staticcheck-action@v1

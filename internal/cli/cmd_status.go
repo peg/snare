@@ -109,19 +109,13 @@ func cmdRotate(args []string) {
 
 	fmt.Println("  Rotating device secret...")
 	fmt.Printf("  Old secret: %s...%s\n", cfg.DeviceSecret[:4], cfg.DeviceSecret[len(cfg.DeviceSecret)-4:])
+	oldSecret := cfg.DeviceSecret
 
 	// Generate new secret
 	newSecret, err := config.NewDeviceSecret()
 	if err != nil {
 		fatal(fmt.Errorf("generating new secret: %w", err))
 	}
-
-	// Update config
-	cfg.DeviceSecret = newSecret
-	if err := cfg.Save(); err != nil {
-		fatal(fmt.Errorf("saving config: %w", err))
-	}
-	fmt.Println("  ✓ New secret saved to ~/.snare/config.json")
 
 	// Re-register all active tokens with new secret
 	m, err := manifest.Load()
@@ -139,23 +133,27 @@ func cmdRotate(args []string) {
 	// Tell the server to update the stored secret hash for this device.
 	// This is the critical step — without it, all subsequent API calls will 401.
 	fmt.Println("  Updating server-side secret hash...")
-	rotateResp, err := authedPost(cfg.RotateURL(), map[string]string{
-		"device_id":  cfg.DeviceID,
-		"new_secret": newSecret,
-	}, cfg)
+	rotateResp, err := rotateDeviceSecretOnServer(cfg, oldSecret, newSecret)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "  ✗ server rotation failed: %v\n", err)
-		fmt.Fprintf(os.Stderr, "  Config saved locally — run `snare rotate` again once connectivity is restored.\n")
+		fmt.Fprintf(os.Stderr, "  Local config unchanged — old secret still active.\n")
 		return
 	}
 	defer rotateResp.Body.Close()
 	if rotateResp.StatusCode != 200 {
 		body, _ := io.ReadAll(rotateResp.Body)
 		fmt.Fprintf(os.Stderr, "  ✗ server rotation failed (HTTP %d): %s\n", rotateResp.StatusCode, strings.TrimSpace(string(body)))
-		fmt.Fprintf(os.Stderr, "  Config saved locally — run `snare rotate` again once the issue is resolved.\n")
+		fmt.Fprintf(os.Stderr, "  Local config unchanged — old secret still active.\n")
 		return
 	}
 	fmt.Println("  ✓ Server secret hash updated")
+
+	// Update local config only after the server accepted the new secret.
+	cfg.DeviceSecret = newSecret
+	if err := cfg.Save(); err != nil {
+		fatal(fmt.Errorf("saving config: %w", err))
+	}
+	fmt.Println("  ✓ New secret saved to ~/.snare/config.json")
 
 	// Re-register all active tokens with new secret
 	if len(active) > 0 {
@@ -174,10 +172,19 @@ func cmdRotate(args []string) {
 	fmt.Println("  ✓ Rotation complete. Old secret is now invalid.")
 }
 
+func rotateDeviceSecretOnServer(cfg *config.Config, oldSecret, newSecret string) (*http.Response, error) {
+	rotateCfg := *cfg
+	rotateCfg.DeviceSecret = oldSecret
+	return authedPost(cfg.RotateURL(), map[string]string{
+		"device_id":  cfg.DeviceID,
+		"new_secret": newSecret,
+	}, &rotateCfg)
+}
+
 // cmdInit sets up snare for this machine.
 // With --webhook: non-interactive. Without: guided setup.
 func cmdInit(args []string) {
-	force      := hasFlag(args, "--force")
+	force := hasFlag(args, "--force")
 	webhookURL := flagValue(args, "--webhook")
 
 	// Non-interactive path: --webhook provided (CI, scripting)

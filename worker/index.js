@@ -198,7 +198,7 @@ export default {
       // Process alert asynchronously AFTER response is sent to caller
       ctx.waitUntil(
         processAlert(token, metadata, env).catch(err =>
-          console.error(`ALERT_ERROR token=${token} err=${err.message}`)
+          console.error(`ALERT_ERROR token=*** err=${err.message}`)
         )
       );
 
@@ -276,15 +276,9 @@ async function validateAuth(request, env, deviceId) {
 
   const secretHash = await hashSecret(secret);
 
-  // Check if device is registered
   const storedRaw = await env.SNARE_KV.get(`device:${deviceId}`);
   if (!storedRaw) {
-    // First time — register this device
-    await env.SNARE_KV.put(`device:${deviceId}`, JSON.stringify({
-      secret_hash: secretHash,
-      registered_at: new Date().toISOString(),
-    }));
-    return { ok: true, deviceId, isNew: true };
+    return { ok: false, error: "unknown device_id" };
   }
 
   // Validate secret against stored hash
@@ -348,7 +342,7 @@ async function processAlert(token, metadata, env) {
   // Unregistered tokens must never fire webhooks — prevents false alerts from
   // probe traffic hitting random/partial token URLs (e.g. snare.sh/c/agent-01-).
   if (!registered && !token.startsWith("snare-test-")) {
-    console.log("UNREGISTERED_TOKEN", token, metadata.ip);
+    console.log("UNREGISTERED_TOKEN", "token=***", "ip=***");
     return;
   }
 
@@ -360,6 +354,7 @@ async function processAlert(token, metadata, env) {
 
   const event = {
     token,
+    device_id: meta.deviceId || null,
     is_test:   isTest,
     timestamp: metadata.timestamp,
     ip:        metadata.ip,
@@ -377,9 +372,9 @@ async function processAlert(token, metadata, env) {
 
   // Log metadata only — never body content
   console.log(isTest ? "CANARY_TEST" : "CANARY_FIRED", JSON.stringify({
-    token: event.token,
+    token: "***",
     is_test: event.is_test,
-    ip: event.ip,
+    ip: event.ip ? "***" : event.ip,
     method: event.method,
     country: event.country,
     asnOrg: event.asnOrg,
@@ -399,7 +394,7 @@ async function processAlert(token, metadata, env) {
   );
   results.forEach((r, i) => {
     if (r.status === "rejected") {
-      console.error(`WEBHOOK_FAILED url=${webhooks[i]} token=${token} err=${r.reason}`);
+      console.error(`WEBHOOK_FAILED url=*** token=*** err=${r.reason}`);
     }
   });
 }
@@ -418,6 +413,24 @@ async function handleEvents(token, request, env) {
       const reg = JSON.parse(regRaw);
       deviceId = reg.device_id;
     } catch { /* fall through */ }
+  }
+
+  // If the token is no longer registered, fall back to the owner recorded on
+  // the newest stored event so revoked tokens don't become readable by any
+  // random valid device.
+  if (!deviceId) {
+    const list = await env.SNARE_KV.list({ prefix: `event:${token}:`, limit: 20 });
+    for (const key of list.keys) {
+      const raw = await env.SNARE_KV.get(key.name);
+      if (!raw) continue;
+      try {
+        const event = JSON.parse(raw);
+        if (event.device_id) {
+          deviceId = event.device_id;
+          break;
+        }
+      } catch { /* skip corrupt */ }
+    }
   }
 
   // Auth required for ALL event reads — no unauthenticated fallback
@@ -901,4 +914,4 @@ function json(body, status = 200) {
 }
 
 // Named exports for unit testing — not used by the worker runtime
-export { CANARY_TYPES, shouldFilter, resolveWebhooks, SCANNER_ORGS };
+export { CANARY_TYPES, shouldFilter, resolveWebhooks, SCANNER_ORGS, validateAuth };

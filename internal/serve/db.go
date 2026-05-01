@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite" // pure-Go SQLite driver, no CGo
@@ -34,6 +35,7 @@ CREATE TABLE IF NOT EXISTS tokens (
 CREATE TABLE IF NOT EXISTS events (
 	id         INTEGER PRIMARY KEY AUTOINCREMENT,
 	token_id   TEXT NOT NULL,
+	device_id  TEXT,
 	is_test    INTEGER NOT NULL DEFAULT 0,
 	timestamp  TEXT NOT NULL,
 	ip         TEXT,
@@ -76,6 +78,9 @@ func openDB(path string) (*DB, error) {
 	if _, err := db.Exec(schema); err != nil {
 		return nil, fmt.Errorf("schema: %w", err)
 	}
+	if _, err := db.Exec(`ALTER TABLE events ADD COLUMN device_id TEXT`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		return nil, fmt.Errorf("add events.device_id column: %w", err)
+	}
 
 	return &DB{db: db}, nil
 }
@@ -110,6 +115,20 @@ func (d *DB) deviceSecretHash(deviceID string) (string, error) {
 		return "", nil
 	}
 	return h, err
+}
+
+// updateDeviceSecret replaces the stored secret hash for an existing device.
+// Returns (false, nil) when the device does not exist.
+func (d *DB) updateDeviceSecret(deviceID, deviceSecret string) (bool, error) {
+	res, err := d.db.Exec(`UPDATE devices SET secret_hash = ? WHERE device_id = ?`, hashSecret(deviceSecret), deviceID)
+	if err != nil {
+		return false, err
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return rows > 0, nil
 }
 
 // ─── Token (webhook registration) operations ─────────────────────────────────
@@ -165,6 +184,7 @@ func (d *DB) deleteToken(tokenID string) error {
 type event struct {
 	ID        int64
 	TokenID   string
+	DeviceID  string
 	IsTest    bool
 	Timestamp string
 	IP        string
@@ -188,16 +208,16 @@ func (d *DB) insertEvent(e event) error {
 		isTest = 1
 	}
 	_, err := d.db.Exec(`
-		INSERT INTO events (token_id, is_test, timestamp, ip, user_agent, method, path, country, city, asn, asn_org, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, e.TokenID, isTest, e.Timestamp, e.IP, e.UserAgent, e.Method, e.Path, e.Country, e.City, e.ASN, e.ASNOrg, e.CreatedAt)
+		INSERT INTO events (token_id, device_id, is_test, timestamp, ip, user_agent, method, path, country, city, asn, asn_org, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, e.TokenID, e.DeviceID, isTest, e.Timestamp, e.IP, e.UserAgent, e.Method, e.Path, e.Country, e.City, e.ASN, e.ASNOrg, e.CreatedAt)
 	return err
 }
 
 // getEvents returns recent events for a token (newest first, limit 20).
 func (d *DB) getEvents(tokenID string) ([]event, error) {
 	rows, err := d.db.Query(`
-		SELECT id, token_id, is_test, timestamp, COALESCE(ip,''), COALESCE(user_agent,''),
+		SELECT id, token_id, COALESCE(device_id,''), is_test, timestamp, COALESCE(ip,''), COALESCE(user_agent,''),
 		       COALESCE(method,''), COALESCE(path,''), COALESCE(country,''), COALESCE(city,''),
 		       COALESCE(asn,''), COALESCE(asn_org,''), created_at
 		FROM events
@@ -215,7 +235,7 @@ func (d *DB) getEvents(tokenID string) ([]event, error) {
 // recentEvents returns the most recent events across all tokens (for dashboard).
 func (d *DB) recentEvents(limit int) ([]event, error) {
 	rows, err := d.db.Query(`
-		SELECT e.id, e.token_id, e.is_test, e.timestamp, COALESCE(e.ip,''), COALESCE(e.user_agent,''),
+		SELECT e.id, e.token_id, COALESCE(e.device_id,''), e.is_test, e.timestamp, COALESCE(e.ip,''), COALESCE(e.user_agent,''),
 		       COALESCE(e.method,''), COALESCE(e.path,''), COALESCE(e.country,''), COALESCE(e.city,''),
 		       COALESCE(e.asn,''), COALESCE(e.asn_org,''), e.created_at
 		FROM events e
@@ -235,7 +255,7 @@ func scanEvents(rows *sql.Rows) ([]event, error) {
 		var e event
 		var isTest int
 		if err := rows.Scan(
-			&e.ID, &e.TokenID, &isTest, &e.Timestamp,
+			&e.ID, &e.TokenID, &e.DeviceID, &isTest, &e.Timestamp,
 			&e.IP, &e.UserAgent, &e.Method, &e.Path,
 			&e.Country, &e.City, &e.ASN, &e.ASNOrg, &e.CreatedAt,
 		); err != nil {
@@ -247,10 +267,27 @@ func scanEvents(rows *sql.Rows) ([]event, error) {
 	return out, rows.Err()
 }
 
+// latestEventDeviceID returns the owner device recorded on the newest stored event.
+// Returns ("", nil) when no events exist or legacy events lack device ownership.
+func (d *DB) latestEventDeviceID(tokenID string) (string, error) {
+	var deviceID string
+	err := d.db.QueryRow(`
+		SELECT COALESCE(device_id,'')
+		FROM events
+		WHERE token_id = ?
+		ORDER BY timestamp DESC
+		LIMIT 1
+	`, tokenID).Scan(&deviceID)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return deviceID, err
+}
+
 // listDevices returns all registered devices (for dashboard).
 type deviceRow struct {
-	DeviceID  string
-	CreatedAt string
+	DeviceID   string
+	CreatedAt  string
 	TokenCount int
 }
 

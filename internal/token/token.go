@@ -247,17 +247,23 @@ func encodeBase64Lines(data []byte, lineLen int) string {
 func NewK8sToken() (string, error) {
 	// JWT header (always the same for k8s SA tokens)
 	header := "eyJhbGciOiJSUzI1NiIsImtpZCI6IkNnY3cifQ"
-	// Random payload (64 bytes → ~86 base64url chars)
-	payload := make([]byte, 64)
-	if _, err := rand.Read(payload); err != nil {
-		return "", err
+	for attempt := 0; attempt < 1000; attempt++ {
+		// Random payload (64 bytes → ~86 base64url chars)
+		payload := make([]byte, 64)
+		if _, err := rand.Read(payload); err != nil {
+			return "", err
+		}
+		// Random signature (128 bytes → ~172 base64url chars)
+		sig := make([]byte, 128)
+		if _, err := rand.Read(sig); err != nil {
+			return "", err
+		}
+		token := header + "." + base64url(payload) + "." + base64url(sig)
+		if !containsGiveaway(token) {
+			return token, nil
+		}
 	}
-	// Random signature (128 bytes → ~172 base64url chars)
-	sig := make([]byte, 128)
-	if _, err := rand.Read(sig); err != nil {
-		return "", err
-	}
-	return header + "." + base64url(payload) + "." + base64url(sig), nil
+	return "", fmt.Errorf("failed to generate giveaway-free k8s token after 1000 attempts")
 }
 
 // NewNPMToken generates a realistic npm auth token.
@@ -295,12 +301,12 @@ func NewHuggingFaceToken() (string, error) {
 
 // NewDockerRegistryName generates a convincing fake Docker registry hostname.
 // Format: registry.prod-services-XXXXX.io
-func NewDockerRegistryName() string {
+func NewDockerRegistryName() (string, error) {
 	b := make([]byte, 4)
 	if _, err := rand.Read(b); err != nil {
-		panic(fmt.Sprintf("crypto/rand failure: %v", err))
+		return "", err
 	}
-	return fmt.Sprintf("registry.prod-services-%x.io", b)
+	return fmt.Sprintf("registry.prod-services-%x.io", b), nil
 }
 
 // NewAzureClientID generates a realistic Azure AD application (client) ID.
