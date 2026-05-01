@@ -17,20 +17,24 @@ type canaryTypeMeta struct {
 }
 
 var canaryTypes = map[string]canaryTypeMeta{
-	"aws":       {Emoji: "🔑", Name: "AWS"},
-	"gcp":       {Emoji: "☁️", Name: "GCP"},
-	"github":    {Emoji: "⬛", Name: "GitHub"},
-	"stripe":    {Emoji: "💳", Name: "Stripe"},
-	"openai":    {Emoji: "🤖", Name: "OpenAI"},
-	"anthropic": {Emoji: "🟠", Name: "Anthropic"},
-	"ssh":       {Emoji: "🔒", Name: "SSH"},
-	"k8s":       {Emoji: "☸️", Name: "Kubernetes"},
-	"npm":       {Emoji: "📦", Name: "npm"},
-	"mcp":       {Emoji: "🔌", Name: "MCP"},
-	"pypi":      {Emoji: "🐍", Name: "PyPI"},
-	"awsproc":   {Emoji: "⚙️", Name: "AWS (credential_process)"},
-	"docker":    {Emoji: "🐳", Name: "Docker"},
-	"generic":   {Emoji: "🗝️", Name: "Generic"},
+	"aws":         {Emoji: "🔑", Name: "AWS"},
+	"gcp":         {Emoji: "☁️", Name: "GCP"},
+	"github":      {Emoji: "⬛", Name: "GitHub"},
+	"stripe":      {Emoji: "💳", Name: "Stripe"},
+	"openai":      {Emoji: "🤖", Name: "OpenAI"},
+	"anthropic":   {Emoji: "🟠", Name: "Anthropic"},
+	"ssh":         {Emoji: "🔒", Name: "SSH"},
+	"k8s":         {Emoji: "☸️", Name: "Kubernetes"},
+	"npm":         {Emoji: "📦", Name: "npm"},
+	"mcp":         {Emoji: "🔌", Name: "MCP"},
+	"pypi":        {Emoji: "🐍", Name: "PyPI"},
+	"awsproc":     {Emoji: "⚙️", Name: "AWS (credential_process)"},
+	"huggingface": {Emoji: "🤗", Name: "Hugging Face"},
+	"docker":      {Emoji: "🐳", Name: "Docker"},
+	"azure":       {Emoji: "🔷", Name: "Azure"},
+	"git":         {Emoji: "🌿", Name: "Git"},
+	"terraform":   {Emoji: "🧱", Name: "Terraform"},
+	"generic":     {Emoji: "🗝️", Name: "Generic"},
 }
 
 var defaultCanaryType = canaryTypeMeta{Emoji: "🪤", Name: "Canary"}
@@ -96,12 +100,12 @@ func deliverWebhook(webhookURL string, e event, reg *tokenReg) {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Printf("webhook delivery error token=%s: %v", e.TokenID, err)
+		log.Printf("webhook delivery error token=*** url=***: %v", err)
 		return
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
-		log.Printf("webhook returned %d for token=%s url=%s", resp.StatusCode, e.TokenID, webhookURL)
+		log.Printf("webhook returned %d for token=*** url=***", resp.StatusCode)
 	}
 }
 
@@ -157,7 +161,7 @@ func buildDiscordPayload(e event, reg *tokenReg, ct canaryTypeMeta, fromCloud bo
 				"title":     title,
 				"color":     color,
 				"fields":    fields,
-				"footer":    map[string]string{"text": "snare-server · request body was never captured"},
+				"footer":    map[string]string{"text": "snare-server · IP, UA, timestamp only — no request body"},
 				"timestamp": e.Timestamp,
 			},
 		},
@@ -199,7 +203,7 @@ func buildSlackPayload(e event, reg *tokenReg, ct canaryTypeMeta, fromCloud bool
 			{
 				"color":  "#B2121A",
 				"fields": fields,
-				"footer": "snare-server · request body was never captured",
+				"footer": "snare-server · IP, UA, timestamp only — no request body",
 			},
 		},
 	}

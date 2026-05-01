@@ -9,6 +9,26 @@ Versioning: [Semantic Versioning](https://semver.org/)
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-05-01
+
+### Added
+- `snare serve --trusted-proxy <cidr,...>` so self-hosted deployments only trust `X-Forwarded-For` / `X-Real-IP` from explicitly configured reverse proxies
+- Server-side `/api/rotate` endpoint and safer `snare rotate` flow that updates the hosted secret before replacing the local secret
+- Device ownership on stored events, preserving event access for revoked tokens without opening reads to unrelated devices
+- CI coverage for worker tests, plus additional canary inventory, rotation, and serve/event tests
+
+### Changed
+- `snare arm --all` and `snare plant --all` now use one canonical list of all 18 implemented canary types, including `git`, `terraform`, and `generic`
+- Alert copy and privacy docs now say the precise guarantee: IP, user agent, timestamp, method/path, and coarse network metadata only — no request body inspection
+- Webhook guidance now treats webhook URLs as secrets and documents custom JSON endpoints
+
+### Fixed
+- Worker and self-hosted webhook logs no longer print raw canary token IDs or webhook URLs on common failure paths
+- Worker authentication no longer silently auto-registers unknown devices during authenticated API requests
+- Docker registry generation returns errors instead of panicking on `crypto/rand` failure
+- Self-hosted callback IP attribution no longer trusts spoofable proxy headers by default
+- Discord/Slack alert metadata includes the full canary inventory labels for newer canary types
+
 ## [0.1.4] - 2026-03-24
 
 ### Fixed

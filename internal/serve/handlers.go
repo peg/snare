@@ -36,7 +36,7 @@ func (s *Server) handleCanary(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Capture metadata from headers ONLY — body is never touched.
-	ip := clientIP(r)
+	ip := clientIP(r, s.trustedProxyNets)
 	ua := r.Header.Get("User-Agent")
 	now := time.Now().UTC().Format(time.RFC3339)
 	method := r.Method
@@ -58,8 +58,16 @@ func (s *Server) handleCanary(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) processAlert(token, ip, ua, method, path, timestamp string, isTest bool) {
+	// Look up token registration first so stored events retain ownership
+	// even after a token is later revoked.
+	reg, err := s.db.getToken(token)
+	if err != nil {
+		log.Printf("get token error: %v", err)
+	}
+
 	e := event{
 		TokenID:   token,
+		DeviceID:  "",
 		IsTest:    isTest,
 		Timestamp: timestamp,
 		IP:        ip,
@@ -68,17 +76,14 @@ func (s *Server) processAlert(token, ip, ua, method, path, timestamp string, isT
 		Path:      path,
 		CreatedAt: timestamp,
 	}
+	if reg != nil {
+		e.DeviceID = reg.DeviceID
+	}
 
 	log.Printf("CANARY_FIRED token=%s ip=%s is_test=%v ua=%s", token, ip, isTest, truncate(ua, 80))
 
 	if err := s.db.insertEvent(e); err != nil {
 		log.Printf("insert event error: %v", err)
-	}
-
-	// Look up token registration for webhook and metadata
-	reg, err := s.db.getToken(token)
-	if err != nil {
-		log.Printf("get token error: %v", err)
 	}
 
 	// Unregistered tokens never fire webhooks — avoids false alerts from
@@ -273,6 +278,57 @@ func (s *Server) handleRevoke(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// ─── POST /api/rotate ────────────────────────────────────────────────────────
+
+func (s *Server) handleRotate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		jsonResp(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+
+	var body struct {
+		DeviceID  string `json:"device_id"`
+		NewSecret string `json:"new_secret"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonResp(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
+	if body.DeviceID == "" {
+		jsonResp(w, http.StatusBadRequest, map[string]string{"error": "missing device_id"})
+		return
+	}
+	if len(body.NewSecret) < 32 {
+		jsonResp(w, http.StatusBadRequest, map[string]string{"error": "new_secret too short (min 32 chars)"})
+		return
+	}
+
+	ok, err := s.validateDevice(r, body.DeviceID)
+	if err != nil {
+		jsonResp(w, http.StatusInternalServerError, map[string]string{"error": "auth error"})
+		return
+	}
+	if !ok {
+		jsonResp(w, http.StatusUnauthorized, map[string]string{"error": "invalid device secret"})
+		return
+	}
+
+	updated, err := s.db.updateDeviceSecret(body.DeviceID, body.NewSecret)
+	if err != nil {
+		jsonResp(w, http.StatusInternalServerError, map[string]string{"error": "db error"})
+		return
+	}
+	if !updated {
+		jsonResp(w, http.StatusUnauthorized, map[string]string{"error": "unknown device_id"})
+		return
+	}
+
+	jsonResp(w, http.StatusOK, map[string]string{
+		"status":    "rotated",
+		"device_id": body.DeviceID,
+	})
+}
+
 // ─── GET /api/events/{token} ─────────────────────────────────────────────────
 
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
@@ -299,6 +355,13 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	deviceID := ""
 	if reg != nil {
 		deviceID = reg.DeviceID
+	}
+	if deviceID == "" {
+		deviceID, err = s.db.latestEventDeviceID(tokenID)
+		if err != nil {
+			jsonResp(w, http.StatusInternalServerError, map[string]string{"error": "db error"})
+			return
+		}
 	}
 	if deviceID == "" {
 		deviceID = r.Header.Get("X-Snare-Device-Id")

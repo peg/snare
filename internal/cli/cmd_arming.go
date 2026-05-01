@@ -29,34 +29,34 @@ var precisionTypes = []bait.Type{
 
 // selectEntry describes one row in the --select TUI.
 type selectEntry struct {
-	t     bait.Type
-	tier  string // "precision", "high", "medium"
-	path  string // short description of where it plants
+	t    bait.Type
+	tier string // "precision", "high", "medium"
+	path string // short description of where it plants
 }
 
 // allSelectEntries is the canonical ordered list for --select mode.
 var allSelectEntries = []selectEntry{
 	// Precision: fire via SDK/OS hooks, no DNS dependency, zero false positives
-	{bait.TypeAWSProc,    "precision", "~/.aws/config (credential_process)"},
-	{bait.TypeSSH,        "precision", "~/.ssh/config (ProxyCommand)"},
-	{bait.TypeK8s,        "precision", "~/.kube/<name>.yaml (server URL)"},
+	{bait.TypeAWSProc, "precision", "~/.aws/config (credential_process)"},
+	{bait.TypeSSH, "precision", "~/.ssh/config (ProxyCommand)"},
+	{bait.TypeK8s, "precision", "~/.kube/<name>.yaml (server URL)"},
 	// High: fires on active use, agent must find+use the credential
-	{bait.TypeAWS,        "high",      "~/.aws/credentials (endpoint_url)"},
-	{bait.TypeGCP,        "high",      "~/.config/gcloud/sa-*.json (token_uri)"},
-	{bait.TypeNPM,        "high",      "~/.npmrc (scoped registry)"},
-	{bait.TypeGit,        "high",      "~/.gitconfig (credential.helper)"},
-	{bait.TypePyPI,       "high",      "~/.config/pip/pip.conf (extra-index-url) ⚠ side effect"},
+	{bait.TypeAWS, "high", "~/.aws/credentials (endpoint_url)"},
+	{bait.TypeGCP, "high", "~/.config/gcloud/sa-*.json (token_uri)"},
+	{bait.TypeNPM, "high", "~/.npmrc (scoped registry)"},
+	{bait.TypeGit, "high", "~/.gitconfig (credential.helper)"},
+	{bait.TypePyPI, "high", "~/.config/pip/pip.conf (extra-index-url) ⚠ side effect"},
 	// Medium: dotenv-dependent, DNS-dependent, or needs explicit credential scanning
-	{bait.TypeAzure,      "medium",    "~/.azure/service-principal-credentials.json"},
-	{bait.TypeOpenAI,     "medium",    "~/.env (OPENAI_BASE_URL)"},
-	{bait.TypeAnthropic,  "medium",    "~/.env.local (ANTHROPIC_BASE_URL)"},
-	{bait.TypeMCP,        "medium",    "~/.config/mcp-servers*.json"},
-	{bait.TypeGitHub,     "medium",    "~/.config/gh/hosts.yml"},
-	{bait.TypeStripe,     "medium",    "~/.config/stripe/config.toml"},
-	{bait.TypeHuggingFace,"medium",    "~/.env.hf (HF_ENDPOINT)"},
-	{bait.TypeDocker,     "medium",    "~/.docker/config.json"},
-	{bait.TypeTerraform,  "medium",    "~/.terraformrc (network_mirror)"},
-	{bait.TypeGeneric,    "medium",    "~/.env.production (API_BASE_URL)"},
+	{bait.TypeAzure, "medium", "~/.azure/service-principal-credentials.json"},
+	{bait.TypeOpenAI, "medium", "~/.env (OPENAI_BASE_URL)"},
+	{bait.TypeAnthropic, "medium", "~/.env.local (ANTHROPIC_BASE_URL)"},
+	{bait.TypeMCP, "medium", "~/.config/mcp-servers*.json"},
+	{bait.TypeGitHub, "medium", "~/.config/gh/hosts.yml"},
+	{bait.TypeStripe, "medium", "~/.config/stripe/config.toml"},
+	{bait.TypeHuggingFace, "medium", "~/.env.hf (HF_ENDPOINT)"},
+	{bait.TypeDocker, "medium", "~/.docker/config.json"},
+	{bait.TypeTerraform, "medium", "~/.terraformrc (network_mirror)"},
+	{bait.TypeGeneric, "medium", "~/.env.production (API_BASE_URL)"},
 }
 
 // runSelectTUI shows an interactive checklist and returns the chosen types.
@@ -81,8 +81,8 @@ func runSelectTUI() ([]bait.Type, error) {
 		"medium":    "\033[36m", // cyan
 	}
 	reset := "\033[0m"
-	bold  := "\033[1m"
-	dim   := "\033[2m"
+	bold := "\033[1m"
+	dim := "\033[2m"
 
 	// Put terminal in raw mode
 	oldState, err := makeRaw(int(os.Stdin.Fd()))
@@ -214,7 +214,7 @@ Running AI agents on this machine? The default precision mode won't fire on your
 Use --all to arm every canary type, or --select to pick interactively.
 
 Flags:
-  --webhook <url>    webhook URL (Discord, Slack, Telegram, PagerDuty, Teams)
+  --webhook <url>    webhook URL (Discord, Slack, Telegram, or custom JSON endpoint)
   --label <name>     name your canary (e.g. prod-admin-legacy-2024) — defaults to hostname
   --all              plant all canary types including dotenv-based ones
   --select           interactive checklist to pick which canaries to arm
@@ -236,10 +236,10 @@ Naming tip:
 	}
 
 	webhookURL := flagValue(args, "--webhook")
-	label      := flagValue(args, "--label")
-	dryRun     := hasFlag(args, "--dry-run")
-	armAll     := hasFlag(args, "--all")
-	armSelect  := hasFlag(args, "--select")
+	label := flagValue(args, "--label")
+	dryRun := hasFlag(args, "--dry-run")
+	armAll := hasFlag(args, "--all")
+	armSelect := hasFlag(args, "--select")
 
 	if label == "" {
 		if h, err := os.Hostname(); err == nil {
@@ -299,7 +299,7 @@ Naming tip:
 		}
 	}
 
-	// Step 2: Plant all high-reliability canaries
+	// Step 2: Plant selected canaries
 	m, err := manifest.Load()
 	if err != nil {
 		fatal(err)
@@ -322,8 +322,8 @@ Naming tip:
 		}
 		fmt.Printf("  Custom mode: planting %s\n", strings.Join(names, ", "))
 	case armAll:
-		armTypes = highReliabilityTypes
-		fmt.Println("  Full mode: planting all canary types (including dotenv-based)")
+		armTypes = allCanaryTypes
+		fmt.Println("  Full mode: planting all 18 canary types (including dotenv-based)")
 	default:
 		fmt.Println("  Precision mode: planting highest-signal canaries only (awsproc, ssh, k8s)")
 	}

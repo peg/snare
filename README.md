@@ -32,7 +32,7 @@ The agent sees a flaky AWS response. You see this:
 
 ```
 🔑 AWS canary fired — agent-01
-Token   agent-01-••••••••••••••••
+Token   agent-prod-admin-2026-••••••••
 Time    2026-03-14 04:07:33 UTC
 IP      34.121.8.92       Location  Council Bluffs, US
 Network Amazon Technologies Inc (AS16509)
@@ -94,7 +94,7 @@ To arm all canary types (including dotenv-based ones like OpenAI, Anthropic, etc
 snare arm --all --webhook https://discord.com/api/webhooks/YOUR/WEBHOOK
 ```
 
-Supported webhook destinations: Discord, Slack, Telegram, PagerDuty, MS Teams.
+Supported webhook destinations: Discord, Slack, Telegram, or any endpoint that accepts JSON. Treat webhook URLs as secrets — don't commit, screenshot, or share them.
 
 ---
 
@@ -220,7 +220,7 @@ Alerts are signed with `X-Snare-Signature` (HMAC-SHA256) so you can verify they 
 
 ## Privacy
 
-Snare never reads request bodies. When a canary fires, the worker returns a response before the body is consumed. Canary callbacks can carry real credentials or prompts in their body — we never see them.
+Snare's callback handlers never read request bodies. When a canary fires, the worker returns a response before the body is consumed. Canary callbacks can carry real credentials or prompts in their body — the application code does not inspect them. In managed mode, Cloudflare still terminates the network request; self-host if you need full network-layer control.
 
 Each alert stores only: token ID, timestamp, IP, user agent, method, path, country, ASN.
 
@@ -271,7 +271,7 @@ To point canaries at your own server instead of snare.sh, edit `callback_base` i
 
 `snare serve` requires `--dashboard-token` (or `SNARE_DASHBOARD_TOKEN`) to protect the dashboard. Generate one with `openssl rand -hex 32`.
 
-> **Important:** Only expose `snare serve` behind a reverse proxy you control (nginx, Caddy, Cloudflare Tunnel). Never bind directly to a public interface. The server trusts `X-Forwarded-For` headers for IP attribution, which can be spoofed without a trusted upstream.
+> **Important:** Only expose `snare serve` behind a reverse proxy you control (nginx, Caddy, Cloudflare Tunnel). Never bind directly to a public interface. By default the server ignores `X-Forwarded-For` and `X-Real-IP`. If you want real client IP attribution behind a trusted proxy, set `--trusted-proxy <cidr,...>` to the proxy network(s) that are allowed to supply those headers.
 
 ---
 

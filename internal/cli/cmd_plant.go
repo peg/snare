@@ -11,21 +11,37 @@ import (
 	"github.com/peg/snare/internal/manifest"
 )
 
-// armCanaryTypes are planted by default with `snare arm` — the full recommended set.
-// High reliability types fire when the SDK actually uses the credential.
-// Medium reliability types fire conditionally but are still valuable coverage.
-var highReliabilityTypes = []bait.Type{
-	bait.TypeAWS, bait.TypeAWSProc, bait.TypeGCP,
-	bait.TypeSSH, bait.TypeK8s, bait.TypePyPI,
-	bait.TypeOpenAI, bait.TypeAnthropic, bait.TypeNPM, bait.TypeMCP,
-	bait.TypeHuggingFace, bait.TypeDocker, bait.TypeAzure, bait.TypeTerraform,
+// allCanaryTypes is the canonical non-interactive "everything" set used by
+// `snare arm --all` and `snare plant --all`.
+//
+// Keep this in sync with allSelectEntries in cmd_arming.go and the implemented
+// bait.Type constants. Ordering matches the website/docs tier order.
+var allCanaryTypes = []bait.Type{
+	bait.TypeAWSProc,
+	bait.TypeSSH,
+	bait.TypeK8s,
+	bait.TypeAWS,
+	bait.TypeGCP,
+	bait.TypeNPM,
+	bait.TypeGit,
+	bait.TypePyPI,
+	bait.TypeAzure,
+	bait.TypeOpenAI,
+	bait.TypeAnthropic,
+	bait.TypeMCP,
+	bait.TypeGitHub,
+	bait.TypeStripe,
+	bait.TypeHuggingFace,
+	bait.TypeDocker,
+	bait.TypeTerraform,
+	bait.TypeGeneric,
 }
 
 // cmdPlant deploys canary credentials to this machine.
 func cmdPlant(args []string) {
-	label    := flagValue(args, "--label")
+	label := flagValue(args, "--label")
 	baitType := flagValue(args, "--type")
-	dryRun   := hasFlag(args, "--dry-run")
+	dryRun := hasFlag(args, "--dry-run")
 	plantAll := hasFlag(args, "--all")
 
 	// Default label to hostname
@@ -47,9 +63,9 @@ func cmdPlant(args []string) {
 		fatal(err)
 	}
 
-	// --all plants all high-reliability types
+	// --all plants every implemented canary type.
 	if plantAll {
-		for _, bt := range highReliabilityTypes {
+		for _, bt := range allCanaryTypes {
 			plantOne(bt, label, cfg, m, dryRun)
 		}
 		return

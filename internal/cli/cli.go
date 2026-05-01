@@ -22,23 +22,24 @@ var httpClient = &http.Client{Timeout: 15 * time.Second}
 // reliability returns a human-readable reliability label per canary type.
 //
 // Tiers:
-//   precision — fires via existing SDK/OS plumbing, no agent hunting needed,
-//               no DNS dependency, zero false positives
-//   high      — fires when credential is actively used, but requires agent to
-//               find and use it, or has a DNS/runtime dependency
-//   medium    — fires conditionally: depends on dotenv loading, base URL
-//               override support, or agent doing explicit credential scanning
+//
+//	precision — fires via existing SDK/OS plumbing, no agent hunting needed,
+//	            no DNS dependency, zero false positives
+//	high      — fires when credential is actively used, but requires agent to
+//	            find and use it, or has a DNS/runtime dependency
+//	medium    — fires conditionally: depends on dotenv loading, base URL
+//	            override support, or agent doing explicit credential scanning
 func reliability(t string) string {
 	switch bait.Type(t) {
 	// Precision: fires via SDK/OS hooks before or during connection, no DNS needed
 	case bait.TypeAWSProc, bait.TypeSSH, bait.TypeK8s:
 		return "precision"
 	// High: fires on active credential use, requires agent to find+use the cred
-	case bait.TypeAWS,   // endpoint_url fires on any AWS SDK call with that profile
-		bait.TypeGCP,    // token_uri fires on GCP SDK auth (needs explicit file load)
-		bait.TypePyPI,   // extra-index-url fires on pip install (own installs too — see warning)
-		bait.TypeNPM,    // scoped registry fires on npm install (scoped packages only)
-		bait.TypeGit:    // credential.helper fires if agent does git credential fill
+	case bait.TypeAWS, // endpoint_url fires on any AWS SDK call with that profile
+		bait.TypeGCP,  // token_uri fires on GCP SDK auth (needs explicit file load)
+		bait.TypePyPI, // extra-index-url fires on pip install (own installs too — see warning)
+		bait.TypeNPM,  // scoped registry fires on npm install (scoped packages only)
+		bait.TypeGit:  // credential.helper fires if agent does git credential fill
 		return "high"
 	// Medium: dotenv-dependent, DNS-dependent, or requires explicit credential scanning
 	default:
@@ -76,13 +77,12 @@ Flags (arm):
   --webhook <url>              webhook URL (Discord, Slack, Telegram, or custom)
   --label <name>               name your canary (e.g. prod-admin-legacy-2024) — defaults to hostname
   --all                        plant all canary types including dotenv-based ones
-                               (openai, anthropic, huggingface, npm, mcp, github, stripe, generic, docker, azure)
   --dry-run                    show what would be planted without writing
 
 Flags (plant):
   --label <name>               name your canary (e.g. prod-admin-legacy-2024) — defaults to hostname
-  --type <type>                canary type: aws, awsproc, gcp, github, stripe, openai, anthropic, ssh, k8s, npm, mcp, pypi, huggingface, docker, azure, generic
-  --all                        plant all high-reliability canary types at once
+  --type <type>                canary type: aws, awsproc, gcp, github, stripe, openai, anthropic, ssh, k8s, npm, mcp, pypi, huggingface, docker, azure, git, terraform, generic
+  --all                        plant all canary types at once
   --dry-run                    show what would be planted without writing anything
 
 Flags (disarm/teardown):
@@ -98,6 +98,7 @@ Flags (serve):
   --webhook-url <url>          global fallback webhook URL for alerts
   --dashboard-token <token>    required: token to protect the dashboard (min 16 chars)
                                also: SNARE_DASHBOARD_TOKEN env var
+  --trusted-proxy <cidr,...>   trust X-Forwarded-For / X-Real-IP only from these proxy CIDRs
 `
 
 // Run dispatches the CLI command.
@@ -340,7 +341,10 @@ func buildParams(bt bait.Type, label string, cfg *config.Config) (bait.Params, e
 		}
 
 	case bait.TypeDocker:
-		p.FakeRegistry = token.NewDockerRegistryName()
+		p.FakeRegistry, err = token.NewDockerRegistryName()
+		if err != nil {
+			return p, err
+		}
 		// FakeToken used as a base64-encoded "auth" value (username:password)
 		// Docker stores base64(user:pass) in the auths section
 		rawToken, err2 := token.NewNPMToken() // reuse a random token format
@@ -464,7 +468,9 @@ func registerToken(cfg *config.Config, tokenID, canaryType, label string) error 
 	if resp.StatusCode >= 400 {
 		body, _ := io.ReadAll(resp.Body)
 		// Try to extract error message from JSON response
-		var errResp struct{ Error string `json:"error"` }
+		var errResp struct {
+			Error string `json:"error"`
+		}
 		if json.Unmarshal(body, &errResp) == nil && errResp.Error != "" {
 			return fmt.Errorf("registration failed: %s", errResp.Error)
 		}

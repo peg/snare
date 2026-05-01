@@ -67,6 +67,24 @@ func TestHandleCanary_invalidToken(t *testing.T) {
 	}
 }
 
+func TestClientIPOnlyTrustsConfiguredProxies(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/c/test-token-abc123", nil)
+	req.RemoteAddr = "198.51.100.10:1234"
+	req.Header.Set("X-Forwarded-For", "203.0.113.8")
+
+	if got := clientIP(req, nil); got != "198.51.100.10" {
+		t.Fatalf("clientIP without trusted proxies = %q, want remote addr", got)
+	}
+
+	trusted, err := parseTrustedProxyCIDRs([]string{"198.51.100.0/24"})
+	if err != nil {
+		t.Fatalf("parseTrustedProxyCIDRs: %v", err)
+	}
+	if got := clientIP(req, trusted); got != "203.0.113.8" {
+		t.Fatalf("clientIP with trusted proxy = %q, want forwarded IP", got)
+	}
+}
+
 func TestHandleCanary_storesEvent(t *testing.T) {
 	s := testServer(t)
 
@@ -205,7 +223,64 @@ func TestHandleCreateDevice_shortSecret(t *testing.T) {
 	}
 }
 
+func TestHandleRotate_updatesDeviceSecret(t *testing.T) {
+	s := testServer(t)
+
+	const (
+		deviceID  = "dev-rotate-test"
+		oldSecret = "oldsecret000000000000000000000001"
+		newSecret = "newsecret000000000000000000000001"
+	)
+	if err := s.db.createDevice(deviceID, oldSecret); err != nil {
+		t.Fatalf("createDevice: %v", err)
+	}
+
+	body, _ := json.Marshal(map[string]string{
+		"device_id":  deviceID,
+		"new_secret": newSecret,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/rotate", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+oldSecret)
+	rr := httptest.NewRecorder()
+
+	s.handleRotate(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	oldReq := httptest.NewRequest(http.MethodPost, "/api/register", nil)
+	oldReq.Header.Set("Authorization", "Bearer "+oldSecret)
+	ok, err := s.validateDevice(oldReq, deviceID)
+	if err != nil {
+		t.Fatalf("validateDevice old secret: %v", err)
+	}
+	if ok {
+		t.Fatal("old secret still valid after rotation")
+	}
+
+	newReq := httptest.NewRequest(http.MethodPost, "/api/register", nil)
+	newReq.Header.Set("Authorization", "Bearer "+newSecret)
+	ok, err = s.validateDevice(newReq, deviceID)
+	if err != nil {
+		t.Fatalf("validateDevice new secret: %v", err)
+	}
+	if !ok {
+		t.Fatal("new secret not valid after rotation")
+	}
+}
+
 // ─── Health ──────────────────────────────────────────────────────────────────
+
+func TestDiscordPayloadFooterMatchesWorkerPrivacyCopy(t *testing.T) {
+	payload := buildDiscordPayload(event{TokenID: "tok-12345678", Timestamp: "2026-04-15T16:00:00Z", Method: "GET", IP: "1.2.3.4", UserAgent: "ua"}, nil, canaryTypeMeta{Name: "Canary", Emoji: "🎣"}, false)
+	embeds := payload["embeds"].([]map[string]interface{})
+	footer := embeds[0]["footer"].(map[string]string)["text"]
+	if footer != "snare-server · IP, UA, timestamp only — no request body" {
+		t.Fatalf("footer = %q", footer)
+	}
+}
 
 func TestHandleHealth(t *testing.T) {
 	s := testServer(t)
@@ -308,6 +383,61 @@ func TestHandleCanary_registeredTokenFiresWebhook(t *testing.T) {
 
 	if !called {
 		t.Error("webhook was NOT called for a registered token — expected webhook delivery")
+	}
+}
+
+func TestHandleEventsAfterRevokeStillRequiresOriginalOwner(t *testing.T) {
+	s := testServer(t)
+
+	const (
+		ownerDeviceID  = "dev-owner-001"
+		ownerSecret    = "ownersecret0000000000000000000001"
+		otherDeviceID  = "dev-other-001"
+		otherSecret    = "othersecret0000000000000000000001"
+		tokenID        = "token-events-abc123"
+		registeredAt   = "2026-04-27T22:00:00Z"
+		eventTimestamp = "2026-04-27T22:05:00Z"
+	)
+
+	if err := s.db.createDevice(ownerDeviceID, ownerSecret); err != nil {
+		t.Fatalf("create owner device: %v", err)
+	}
+	if err := s.db.createDevice(otherDeviceID, otherSecret); err != nil {
+		t.Fatalf("create other device: %v", err)
+	}
+	if err := s.db.upsertToken(tokenReg{
+		TokenID:      tokenID,
+		DeviceID:     ownerDeviceID,
+		WebhookURL:   "use-global",
+		CanaryType:   "awsproc",
+		Label:        "prod",
+		RegisteredAt: registeredAt,
+	}); err != nil {
+		t.Fatalf("upsertToken: %v", err)
+	}
+
+	s.processAlert(tokenID, "1.2.3.4", "curl/8.0", "GET", "/c/"+tokenID, eventTimestamp, false)
+
+	if err := s.db.deleteToken(tokenID); err != nil {
+		t.Fatalf("deleteToken: %v", err)
+	}
+
+	unauthReq := httptest.NewRequest(http.MethodGet, "/api/events/"+tokenID, nil)
+	unauthReq.Header.Set("Authorization", "Bearer "+otherSecret)
+	unauthReq.Header.Set("X-Snare-Device-Id", otherDeviceID)
+	unauthRR := httptest.NewRecorder()
+	s.handleEvents(unauthRR, unauthReq)
+	if unauthRR.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong owner status = %d, want 401", unauthRR.Code)
+	}
+
+	ownerReq := httptest.NewRequest(http.MethodGet, "/api/events/"+tokenID, nil)
+	ownerReq.Header.Set("Authorization", "Bearer "+ownerSecret)
+	ownerReq.Header.Set("X-Snare-Device-Id", ownerDeviceID)
+	ownerRR := httptest.NewRecorder()
+	s.handleEvents(ownerRR, ownerReq)
+	if ownerRR.Code != http.StatusOK {
+		t.Fatalf("owner status = %d, want 200: %s", ownerRR.Code, ownerRR.Body.String())
 	}
 }
 

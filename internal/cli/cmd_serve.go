@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 
 	"github.com/peg/snare/internal/serve"
@@ -18,6 +19,7 @@ func cmdServe(args []string) {
 	tlsDomain  := flagValue(args, "--tls-domain")
 	webhookURL := flagValue(args, "--webhook-url")
 	dashToken  := flagValue(args, "--dashboard-token")
+	trustedProxy := flagValue(args, "--trusted-proxy")
 
 	// Also accept token from env var
 	if dashToken == "" {
@@ -56,6 +58,9 @@ func cmdServe(args []string) {
 	}
 	if webhookURL != "" {
 		cfg.WebhookURL = webhookURL
+	}
+	if trustedProxy != "" {
+		cfg.TrustedProxyCIDRs = strings.Split(trustedProxy, ",")
 	}
 
 	srv, err := serve.New(cfg)

@@ -23,11 +23,12 @@ const sessionCookieName = "snare_session"
 
 // Config holds the server configuration.
 type Config struct {
-	Port           int    // listen port (default 8080)
-	DBPath         string // path to SQLite database
-	TLSDomain      string // if set, enable Let's Encrypt TLS
-	WebhookURL     string // global fallback webhook URL
-	DashboardToken string // bearer token for dashboard + dashboard API auth (required)
+	Port              int      // listen port (default 8080)
+	DBPath            string   // path to SQLite database
+	TLSDomain         string   // if set, enable Let's Encrypt TLS
+	WebhookURL        string   // global fallback webhook URL
+	DashboardToken    string   // bearer token for dashboard + dashboard API auth (required)
+	TrustedProxyCIDRs []string // trusted reverse proxies allowed to supply X-Forwarded-For / X-Real-IP
 }
 
 // DefaultConfig returns sensible defaults.
@@ -41,10 +42,11 @@ func DefaultConfig() Config {
 
 // Server is the snare self-hosted server.
 type Server struct {
-	cfg           Config
-	db            *DB
-	mux           *http.ServeMux
-	sessionSecret []byte // random secret generated at startup for HMAC session cookies
+	cfg              Config
+	db               *DB
+	mux              *http.ServeMux
+	sessionSecret    []byte // random secret generated at startup for HMAC session cookies
+	trustedProxyNets []*net.IPNet
 }
 
 // tokenPattern validates token IDs in URL paths.
@@ -71,7 +73,12 @@ func New(cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("generating session secret: %w", err)
 	}
 
-	s := &Server{cfg: cfg, db: db, mux: http.NewServeMux(), sessionSecret: secret}
+	trustedProxyNets, err := parseTrustedProxyCIDRs(cfg.TrustedProxyCIDRs)
+	if err != nil {
+		return nil, fmt.Errorf("parsing trusted proxy CIDRs: %w", err)
+	}
+
+	s := &Server{cfg: cfg, db: db, mux: http.NewServeMux(), sessionSecret: secret, trustedProxyNets: trustedProxyNets}
 	s.routes()
 	return s, nil
 }
@@ -86,6 +93,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/devices", s.handleCreateDevice)
 	s.mux.HandleFunc("/api/register", s.handleRegister)
 	s.mux.HandleFunc("/api/revoke", s.handleRevoke)
+	s.mux.HandleFunc("/api/rotate", s.handleRotate)
 	s.mux.HandleFunc("/api/events/", s.handleEvents)
 
 	// Dashboard auth: login / logout
@@ -323,19 +331,71 @@ func jsonResp(w http.ResponseWriter, status int, v interface{}) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-func clientIP(r *http.Request) string {
-	// Honour standard proxy headers when running behind a reverse proxy.
-	if ip := r.Header.Get("X-Forwarded-For"); ip != "" {
-		// X-Forwarded-For can contain a comma-separated list; take the first.
-		if parts := strings.SplitN(ip, ",", 2); len(parts) > 0 {
-			return strings.TrimSpace(parts[0])
+func clientIP(r *http.Request, trustedProxyNets []*net.IPNet) string {
+	remoteIP := remoteAddrIP(r.RemoteAddr)
+	if trustedProxy(remoteIP, trustedProxyNets) {
+		if ip := firstForwardedIP(r.Header.Get("X-Forwarded-For")); ip != "" {
+			return ip
+		}
+		if ip := strings.TrimSpace(r.Header.Get("X-Real-Ip")); ip != "" {
+			return ip
 		}
 	}
-	if ip := r.Header.Get("X-Real-Ip"); ip != "" {
-		return ip
+	return remoteIP
+}
+
+func remoteAddrIP(remoteAddr string) string {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err == nil {
+		return host
 	}
-	host, _, _ := net.SplitHostPort(r.RemoteAddr)
-	return host
+	return remoteAddr
+}
+
+func firstForwardedIP(xff string) string {
+	if xff == "" {
+		return ""
+	}
+	parts := strings.SplitN(xff, ",", 2)
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(parts[0])
+}
+
+func parseTrustedProxyCIDRs(cidrs []string) ([]*net.IPNet, error) {
+	if len(cidrs) == 0 {
+		return nil, nil
+	}
+	trusted := make([]*net.IPNet, 0, len(cidrs))
+	for _, cidr := range cidrs {
+		cidr = strings.TrimSpace(cidr)
+		if cidr == "" {
+			continue
+		}
+		_, network, err := net.ParseCIDR(cidr)
+		if err != nil {
+			return nil, fmt.Errorf("%q: %w", cidr, err)
+		}
+		trusted = append(trusted, network)
+	}
+	return trusted, nil
+}
+
+func trustedProxy(remoteIP string, trustedProxyNets []*net.IPNet) bool {
+	if len(trustedProxyNets) == 0 {
+		return false
+	}
+	ip := net.ParseIP(remoteIP)
+	if ip == nil {
+		return false
+	}
+	for _, network := range trustedProxyNets {
+		if network.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 // newID generates a random hex-encoded ID with the given prefix.

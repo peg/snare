@@ -1,5 +1,20 @@
 import { describe, it, expect } from "vitest";
-import { CANARY_TYPES, shouldFilter, resolveWebhooks, SCANNER_ORGS } from "./index.js";
+import { readFileSync } from "node:fs";
+import worker, { CANARY_TYPES, shouldFilter, resolveWebhooks, SCANNER_ORGS, validateAuth } from "./index.js";
+
+// ─── Log hygiene ────────────────────────────────────────────────────────────
+
+describe("log hygiene", () => {
+  it("does not log raw webhook URLs or canary token IDs in failure paths", () => {
+    const source = readFileSync(new URL("./index.js", import.meta.url), "utf8");
+
+    expect(source).not.toContain("ALERT_ERROR token=${token}");
+    expect(source).not.toContain('console.log("UNREGISTERED_TOKEN", token');
+    expect(source).not.toContain("WEBHOOK_FAILED url=${webhooks[i]} token=${token}");
+    expect(source).toContain("ALERT_ERROR token=***");
+    expect(source).toContain("WEBHOOK_FAILED url=*** token=***");
+  });
+});
 
 // ─── Token pattern validation ────────────────────────────────────────────────
 // The worker uses this regex for canary callback matching:
@@ -161,6 +176,91 @@ describe("CANARY_TYPES completeness", () => {
 });
 
 // ─── resolveWebhooks ─────────────────────────────────────────────────────────
+
+describe("validateAuth", () => {
+  it("rejects unknown devices instead of auto-registering them", async () => {
+    const req = new Request("https://snare.sh/api/register", {
+      headers: { authorization: "Bearer supersecret-supersecret-supersecret!!" },
+    });
+    const env = { SNARE_KV: { get: async () => null } };
+
+    const result = await validateAuth(req, env, "dev-missing");
+    expect(result.ok).toBe(false);
+    expect(result.error).toBe("unknown device_id");
+  });
+
+  it("accepts an existing device with the correct secret", async () => {
+    const encoder = new TextEncoder();
+    const hashBuf = await crypto.subtle.digest("SHA-256", encoder.encode("supersecret-supersecret-supersecret!!"));
+    const secretHash = Array.from(new Uint8Array(hashBuf)).map(b => b.toString(16).padStart(2, "0")).join("");
+
+    const req = new Request("https://snare.sh/api/register", {
+      headers: { authorization: "Bearer supersecret-supersecret-supersecret!!" },
+    });
+    const env = {
+      SNARE_KV: {
+        get: async (key) => key === "device:dev-known" ? JSON.stringify({ secret_hash: secretHash }) : null,
+      },
+    };
+
+    const result = await validateAuth(req, env, "dev-known");
+    expect(result.ok).toBe(true);
+    expect(result.deviceId).toBe("dev-known");
+  });
+});
+
+describe("event ownership after revoke", () => {
+  it("still requires the original owner device to read stored events", async () => {
+    const ownerSecret = "ownersecret000000000000000000000001";
+    const ownerDevice = "dev-owner";
+    const otherSecret = "othersecret000000000000000000000001";
+    const otherDevice = "dev-other";
+    const token = "token-events-abc123";
+
+    const sha256 = async (input) => {
+      const hashBuf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(input));
+      return Array.from(new Uint8Array(hashBuf)).map(b => b.toString(16).padStart(2, "0")).join("");
+    };
+
+    const kv = new Map([
+      [`device:${ownerDevice}`, JSON.stringify({ secret_hash: await sha256(ownerSecret) })],
+      [`device:${otherDevice}`, JSON.stringify({ secret_hash: await sha256(otherSecret) })],
+      [`event:${token}:1:a`, JSON.stringify({ token, device_id: ownerDevice, timestamp: "2026-04-27T22:05:00Z", ip: "1.2.3.4" })],
+    ]);
+
+    const env = {
+      SNARE_KV: {
+        get: async (key) => kv.has(key) ? kv.get(key) : null,
+        put: async (key, value) => { kv.set(key, value); },
+        delete: async (key) => { kv.delete(key); },
+        list: async ({ prefix, limit }) => ({
+          keys: [...kv.keys()].filter(k => k.startsWith(prefix)).slice(0, limit).map(name => ({ name })),
+        }),
+      },
+    };
+
+    const wrongReq = new Request(`https://snare.sh/api/events/${token}`, {
+      headers: {
+        authorization: `Bearer ${otherSecret}`,
+        "x-snare-device-id": otherDevice,
+      },
+    });
+    const wrongResp = await worker.fetch(wrongReq, env, { waitUntil() {} });
+    expect(wrongResp.status).toBe(401);
+
+    const ownerReq = new Request(`https://snare.sh/api/events/${token}`, {
+      headers: {
+        authorization: `Bearer ${ownerSecret}`,
+        "x-snare-device-id": ownerDevice,
+      },
+    });
+    const ownerResp = await worker.fetch(ownerReq, env, { waitUntil() {} });
+    expect(ownerResp.status).toBe(200);
+    const body = await ownerResp.json();
+    expect(body.events).toHaveLength(1);
+    expect(body.events[0].token).toBe(token);
+  });
+});
 
 describe("resolveWebhooks", () => {
   it("returns registered=true for a registered token", async () => {
