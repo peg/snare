@@ -467,7 +467,9 @@ Naming tip:
 	fmt.Println("  Next checks:")
 	fmt.Println("    snare status   show event state; `never fired` is normal at first")
 	fmt.Println("    snare scan     verify planted files are present and unchanged")
-	fmt.Println("    snare doctor   check config, callback health, and canary files")
+	fmt.Println("    snare doctor   confidence screen: config, API, ownership, and test health")
+	fmt.Println("    snare repair   re-sync registrations safely if doctor finds drift")
+	fmt.Println("    snare prove    print safe precision trigger commands (awsproc/ssh/k8s)")
 	fmt.Println("    snare events   view real hits when one arrives")
 	fmt.Println("  Run `snare disarm` to remove everything.")
 }

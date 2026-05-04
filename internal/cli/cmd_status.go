@@ -537,7 +537,7 @@ func cmdTest(args []string) {
 	}
 
 	callbackURL := cfg.CallbackURL(testTokenID)
-	fmt.Printf("Firing test alert...\n  %s\n\n", callbackURL)
+	fmt.Println("Firing test alert...")
 
 	err = httpGet(callbackURL)
 	if err != nil {

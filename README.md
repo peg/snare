@@ -93,7 +93,9 @@ By default, `snare arm` uses **precision mode**: only `awsproc`, `ssh`, and `k8s
   Next checks:
     snare status   show event state; `never fired` is normal at first
     snare scan     verify planted files are present and unchanged
-    snare doctor   check config, callback health, and canary files
+    snare doctor   confidence screen: config, API, ownership, and test health
+    snare repair   re-sync registrations safely if doctor finds drift
+    snare prove    print safe precision trigger commands (awsproc/ssh/k8s)
     snare events   view real hits when one arrives
 ```
 
@@ -118,11 +120,14 @@ snare arm --all              # plant all 18 canary types
 snare disarm                 # remove all canaries (keep config)
 snare disarm --purge         # remove canaries + ~/.snare/ config
 snare status                 # show active canaries + event state
+snare repair                 # re-register active tokens + run a live test check
+snare sync                   # alias for snare repair
+snare prove [--type <t>]     # guided precision trigger commands (awsproc/ssh/k8s)
 snare events                 # fetch recent alert history from snare.sh
 snare events --summary       # ASN/UA distribution across all canaries
 snare scan                   # check canary integrity on disk
 snare test                   # fire a test alert to verify your webhook
-snare doctor                 # validate configuration and canary health
+snare doctor [--test]        # confidence screen; add --test for live callback proof
 snare config                 # show current config
 snare config set webhook <url>  # update webhook URL
 snare rotate                 # rotate device secret (if config.json was exposed)
@@ -140,6 +145,26 @@ snare plant --type k8s --label prod-cluster
 snare teardown --token <id>  # remove a specific canary
 snare teardown --dry-run     # preview what would be removed
 ```
+
+---
+
+## Confidence loop (first 10 minutes)
+
+After `snare arm`, the expected healthy loop is:
+
+- `snare status` shows active canaries and event state. `never fired` is normal until someone actively uses a planted fake credential.
+- `snare scan` is local-only integrity: present/modified/missing/orphaned files. It does not fire alerts.
+- `snare doctor` is the confidence screen: config, callback health, local canary files, token ownership, events API readability, and webhook test history.
+- `snare doctor --test` runs a live callback test and verifies it is readable in the events API.
+- `snare test` sends a synthetic callback test only (fast delivery check).
+- `snare events` shows real hit history; empty output on fresh installs is expected.
+- `snare repair` (or `snare sync`) safely re-registers active tokens and re-tests delivery when drift is detected.
+- `snare prove` prints safe precision trigger commands so you can intentionally prove alerts fire for `awsproc`, `ssh`, and `k8s`.
+
+Important state distinction:
+
+- `never fired` means token is registered/readable and no real callback has happened yet.
+- `events unavailable` means API/auth/readability failed for that token; run `snare doctor`, then `snare repair` if needed.
 
 ---
 

@@ -94,7 +94,7 @@ func cmdEvents(args []string) {
 		defer resp.Body.Close()
 
 		if resp.StatusCode == 401 || resp.StatusCode == 403 {
-			fmt.Fprintf(os.Stderr, "  ✗ auth failed — run `snare arm --webhook <url>` to re-register\n")
+			fmt.Fprintf(os.Stderr, "  ✗ auth failed — run `snare repair` to re-sync registrations and auth\n")
 			authFailed = true
 			break
 		}

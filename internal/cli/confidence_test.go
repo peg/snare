@@ -1,0 +1,575 @@
+package cli_test
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/peg/snare/internal/manifest"
+)
+
+type fakeTokenReg struct {
+	DeviceID string
+}
+
+type fakeEvent struct {
+	Token     string `json:"token"`
+	IsTest    bool   `json:"is_test"`
+	Timestamp string `json:"timestamp"`
+	IP        string `json:"ip"`
+	UserAgent string `json:"userAgent"`
+	Method    string `json:"method"`
+	Path      string `json:"path"`
+}
+
+type fakeSnareAPI struct {
+	mu      sync.Mutex
+	devices map[string]string
+	tokens  map[string]fakeTokenReg
+	events  map[string][]fakeEvent
+	nextDev int
+	server  *httptest.Server
+}
+
+func newFakeSnareAPI(t *testing.T) *fakeSnareAPI {
+	t.Helper()
+
+	f := &fakeSnareAPI{
+		devices: map[string]string{},
+		tokens:  map[string]fakeTokenReg{},
+		events:  map[string][]fakeEvent{},
+	}
+
+	f.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/health" && r.Method == http.MethodGet:
+			writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+			return
+		case r.URL.Path == "/api/devices" && r.Method == http.MethodPost:
+			f.handleCreateDevice(w, r)
+			return
+		case r.URL.Path == "/api/register" && r.Method == http.MethodPost:
+			f.handleRegister(w, r)
+			return
+		case r.URL.Path == "/api/revoke" && r.Method == http.MethodPost:
+			f.handleRevoke(w, r)
+			return
+		case strings.HasPrefix(r.URL.Path, "/api/events/") && r.Method == http.MethodGet:
+			f.handleEvents(w, r)
+			return
+		case strings.HasPrefix(r.URL.Path, "/c/"):
+			f.handleCallback(w, r)
+			return
+		default:
+			http.NotFound(w, r)
+			return
+		}
+	}))
+
+	return f
+}
+
+func (f *fakeSnareAPI) URL() string {
+	return f.server.URL
+}
+
+func (f *fakeSnareAPI) Close() {
+	f.server.Close()
+}
+
+func (f *fakeSnareAPI) AddDevice(deviceID, secret string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.devices[deviceID] = secret
+}
+
+func (f *fakeSnareAPI) ClearRegistrations() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.tokens = map[string]fakeTokenReg{}
+}
+
+func (f *fakeSnareAPI) TokenCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.tokens)
+}
+
+func (f *fakeSnareAPI) HasToken(tokenID string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	_, ok := f.tokens[tokenID]
+	return ok
+}
+
+func (f *fakeSnareAPI) handleCreateDevice(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		DeviceSecret string `json:"device_secret"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.DeviceSecret) < 32 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
+		return
+	}
+
+	f.mu.Lock()
+	f.nextDev++
+	deviceID := fmt.Sprintf("dev-fake-%d", f.nextDev)
+	f.devices[deviceID] = body.DeviceSecret
+	f.mu.Unlock()
+
+	writeJSON(w, http.StatusOK, map[string]string{
+		"status":    "created",
+		"device_id": deviceID,
+	})
+}
+
+func (f *fakeSnareAPI) handleRegister(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		TokenID    string `json:"token_id"`
+		WebhookURL string `json:"webhook_url"`
+		DeviceID   string `json:"device_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
+	if body.TokenID == "" || body.WebhookURL == "" || body.DeviceID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing fields"})
+		return
+	}
+	if !f.validateAuth(r, body.DeviceID) {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid device secret"})
+		return
+	}
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if existing, ok := f.tokens[body.TokenID]; ok && existing.DeviceID != body.DeviceID {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "token already registered to another device"})
+		return
+	}
+	f.tokens[body.TokenID] = fakeTokenReg{DeviceID: body.DeviceID}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "registered", "token_id": body.TokenID})
+}
+
+func (f *fakeSnareAPI) handleRevoke(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		TokenID  string `json:"token_id"`
+		DeviceID string `json:"device_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
+	if body.TokenID == "" || body.DeviceID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing fields"})
+		return
+	}
+	if !f.validateAuth(r, body.DeviceID) {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid device secret"})
+		return
+	}
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if reg, ok := f.tokens[body.TokenID]; ok && reg.DeviceID != body.DeviceID {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "device_id mismatch"})
+		return
+	}
+	delete(f.tokens, body.TokenID)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "revoked", "token_id": body.TokenID})
+}
+
+func (f *fakeSnareAPI) handleEvents(w http.ResponseWriter, r *http.Request) {
+	tokenID := strings.TrimPrefix(r.URL.Path, "/api/events/")
+	tokenID = strings.TrimSuffix(tokenID, "/")
+	if tokenID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid token"})
+		return
+	}
+
+	f.mu.Lock()
+	reg, ok := f.tokens[tokenID]
+	events := append([]fakeEvent(nil), f.events[tokenID]...)
+	f.mu.Unlock()
+
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "token not registered"})
+		return
+	}
+	if !f.validateAuth(r, reg.DeviceID) {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid device secret"})
+		return
+	}
+	if len(events) == 0 {
+		writeJSON(w, http.StatusNotFound, map[string]interface{}{"token": tokenID, "events": []fakeEvent{}})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"token": tokenID, "events": events})
+}
+
+func (f *fakeSnareAPI) handleCallback(w http.ResponseWriter, r *http.Request) {
+	token := strings.TrimPrefix(r.URL.Path, "/c/")
+	if idx := strings.Index(token, "/"); idx >= 0 {
+		token = token[:idx]
+	}
+	if token == "" {
+		http.NotFound(w, r)
+		return
+	}
+
+	e := fakeEvent{
+		Token:     token,
+		IsTest:    strings.HasPrefix(token, "snare-test-"),
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		IP:        "127.0.0.1",
+		UserAgent: "snare-cli-test",
+		Method:    r.Method,
+		Path:      r.URL.Path,
+	}
+
+	f.mu.Lock()
+	f.events[token] = append([]fakeEvent{e}, f.events[token]...)
+	f.mu.Unlock()
+
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.WriteString(w, "ok")
+}
+
+func (f *fakeSnareAPI) validateAuth(r *http.Request, deviceID string) bool {
+	secret := bearerSecret(r.Header.Get("Authorization"))
+	if secret == "" || deviceID == "" {
+		return false
+	}
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	stored, ok := f.devices[deviceID]
+	if !ok {
+		return false
+	}
+	return stored == secret
+}
+
+func bearerSecret(authHeader string) string {
+	if authHeader == "" {
+		return ""
+	}
+	parts := strings.SplitN(authHeader, " ", 2)
+	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
+		return ""
+	}
+	return strings.TrimSpace(parts[1])
+}
+
+func writeJSON(w http.ResponseWriter, status int, v interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func writeTestConfig(t *testing.T, home, callbackBase, deviceID, deviceSecret, webhookURL string) {
+	t.Helper()
+	snareDir := filepath.Join(home, ".snare")
+	if err := os.MkdirAll(snareDir, 0700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	cfg := map[string]string{
+		"device_id":     deviceID,
+		"device_secret": deviceSecret,
+		"callback_base": callbackBase,
+		"webhook_url":   webhookURL,
+	}
+	if err := os.WriteFile(filepath.Join(snareDir, "config.json"), mustMarshalJSON(t, cfg), 0600); err != nil {
+		t.Fatalf("WriteFile config: %v", err)
+	}
+}
+
+func writeTestManifest(t *testing.T, home string, m manifest.Manifest) {
+	t.Helper()
+	snareDir := filepath.Join(home, ".snare")
+	if err := os.MkdirAll(snareDir, 0700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(snareDir, "manifest.json"), mustMarshalJSON(t, m), 0600); err != nil {
+		t.Fatalf("WriteFile manifest: %v", err)
+	}
+}
+
+func TestConfidenceSmokeFlow(t *testing.T) {
+	home := t.TempDir()
+	api := newFakeSnareAPI(t)
+	defer api.Close()
+
+	deviceID := "dev-smoke-flow"
+	deviceSecret := strings.Repeat("a", 64)
+	api.AddDevice(deviceID, deviceSecret)
+
+	writeTestConfig(t, home, api.URL()+"/c", deviceID, deviceSecret, "")
+	writeTestManifest(t, home, manifest.Manifest{Version: 2, DeviceID: deviceID, Canaries: []manifest.Canary{}})
+
+	stdout, stderr, exitCode := runSnare(t, home, "arm", "--webhook", "https://hooks.example.test/snare")
+	if exitCode != 0 {
+		t.Fatalf("arm failed:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+	}
+	if !strings.Contains(stdout, "webhook test fired") {
+		t.Fatalf("arm output should include webhook test, got:\n%s", stdout)
+	}
+	if api.TokenCount() < 4 { // 3 precision tokens + 1 test token
+		t.Fatalf("expected at least 4 registered tokens after arm, got %d", api.TokenCount())
+	}
+
+	stdout, stderr, exitCode = runSnare(t, home, "status")
+	if exitCode != 0 {
+		t.Fatalf("status failed:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+	}
+	if !strings.Contains(stdout, "never fired") {
+		t.Fatalf("status should mark fresh precision canaries as never fired, got:\n%s", stdout)
+	}
+
+	stdout, stderr, exitCode = runSnare(t, home, "scan")
+	if exitCode != 0 {
+		t.Fatalf("scan failed:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+	}
+	if !strings.Contains(stdout, "All active canary files are present and unchanged") {
+		t.Fatalf("scan should show healthy files, got:\n%s", stdout)
+	}
+
+	stdout, stderr, exitCode = runSnare(t, home, "events")
+	if exitCode != 0 {
+		t.Fatalf("events failed:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+	}
+	if !strings.Contains(stdout, "No real events recorded yet") {
+		t.Fatalf("events should explain quiet first-run state, got:\n%s", stdout)
+	}
+
+	stdout, stderr, exitCode = runSnare(t, home, "doctor")
+	if exitCode != 0 {
+		t.Fatalf("doctor failed:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+	}
+	if !strings.Contains(stdout, "Token ownership") || !strings.Contains(stdout, "Events API") {
+		t.Fatalf("doctor output missing confidence checks, got:\n%s", stdout)
+	}
+
+	api.ClearRegistrations()
+
+	stdout, stderr, exitCode = runSnare(t, home, "repair")
+	if exitCode != 0 {
+		t.Fatalf("repair failed:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+	}
+	if !strings.Contains(stdout, "Repair complete") {
+		t.Fatalf("repair should finish successfully, got:\n%s", stdout)
+	}
+
+	stdout, stderr, exitCode = runSnare(t, home, "disarm")
+	if exitCode != 0 {
+		t.Fatalf("disarm failed:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+	}
+	if !strings.Contains(stdout, "Machine disarmed") {
+		t.Fatalf("disarm output missing completion message, got:\n%s", stdout)
+	}
+}
+
+func TestDoctorDetectsUnregisteredWithoutLeakingSecrets(t *testing.T) {
+	home := t.TempDir()
+	api := newFakeSnareAPI(t)
+	defer api.Close()
+
+	deviceID := "dev-doctor-unregistered"
+	deviceSecret := strings.Repeat("b", 64)
+	webhookURL := "https://hooks.example.test/very-secret-webhook"
+	api.AddDevice(deviceID, deviceSecret)
+	writeTestConfig(t, home, api.URL()+"/c", deviceID, deviceSecret, webhookURL)
+
+	tokenID := "doctor-token-abc12345"
+	canaryPath := filepath.Join(home, "canary-doctor.txt")
+	canaryContent := "token=" + tokenID + "\n"
+	if err := os.WriteFile(canaryPath, []byte(canaryContent), 0600); err != nil {
+		t.Fatalf("WriteFile canary: %v", err)
+	}
+	writeTestManifest(t, home, manifest.Manifest{
+		Version:  2,
+		DeviceID: deviceID,
+		Canaries: []manifest.Canary{
+			{
+				ID:          tokenID,
+				Type:        "awsproc",
+				Label:       "doctor",
+				Path:        canaryPath,
+				Mode:        manifest.ModeNewFile,
+				Content:     canaryContent,
+				ContentHash: manifest.HashContent(canaryContent),
+				PlantedAt:   time.Now(),
+				Active:      true,
+			},
+		},
+	})
+
+	stdout, stderr, exitCode := runSnare(t, home, "doctor")
+	if exitCode == 0 {
+		t.Fatalf("doctor should fail when active token is unregistered:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+	}
+	combined := stdout + stderr
+	if !strings.Contains(combined, "not registered") || !strings.Contains(combined, "snare repair") {
+		t.Fatalf("doctor should explain unregistered drift and repair path, got:\n%s", combined)
+	}
+	if strings.Contains(combined, webhookURL) {
+		t.Fatalf("doctor leaked webhook URL:\n%s", combined)
+	}
+	if strings.Contains(combined, deviceSecret) {
+		t.Fatalf("doctor leaked device secret:\n%s", combined)
+	}
+}
+
+func TestRepairReRegistersTokenAndRunsTest(t *testing.T) {
+	home := t.TempDir()
+	api := newFakeSnareAPI(t)
+	defer api.Close()
+
+	deviceID := "dev-repair-flow"
+	deviceSecret := strings.Repeat("c", 64)
+	webhookURL := "https://hooks.example.test/repair-hook"
+	api.AddDevice(deviceID, deviceSecret)
+	writeTestConfig(t, home, api.URL()+"/c", deviceID, deviceSecret, webhookURL)
+
+	tokenID := "repair-token-abc12345"
+	canaryPath := filepath.Join(home, "canary-repair.txt")
+	canaryContent := "token=" + tokenID + "\n"
+	if err := os.WriteFile(canaryPath, []byte(canaryContent), 0600); err != nil {
+		t.Fatalf("WriteFile canary: %v", err)
+	}
+	writeTestManifest(t, home, manifest.Manifest{
+		Version:  2,
+		DeviceID: deviceID,
+		Canaries: []manifest.Canary{
+			{
+				ID:          tokenID,
+				Type:        "ssh",
+				Label:       "repair",
+				Path:        canaryPath,
+				Mode:        manifest.ModeNewFile,
+				Content:     canaryContent,
+				ContentHash: manifest.HashContent(canaryContent),
+				PlantedAt:   time.Now(),
+				Active:      true,
+			},
+		},
+	})
+
+	stdout, stderr, exitCode := runSnare(t, home, "repair")
+	if exitCode != 0 {
+		t.Fatalf("repair should succeed:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+	}
+	if !api.HasToken(tokenID) {
+		t.Fatalf("repair should register active token %s", tokenID)
+	}
+	if !strings.Contains(stdout, "Repair complete") {
+		t.Fatalf("repair output missing completion message, got:\n%s", stdout)
+	}
+	if strings.Contains(stdout+stderr, webhookURL) {
+		t.Fatalf("repair leaked webhook URL:\n%s\n%s", stdout, stderr)
+	}
+	if strings.Contains(stdout+stderr, deviceSecret) {
+		t.Fatalf("repair leaked device secret:\n%s\n%s", stdout, stderr)
+	}
+}
+
+func TestProveShowsGuidedPrecisionCommands(t *testing.T) {
+	home := t.TempDir()
+	deviceID := "dev-prove-flow"
+	deviceSecret := strings.Repeat("d", 64)
+	writeTestConfig(t, home, "https://snare.sh/c", deviceID, deviceSecret, "https://hooks.example.test/prove")
+
+	awsPath := filepath.Join(home, ".aws", "config")
+	sshPath := filepath.Join(home, ".ssh", "config")
+	kubePath := filepath.Join(home, ".kube", "proof.yaml")
+	for _, p := range []string{awsPath, sshPath, kubePath} {
+		if err := os.MkdirAll(filepath.Dir(p), 0700); err != nil {
+			t.Fatalf("MkdirAll(%s): %v", p, err)
+		}
+	}
+
+	awsContent := `
+[profile prod-admin-proof]
+role_arn = arn:aws:iam::123456789012:role/OrganizationAccountAccessRole
+source_profile = prod-admin-proof-source
+
+[profile prod-admin-proof-source]
+credential_process = sh -c 'curl -sf https://snare.sh/c/awsproof'
+`
+	sshContent := `
+Host proof-bastion
+    HostName proof-bastion.internal
+    ProxyCommand curl -sf https://snare.sh/c/sshproof -o /dev/null && nc %h %p
+`
+	k8sContent := "apiVersion: v1\nkind: Config\n"
+	if err := os.WriteFile(awsPath, []byte(awsContent), 0600); err != nil {
+		t.Fatalf("WriteFile aws: %v", err)
+	}
+	if err := os.WriteFile(sshPath, []byte(sshContent), 0600); err != nil {
+		t.Fatalf("WriteFile ssh: %v", err)
+	}
+	if err := os.WriteFile(kubePath, []byte(k8sContent), 0600); err != nil {
+		t.Fatalf("WriteFile kube: %v", err)
+	}
+
+	writeTestManifest(t, home, manifest.Manifest{
+		Version:  2,
+		DeviceID: deviceID,
+		Canaries: []manifest.Canary{
+			{
+				ID:          "prove-awsproc-token1234",
+				Type:        "awsproc",
+				Path:        awsPath,
+				Mode:        manifest.ModeAppend,
+				Content:     awsContent,
+				ContentHash: manifest.HashContent(awsContent),
+				PlantedAt:   time.Now(),
+				Active:      true,
+			},
+			{
+				ID:          "prove-ssh-token123456",
+				Type:        "ssh",
+				Path:        sshPath,
+				Mode:        manifest.ModeAppend,
+				Content:     sshContent,
+				ContentHash: manifest.HashContent(sshContent),
+				PlantedAt:   time.Now(),
+				Active:      true,
+			},
+			{
+				ID:          "prove-k8s-token123456",
+				Type:        "k8s",
+				Path:        kubePath,
+				Mode:        manifest.ModeNewFile,
+				Content:     k8sContent,
+				ContentHash: manifest.HashContent(k8sContent),
+				PlantedAt:   time.Now(),
+				Active:      true,
+			},
+		},
+	})
+
+	stdout, stderr, exitCode := runSnare(t, home, "prove")
+	if exitCode != 0 {
+		t.Fatalf("prove should succeed:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+	}
+	for _, want := range []string{
+		"aws sts get-caller-identity --profile",
+		"ssh -F ~/.ssh/config",
+		"kubectl --kubeconfig",
+		"Add `--run`",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("prove output missing %q:\n%s", want, stdout)
+		}
+	}
+}

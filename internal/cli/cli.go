@@ -115,9 +115,12 @@ Commands:
   snare disarm [flags]         one-command teardown
   snare status                 show active canaries
   snare scan                   check canary integrity on disk
+  snare repair                 safely re-sync token registrations + test health
+  snare sync                   alias for snare repair
+  snare prove [flags]          guided precision canary trigger proof (awsproc/ssh/k8s)
   snare events                 fetch recent alert events from snare.sh
   snare test                   fire a test alert to verify your webhook
-  snare doctor                 validate configuration and canary health
+  snare doctor [--test]        confidence screen: config, API, canaries, ownership, delivery
   snare config                 show current config
   snare config set webhook <url>  update webhook URL
   snare serve [flags]          run self-hosted callback server (replaces snare.sh)
@@ -184,6 +187,10 @@ func Run(args []string, version string) {
 		cmdStatus(rest)
 	case "scan":
 		cmdScan(rest)
+	case "repair", "sync":
+		cmdRepair(rest)
+	case "prove":
+		cmdProve(rest)
 	case "events":
 		cmdEvents(rest)
 	case "test":
