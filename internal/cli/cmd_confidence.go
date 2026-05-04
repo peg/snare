@@ -752,7 +752,7 @@ func buildPrecisionProofRecipe(c manifest.Canary) (precisionProofRecipe, error) 
 			Canary:   c,
 			Binary:   "kubectl",
 			Command:  "kubectl --kubeconfig " + shellQuote(c.Path) + " get namespaces --request-timeout=5s",
-			Expected: "kubectl request should fail/timeout, but kube API callback should fire",
+			Expected: "kubectl request should fail/timeout, but exec credential/server callback should fire",
 		}, nil
 	default:
 		return precisionProofRecipe{}, fmt.Errorf("unsupported precision type %q", c.Type)

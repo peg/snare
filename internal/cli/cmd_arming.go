@@ -20,9 +20,8 @@ var precisionTypes = []bait.Type{
 	bait.TypeAWSProc, // fires at credential resolution — before any API call
 	bait.TypeSSH,     // fires on SSH connection attempt via ProxyCommand
 	bait.TypeK8s,     // fires on any kubectl/SDK call to fake cluster
-	// TypeGit excluded: credential.helper requires HTTP 401 from the fake host,
-	// but the fake hostname has no DNS record so git errors at DNS resolution
-	// before ever asking for credentials. Medium-high reliability at best.
+	// TypeGit excluded from precision: url.insteadOf now makes fake-host use
+	// reliably callback, but it still requires attacker/tool use of that fake host.
 	// TypeAzure excluded: service-principal-credentials.json not in standard
 	// Azure SDK credential chain — requires agent to explicitly hunt the file.
 }
@@ -30,7 +29,7 @@ var precisionTypes = []bait.Type{
 // selectEntry describes one row in the --select TUI.
 type selectEntry struct {
 	t    bait.Type
-	tier string // "precision", "high", "medium"
+	tier string // "precision", "high", "high-noisy", "medium"
 	path string // short description of where it plants
 }
 
@@ -44,8 +43,9 @@ var allSelectEntries = []selectEntry{
 	{bait.TypeAWS, "high", "~/.aws/credentials (endpoint_url)"},
 	{bait.TypeGCP, "high", "~/.config/gcloud/sa-*.json (token_uri)"},
 	{bait.TypeNPM, "high", "~/.npmrc (scoped registry)"},
-	{bait.TypeGit, "high", "~/.gitconfig (credential.helper)"},
-	{bait.TypePyPI, "high", "~/.config/pip/pip.conf (extra-index-url) ⚠ side effect"},
+	{bait.TypeGit, "high", "~/.gitconfig (url.insteadOf + credential.helper)"},
+	// High-noisy: strong trigger, but global package config may fire during normal work
+	{bait.TypePyPI, "high-noisy", "~/.config/pip/pip.conf (extra-index-url) ⚠ side effect"},
 	// Medium: dotenv-dependent, DNS-dependent, or needs explicit credential scanning
 	{bait.TypeAzure, "medium", "~/.azure/service-principal-credentials.json"},
 	{bait.TypeOpenAI, "medium", "~/.env (OPENAI_BASE_URL)"},
@@ -76,9 +76,10 @@ func runSelectTUI() ([]bait.Type, error) {
 
 	cursor := 0
 	tierColors := map[string]string{
-		"precision": "\033[33m", // amber
-		"high":      "\033[32m", // green
-		"medium":    "\033[36m", // cyan
+		"precision":  "\033[33m", // amber
+		"high":       "\033[32m", // green
+		"high-noisy": "\033[35m", // magenta
+		"medium":     "\033[36m", // cyan
 	}
 	reset := "\033[0m"
 	bold := "\033[1m"

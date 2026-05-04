@@ -498,6 +498,7 @@ func cmdStatus(args []string) {
 	}
 	fmt.Println("  ◆ precision reliability — active-use only; near-zero false positives")
 	fmt.Println("  ● high reliability      — fires on credential use")
+	fmt.Println("  ▲ high-noisy reliability — strong trigger, may fire during normal work")
 	fmt.Println("  ◐ medium reliability    — conditional trigger path")
 	fmt.Println()
 	if anyNever {

@@ -64,3 +64,19 @@ func TestReliabilityDetailsForPrecisionTypes(t *testing.T) {
 		}
 	}
 }
+
+func TestReliabilityDemotionsAndNoisyTier(t *testing.T) {
+	if got := reliability(string(bait.TypeAzure)); got != "medium" {
+		t.Fatalf("azure reliability = %s, want medium", got)
+	}
+	if got := reliability(string(bait.TypeDocker)); got != "medium" {
+		t.Fatalf("docker reliability = %s, want medium", got)
+	}
+	if got := reliability(string(bait.TypePyPI)); got != "high-noisy" {
+		t.Fatalf("pypi reliability = %s, want high-noisy", got)
+	}
+	details := reliabilityDetailsFor(string(bait.TypePyPI))
+	if details.marker != "▲" || details.description == "" {
+		t.Fatalf("unexpected pypi reliability details: %+v", details)
+	}
+}

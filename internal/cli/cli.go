@@ -25,10 +25,11 @@ var httpClient = &http.Client{Timeout: 15 * time.Second}
 //
 //	precision — fires via existing SDK/OS plumbing, no agent hunting needed,
 //	            no DNS dependency, near-zero false positives
-//	high      — fires when credential is actively used, but requires agent to
-//	            find and use it, or has a DNS/runtime dependency
-//	medium    — fires conditionally: depends on dotenv loading, base URL
-//	            override support, or agent doing explicit credential scanning
+//	high       — fires when credential is actively used, but requires agent to
+//	             find and use it
+//	high-noisy — fires readily, but may also fire during normal developer work
+//	medium     — fires conditionally: depends on dotenv loading, base URL
+//	             override support, or agent doing explicit credential scanning
 func reliability(t string) string {
 	switch bait.Type(t) {
 	// Precision: fires via SDK/OS hooks before or during connection, no DNS needed
@@ -36,11 +37,13 @@ func reliability(t string) string {
 		return "precision"
 	// High: fires on active credential use, requires agent to find+use the cred
 	case bait.TypeAWS, // endpoint_url fires on any AWS SDK call with that profile
-		bait.TypeGCP,  // token_uri fires on GCP SDK auth (needs explicit file load)
-		bait.TypePyPI, // extra-index-url fires on pip install (own installs too — see warning)
-		bait.TypeNPM,  // scoped registry fires on npm install (scoped packages only)
-		bait.TypeGit:  // credential.helper fires if agent does git credential fill
+		bait.TypeGCP, // token_uri fires on GCP SDK auth (needs explicit file load)
+		bait.TypeNPM, // scoped registry fires on npm install (scoped packages only)
+		bait.TypeGit: // url.insteadOf fires on fake-host clone/ls-remote
 		return "high"
+	// High-noisy: strong trigger, but global config can fire during normal work
+	case bait.TypePyPI: // extra-index-url fires on pip install (own installs too — see warning)
+		return "high-noisy"
 	// Medium: dotenv-dependent, DNS-dependent, or requires explicit credential scanning
 	default:
 		return "medium"
@@ -66,6 +69,12 @@ func reliabilityDetailsFor(t string) reliabilityDetails {
 			tier:        "high",
 			marker:      "●",
 			description: "fires on credential use",
+		}
+	case "high-noisy":
+		return reliabilityDetails{
+			tier:        "high-noisy",
+			marker:      "▲",
+			description: "fires readily; may trigger during normal work",
 		}
 	default:
 		return reliabilityDetails{

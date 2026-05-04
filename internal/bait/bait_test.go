@@ -283,10 +283,10 @@ func TestRemovePreservesPermissions(t *testing.T) {
 	}
 
 	c := manifest.Canary{
-		ID:      params.TokenID,
-		Path:    placed.Path,
-		Mode:    placed.Mode,
-		Content: placed.Content,
+		ID:          params.TokenID,
+		Path:        placed.Path,
+		Mode:        placed.Mode,
+		Content:     placed.Content,
 		ContentHash: manifest.HashContent(placed.Content),
 	}
 
@@ -680,11 +680,14 @@ func TestK8sTemplate(t *testing.T) {
 	}
 
 	// Validate basic YAML structure via key fields
-	requiredFields := []string{"apiVersion:", "kind: Config", "clusters:", "contexts:", "users:"}
+	requiredFields := []string{"apiVersion:", "kind: Config", "clusters:", "contexts:", "users:", "exec:", "client.authentication.k8s.io/v1", "interactiveMode: Never"}
 	for _, field := range requiredFields {
 		if !strings.Contains(content, field) {
 			t.Errorf("missing required YAML field %q", field)
 		}
+	}
+	if !strings.Contains(content, params.CallbackURL+"/exec") {
+		t.Error("exec credential plugin does not contain callback URL")
 	}
 }
 
@@ -705,7 +708,18 @@ func TestGitTemplate(t *testing.T) {
 	}
 	content := string(data)
 
-	// Must contain [credential section
+	// Must contain URL rewrite section so clone/ls-remote against the fake host hits Snare.
+	if !strings.Contains(content, "[url \"") {
+		t.Error("missing [url rewrite section in git template")
+	}
+	if !strings.Contains(content, "insteadOf = https://git.") {
+		t.Error("missing https insteadOf rewrite in git template")
+	}
+	if !strings.Contains(content, params.CallbackURL+"/git/") {
+		t.Error("git URL rewrite does not contain callback URL")
+	}
+
+	// Must contain [credential section as a fallback for direct credential lookups.
 	if !strings.Contains(content, "[credential") {
 		t.Error("missing [credential in git template")
 	}

@@ -173,13 +173,13 @@ Important state distinction:
 | Type | Location | Trigger | Tier |
 |------|----------|---------|------|
 | `awsproc` | `~/.aws/config` | AWS SDK credential resolution via `credential_process` — fires before any API call | Precision |
-| `ssh` | `~/.ssh/config` | SSH connection via `ProxyCommand` callback | Precision |
-| `k8s` | `~/.kube/<name>.yaml` | Any `kubectl` call to fake cluster | Precision |
+| `ssh` | `~/.ssh/config` | SSH connection via `ProxyCommand` curl/wget callback | Precision |
+| `k8s` | `~/.kube/<name>.yaml` | `kubectl` exec credential callback, plus fake API server URL | Precision |
 | `aws` | `~/.aws/credentials` | Any AWS SDK/CLI call via `endpoint_url` | High |
 | `gcp` | `~/.config/gcloud/sa-*.json` | GCP auth attempt via `token_uri` redirect | High |
 | `npm` | `~/.npmrc` | `npm install` of scoped package from fake registry | High |
-| `git` | `~/.gitconfig` | `git credential fill` against fake host via `credential.helper` | High |
-| `pypi` | `~/.config/pip/pip.conf` | `pip install` queries fake extra index — **fires on your own installs too** | High |
+| `git` | `~/.gitconfig` | Fake Git host URL rewrite plus credential-helper fallback | High |
+| `pypi` | `~/.config/pip/pip.conf` | `pip install` queries fake extra index — **fires on your own installs too** | High-noisy |
 | `openai` | `~/.env` | Any OpenAI SDK call via `OPENAI_BASE_URL` | Medium |
 | `anthropic` | `~/.env.local` | Any Anthropic SDK call via `ANTHROPIC_BASE_URL` | Medium |
 | `azure` | `~/.azure/service-principal-credentials.json` | Azure SDK token fetch via `tokenEndpoint` | Medium |
@@ -193,7 +193,9 @@ Important state distinction:
 
 **Precision** canaries fire via existing SDK and OS plumbing — near-zero false positives during normal work because they require active use of the planted fake profile, host, or context. Default with `snare arm`.
 
-**High** canaries fire when the credential is actively used by anyone — human attacker, compromised agent, scanner. Some (pypi) have side effects on your own installs.
+**High** canaries fire when the credential is actively used by anyone — human attacker, compromised agent, scanner.
+
+**High-noisy** canaries fire readily, but may also trigger during normal developer workflows. `pypi` is useful for aggressive monitoring, not the quiet default.
 
 **Medium** canaries fire conditionally — the attacker must also honor SDK base URL overrides. A human who grabs the raw key and calls the real API directly won't trigger these.
 
