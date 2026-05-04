@@ -513,9 +513,10 @@ func cmdStatus(args []string) {
 	fmt.Println("  Run `snare events` to fetch recent alert history.")
 }
 
-// cmdTest fires a synthetic callback to verify the full alert pipeline.
+// cmdTest fires a synthetic callback to exercise the alert path.
 // It registers the test token with snare.sh first so the worker knows where
-// to deliver the alert, then fires the callback and waits briefly to confirm.
+// to route the alert, then fires the callback. External webhook delivery is
+// asynchronous, so the user still needs to check their webhook destination.
 func cmdTest(args []string) {
 	cfg, err := requireConfig()
 	if err != nil {
@@ -530,7 +531,6 @@ func cmdTest(args []string) {
 	testTokenID := "snare-test-" + shortID
 
 	// Register the test token so the worker routes alerts to this device's webhook.
-	// This is what actually proves the full pipeline works end-to-end.
 	if err := registerToken(cfg, testTokenID, "test", "test"); err != nil {
 		fmt.Fprintf(os.Stderr, "  ⚠  webhook registration failed: %v\n", err)
 		fmt.Fprintf(os.Stderr, "  The callback will still fire but your webhook may not receive the alert.\n\n")
@@ -546,7 +546,7 @@ func cmdTest(args []string) {
 		os.Exit(1)
 	}
 
-	fmt.Println("✓ Test alert fired — check your webhook destination.")
+	fmt.Println("✓ Test callback fired — check your webhook destination.")
 	fmt.Println("  If no alert arrives within 30 seconds, verify your webhook is configured correctly.")
 }
 

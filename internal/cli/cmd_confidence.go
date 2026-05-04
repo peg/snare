@@ -308,7 +308,7 @@ Safety:
 
 	if dryRun {
 		fmt.Printf("  [dry-run] would re-register %d active token(s)\n", len(active))
-		fmt.Println("  [dry-run] would run a live webhook test callback and confirm event readability")
+		fmt.Println("  [dry-run] would run a live test callback and confirm event readability")
 		fmt.Println()
 		return
 	}
@@ -347,13 +347,13 @@ Safety:
 	live := runWebhookTest(cfg)
 	switch {
 	case live.RegisterErr != nil:
-		fmt.Fprintf(os.Stderr, "  ✗ Webhook test registration failed: %v\n", live.RegisterErr)
+		fmt.Fprintf(os.Stderr, "  ✗ Test callback registration failed: %v\n", live.RegisterErr)
 	case live.FireErr != nil:
-		fmt.Fprintf(os.Stderr, "  ✗ Webhook test trigger failed: %v\n", live.FireErr)
+		fmt.Fprintf(os.Stderr, "  ✗ Test callback trigger failed: %v\n", live.FireErr)
 	case live.ObserveErr != nil:
-		fmt.Fprintf(os.Stderr, "  ✗ Webhook test callback not readable: %v\n", live.ObserveErr)
+		fmt.Fprintf(os.Stderr, "  ✗ Test callback not readable: %v\n", live.ObserveErr)
 	default:
-		fmt.Printf("  ✓ Webhook test callback recorded at %s\n", live.ObservedAt)
+		fmt.Printf("  ✓ Test callback recorded at %s\n", live.ObservedAt)
 	}
 
 	fmt.Println()
@@ -371,7 +371,7 @@ Safety:
 		os.Exit(1)
 	}
 
-	fmt.Println("  ✓ Repair complete. Registrations and delivery path look healthy.")
+	fmt.Println("  ✓ Repair complete. Registrations and callback/event path look healthy.")
 	fmt.Println()
 }
 
@@ -733,7 +733,7 @@ func buildPrecisionProofRecipe(c manifest.Canary) (precisionProofRecipe, error) 
 		return precisionProofRecipe{
 			Canary:   c,
 			Binary:   "aws",
-			Command:  "AWS_EC2_METADATA_DISABLED=true AWS_SHARED_CREDENTIALS_FILE=/dev/null aws sts get-caller-identity --profile " + shellQuote(profile) + " --no-cli-pager",
+			Command:  "AWS_EC2_METADATA_DISABLED=true AWS_CONFIG_FILE=" + shellQuote(c.Path) + " AWS_SHARED_CREDENTIALS_FILE=/dev/null aws sts get-caller-identity --profile " + shellQuote(profile) + " --no-cli-pager",
 			Expected: "AWS CLI may fail auth, but callback should fire immediately during credential resolution",
 		}, nil
 	case "ssh":
@@ -744,7 +744,7 @@ func buildPrecisionProofRecipe(c manifest.Canary) (precisionProofRecipe, error) 
 		return precisionProofRecipe{
 			Canary:   c,
 			Binary:   "ssh",
-			Command:  "ssh -F ~/.ssh/config -o BatchMode=yes -o ConnectTimeout=3 " + shellQuote(host) + " true",
+			Command:  "ssh -F " + shellQuote(c.Path) + " -o BatchMode=yes -o ConnectTimeout=3 " + shellQuote(host) + " true",
 			Expected: "SSH connection fails quickly, but ProxyCommand callback should fire",
 		}, nil
 	case "k8s":

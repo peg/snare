@@ -99,7 +99,7 @@ By default, `snare arm` uses **precision mode**: only `awsproc`, `ssh`, and `k8s
     snare events   view real hits when one arrives
 ```
 
-Immediately after arming, `snare status` will usually show `never fired`. That is expected: it means Snare has not recorded a real callback for that canary yet. Use `snare scan` for local file integrity, `snare doctor` for setup health, and `snare test` if you want to re-check alert delivery.
+Immediately after arming, `snare status` will usually show `never fired`. That is expected: it means Snare has not recorded a real callback for that canary yet. Use `snare scan` for local file integrity, `snare doctor` for setup health, and `snare test` if you want to fire a synthetic callback and check your webhook destination.
 
 To arm all canary types (including dotenv-based ones like OpenAI, Anthropic, etc.):
 
@@ -156,9 +156,9 @@ After `snare arm`, the expected healthy loop is:
 - `snare scan` is local-only integrity: present/modified/missing/orphaned files. It does not fire alerts.
 - `snare doctor` is the confidence screen: config, callback health, local canary files, token ownership, events API readability, and webhook test history.
 - `snare doctor --test` runs a live callback test and verifies it is readable in the events API.
-- `snare test` sends a synthetic callback test only (fast delivery check).
+- `snare test` sends a synthetic callback test only; check your webhook destination for the routed alert.
 - `snare events` shows real hit history; empty output on fresh installs is expected.
-- `snare repair` (or `snare sync`) safely re-registers active tokens and re-tests delivery when drift is detected.
+- `snare repair` (or `snare sync`) safely re-registers active tokens and re-tests callback/event readability when drift is detected.
 - `snare prove` prints safe precision trigger commands so you can intentionally prove alerts fire for `awsproc`, `ssh`, and `k8s`.
 
 Important state distinction:

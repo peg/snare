@@ -1,12 +1,14 @@
 package cli_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -304,6 +306,38 @@ func writeTestManifest(t *testing.T, home string, m manifest.Manifest) {
 	}
 }
 
+func runSnareWithEnv(t *testing.T, homeDir string, extraEnv map[string]string, args ...string) (stdout, stderr string, exitCode int) {
+	t.Helper()
+	bin := snareBinary(t)
+	cmd := exec.Command(bin, args...)
+	cmd.Env = append(os.Environ(), "HOME="+homeDir)
+	for k, v := range extraEnv {
+		cmd.Env = append(cmd.Env, k+"="+v)
+	}
+
+	var outBuf, errBuf bytes.Buffer
+	cmd.Stdout = &outBuf
+	cmd.Stderr = &errBuf
+
+	err := cmd.Run()
+	exitCode = 0
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			exitCode = exitErr.ExitCode()
+		} else {
+			t.Fatalf("cmd.Run: %v", err)
+		}
+	}
+	return outBuf.String(), errBuf.String(), exitCode
+}
+
+func writeExecutable(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0700); err != nil {
+		t.Fatalf("WriteFile executable %s: %v", path, err)
+	}
+}
+
 func TestConfidenceSmokeFlow(t *testing.T) {
 	home := t.TempDir()
 	api := newFakeSnareAPI(t)
@@ -563,8 +597,9 @@ Host proof-bastion
 		t.Fatalf("prove should succeed:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
 	}
 	for _, want := range []string{
+		"AWS_CONFIG_FILE=" + shellQuoteForTest(awsPath),
 		"aws sts get-caller-identity --profile",
-		"ssh -F ~/.ssh/config",
+		"ssh -F " + shellQuoteForTest(sshPath),
 		"kubectl --kubeconfig",
 		"Add `--run`",
 	} {
@@ -572,4 +607,138 @@ Host proof-bastion
 			t.Fatalf("prove output missing %q:\n%s", want, stdout)
 		}
 	}
+}
+
+func TestProveRunUsesManifestPathsAndObservesCallbacks(t *testing.T) {
+	home := t.TempDir()
+	api := newFakeSnareAPI(t)
+	defer api.Close()
+
+	deviceID := "dev-prove-run-flow"
+	deviceSecret := strings.Repeat("e", 64)
+	api.AddDevice(deviceID, deviceSecret)
+	writeTestConfig(t, home, api.URL()+"/c", deviceID, deviceSecret, "")
+
+	awsToken := "prove-run-awsproc-token"
+	sshToken := "prove-run-ssh-token"
+	k8sToken := "prove-run-k8s-token"
+	awsPath := filepath.Join(home, ".aws", "snare-proof-config")
+	sshPath := filepath.Join(home, ".ssh", "snare-proof-config")
+	kubePath := filepath.Join(home, ".kube", "snare-proof.yaml")
+	for _, p := range []string{awsPath, sshPath, kubePath} {
+		if err := os.MkdirAll(filepath.Dir(p), 0700); err != nil {
+			t.Fatalf("MkdirAll(%s): %v", p, err)
+		}
+	}
+
+	awsContent := fmt.Sprintf(`
+[profile prod-admin-proof-run]
+role_arn = arn:aws:iam::123456789012:role/OrganizationAccountAccessRole
+source_profile = prod-admin-proof-run-source
+
+[profile prod-admin-proof-run-source]
+credential_process = sh -c 'curl -sf %s/c/%s'
+`, api.URL(), awsToken)
+	sshContent := fmt.Sprintf(`
+Host proof-run-bastion
+    HostName proof-run-bastion.internal
+    ProxyCommand curl -sf %s/c/%s -o /dev/null && nc %%h %%p
+`, api.URL(), sshToken)
+	k8sContent := fmt.Sprintf("apiVersion: v1\nkind: Config\nclusters:\n- cluster:\n    server: %s/c/%s\n  name: proof\n", api.URL(), k8sToken)
+
+	for path, content := range map[string]string{awsPath: awsContent, sshPath: sshContent, kubePath: k8sContent} {
+		if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+			t.Fatalf("WriteFile %s: %v", path, err)
+		}
+	}
+
+	writeTestManifest(t, home, manifest.Manifest{
+		Version:  2,
+		DeviceID: deviceID,
+		Canaries: []manifest.Canary{
+			{ID: awsToken, Type: "awsproc", Path: awsPath, Mode: manifest.ModeAppend, Content: awsContent, ContentHash: manifest.HashContent(awsContent), PlantedAt: time.Now(), Active: true},
+			{ID: sshToken, Type: "ssh", Path: sshPath, Mode: manifest.ModeAppend, Content: sshContent, ContentHash: manifest.HashContent(sshContent), PlantedAt: time.Now(), Active: true},
+			{ID: k8sToken, Type: "k8s", Path: kubePath, Mode: manifest.ModeNewFile, Content: k8sContent, ContentHash: manifest.HashContent(k8sContent), PlantedAt: time.Now(), Active: true},
+		},
+	})
+
+	stdout, stderr, exitCode := runSnare(t, home, "repair")
+	if exitCode != 0 {
+		t.Fatalf("repair should register proof tokens:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+	}
+
+	binDir := filepath.Join(home, "bin")
+	if err := os.MkdirAll(binDir, 0700); err != nil {
+		t.Fatalf("MkdirAll bin: %v", err)
+	}
+	logPath := filepath.Join(home, "proof-bin.log")
+	writeExecutable(t, filepath.Join(binDir, "aws"), fmt.Sprintf(`#!/bin/sh
+echo "aws AWS_CONFIG_FILE=$AWS_CONFIG_FILE $*" >> %s
+url=$(grep -m1 -o 'http://[^"'"'"' ]*/c/%s' "$AWS_CONFIG_FILE")
+[ -n "$url" ] && curl -sf "$url" >/dev/null 2>&1
+exit 1
+`, shellQuoteForShellScript(logPath), awsToken))
+	writeExecutable(t, filepath.Join(binDir, "ssh"), fmt.Sprintf(`#!/bin/sh
+echo "ssh $*" >> %s
+config=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-F" ]; then config="$2"; shift 2; continue; fi
+  shift
+done
+url=$(grep -m1 -o 'http://[^ ]*/c/%s' "$config")
+[ -n "$url" ] && curl -sf "$url" >/dev/null 2>&1
+exit 1
+`, shellQuoteForShellScript(logPath), sshToken))
+	writeExecutable(t, filepath.Join(binDir, "kubectl"), fmt.Sprintf(`#!/bin/sh
+echo "kubectl $*" >> %s
+config=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --kubeconfig) config="$2"; shift 2 ;;
+    --kubeconfig=*) config="${1#--kubeconfig=}"; shift ;;
+    *) shift ;;
+  esac
+done
+url=$(grep -m1 -o 'http://[^ ]*/c/%s' "$config")
+[ -n "$url" ] && curl -sf "$url" >/dev/null 2>&1
+exit 1
+`, shellQuoteForShellScript(logPath), k8sToken))
+
+	stdout, stderr, exitCode = runSnareWithEnv(t, home, map[string]string{
+		"PATH": binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}, "prove", "--run")
+	if exitCode != 0 {
+		t.Fatalf("prove --run should observe callbacks:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+	}
+	for _, want := range []string{"Precision proof complete", "awsproc", "ssh", "k8s"} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("prove --run output missing %q:\n%s", want, stdout)
+		}
+	}
+
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("ReadFile log: %v", err)
+	}
+	logText := string(logData)
+	for _, want := range []string{
+		"AWS_CONFIG_FILE=" + awsPath,
+		"ssh -F " + sshPath,
+		"kubectl --kubeconfig " + kubePath,
+	} {
+		if !strings.Contains(logText, want) {
+			t.Fatalf("fake binary log missing %q:\n%s", want, logText)
+		}
+	}
+}
+
+func shellQuoteForTest(s string) string {
+	if s == "" {
+		return "''"
+	}
+	return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
+}
+
+func shellQuoteForShellScript(s string) string {
+	return shellQuoteForTest(s)
 }
