@@ -441,6 +441,29 @@ func TestHandleEventsAfterRevokeStillRequiresOriginalOwner(t *testing.T) {
 	}
 }
 
+func TestHandleEventsRejectsUnregisteredTokenEvenWithValidDeviceHeader(t *testing.T) {
+	s := testServer(t)
+	deviceID := "dev-owner"
+	secret := "ownersecret000000000000000000000001"
+
+	if err := s.db.createDevice(deviceID, secret); err != nil {
+		t.Fatalf("create device: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/events/unregistered-token-001", nil)
+	req.Header.Set("Authorization", "Bearer "+secret)
+	req.Header.Set("X-Snare-Device-Id", deviceID)
+	rr := httptest.NewRecorder()
+	s.handleEvents(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("unregistered token status = %d, want 401: %s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "token not registered") {
+		t.Fatalf("unregistered token response should explain registration state: %s", rr.Body.String())
+	}
+}
+
 // ─── hashSecret ──────────────────────────────────────────────────────────────
 
 func TestHashSecret_deterministic(t *testing.T) {

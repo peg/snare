@@ -351,7 +351,9 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Auth is required. Device ID comes from the token registration, or from X-Snare-Device-Id header.
+	// Auth is required. Device ID comes from token registration or stored event
+	// ownership. Header-only fallback would make unregistered local canaries look
+	// like registered-but-quiet canaries in `snare status`.
 	deviceID := ""
 	if reg != nil {
 		deviceID = reg.DeviceID
@@ -364,10 +366,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if deviceID == "" {
-		deviceID = r.Header.Get("X-Snare-Device-Id")
-	}
-	if deviceID == "" {
-		jsonResp(w, http.StatusUnauthorized, map[string]string{"error": "authentication required"})
+		jsonResp(w, http.StatusUnauthorized, map[string]string{"error": "token not registered"})
 		return
 	}
 

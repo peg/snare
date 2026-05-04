@@ -72,13 +72,13 @@ That's it. Snare initializes, plants the highest-signal canaries, fires a test a
 
 By default, `snare arm` uses **precision mode**: only `awsproc`, `ssh`, and `k8s` canaries are planted. These fire via existing SDK and OS plumbing with near-zero false positive risk.
 
-**Running AI agents on this machine?** The default precision mode won't fire on your own tooling. Use `--select` for an interactive picker, or `--all` to arm every canary type.
+**Running AI agents on this machine?** Precision mode stays quiet during normal work unless the planted fake AWS profile, SSH host, or kube context is actively used. Use `--select` for an interactive picker, or `--all` to arm every canary type.
 
 ```
   ✓ initialized (device: dev-2146102a5849a7b3)
 
   Planting canaries...
-  Precision mode: planting highest-signal canaries only (awsproc, ssh, k8s)
+  Precision mode: planting active-use canaries only (awsproc, ssh, k8s)
     ✓ awsproc      ~/.aws/config
     ✓ ssh          ~/.ssh/config
     ✓ k8s          ~/.kube/staging-deploy.yaml
@@ -86,7 +86,18 @@ By default, `snare arm` uses **precision mode**: only `awsproc`, `ssh`, and `k8s
   ✓ webhook test fired
 
   🪤 3 canaries armed. This machine is protected.
+
+  Precision mode is safe for first run: alerts require active use of the fake
+  AWS profile, SSH host, or kube context. Passive file reads do not fire them.
+
+  Next checks:
+    snare status   show event state; `never fired` is normal at first
+    snare scan     verify planted files are present and unchanged
+    snare doctor   check config, callback health, and canary files
+    snare events   view real hits when one arrives
 ```
+
+Immediately after arming, `snare status` will usually show `never fired`. That is expected: it means Snare has not recorded a real callback for that canary yet. Use `snare scan` for local file integrity, `snare doctor` for setup health, and `snare test` if you want to re-check alert delivery.
 
 To arm all canary types (including dotenv-based ones like OpenAI, Anthropic, etc.):
 
@@ -106,7 +117,7 @@ snare arm --select           # interactive picker: choose which canaries to arm
 snare arm --all              # plant all 18 canary types
 snare disarm                 # remove all canaries (keep config)
 snare disarm --purge         # remove canaries + ~/.snare/ config
-snare status                 # show active canaries + last-seen timestamps
+snare status                 # show active canaries + event state
 snare events                 # fetch recent alert history from snare.sh
 snare events --summary       # ASN/UA distribution across all canaries
 snare scan                   # check canary integrity on disk
@@ -155,7 +166,7 @@ snare teardown --dry-run     # preview what would be removed
 | `terraform` | `~/.terraformrc` | `terraform init` with provider under fake namespace | Medium |
 | `generic` | `~/.env.production` | Any SDK reading `API_BASE_URL` | Medium |
 
-**Precision** canaries fire via existing SDK and OS plumbing — near-zero false positives, no side effects on your own tooling. Default with `snare arm`.
+**Precision** canaries fire via existing SDK and OS plumbing — near-zero false positives during normal work because they require active use of the planted fake profile, host, or context. Default with `snare arm`.
 
 **High** canaries fire when the credential is actively used by anyone — human attacker, compromised agent, scanner. Some (pypi) have side effects on your own installs.
 

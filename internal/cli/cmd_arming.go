@@ -36,7 +36,7 @@ type selectEntry struct {
 
 // allSelectEntries is the canonical ordered list for --select mode.
 var allSelectEntries = []selectEntry{
-	// Precision: fire via SDK/OS hooks, no DNS dependency, zero false positives
+	// Precision: fire via SDK/OS hooks, no DNS dependency, near-zero false positives
 	{bait.TypeAWSProc, "precision", "~/.aws/config (credential_process)"},
 	{bait.TypeSSH, "precision", "~/.ssh/config (ProxyCommand)"},
 	{bait.TypeK8s, "precision", "~/.kube/<name>.yaml (server URL)"},
@@ -209,8 +209,9 @@ Usage:
   snare arm [flags]
 
 By default, snare arm plants only the highest-signal canaries (awsproc, ssh, k8s).
-These fire only on active credential use — zero false positives from your own tooling.
-Running AI agents on this machine? The default precision mode won't fire on your own tooling.
+These fire only on active credential use — near-zero false-positive risk.
+Running AI agents on this machine? Precision mode stays quiet during normal work
+unless the planted fake AWS profile, SSH host, or kube context is actively used.
 Use --all to arm every canary type, or --select to pick interactively.
 
 Flags:
@@ -309,6 +310,7 @@ Naming tip:
 	fmt.Println("  Planting canaries...")
 
 	armTypes := precisionTypes
+	armMode := "precision"
 	switch {
 	case armSelect:
 		selected, err := runSelectTUI()
@@ -320,12 +322,15 @@ Naming tip:
 		for i, t := range selected {
 			names[i] = string(t)
 		}
+		armMode = "custom"
 		fmt.Printf("  Custom mode: planting %s\n", strings.Join(names, ", "))
 	case armAll:
 		armTypes = allCanaryTypes
+		armMode = "full"
 		fmt.Println("  Full mode: planting all 18 canary types (including dotenv-based)")
 	default:
-		fmt.Println("  Precision mode: planting highest-signal canaries only (awsproc, ssh, k8s)")
+		fmt.Println("  Precision mode: planting active-use canaries only (awsproc, ssh, k8s)")
+		fmt.Println("  These stay quiet unless the fake AWS profile, SSH host, or kube context is used.")
 	}
 
 	planted := 0
@@ -416,6 +421,7 @@ Naming tip:
 
 	if dryRun {
 		fmt.Printf("\n  [dry-run] would plant %d canaries\n", planted)
+		fmt.Println("  [dry-run] no files were written and no webhook test was fired.")
 		return
 	}
 
@@ -451,6 +457,17 @@ Naming tip:
 		fmt.Println(" This machine is protected.")
 	}
 	fmt.Println()
-	fmt.Println("  Run `snare status` to check.")
+	if armMode == "precision" {
+		fmt.Println("  Precision mode is safe for first run: alerts require active use of the fake")
+		fmt.Println("  AWS profile, SSH host, or kube context. Passive file reads do not fire them.")
+	} else {
+		fmt.Println("  Canaries are now waiting for a real hit. No event is recorded until bait is used.")
+	}
+	fmt.Println()
+	fmt.Println("  Next checks:")
+	fmt.Println("    snare status   show event state; `never fired` is normal at first")
+	fmt.Println("    snare scan     verify planted files are present and unchanged")
+	fmt.Println("    snare doctor   check config, callback health, and canary files")
+	fmt.Println("    snare events   view real hits when one arrives")
 	fmt.Println("  Run `snare disarm` to remove everything.")
 }

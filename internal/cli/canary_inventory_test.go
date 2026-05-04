@@ -49,3 +49,18 @@ func TestAllCanaryTypesMatchesImplementedInventory(t *testing.T) {
 		seen[bt] = true
 	}
 }
+
+func TestReliabilityDetailsForPrecisionTypes(t *testing.T) {
+	for _, bt := range []bait.Type{bait.TypeAWSProc, bait.TypeSSH, bait.TypeK8s} {
+		details := reliabilityDetailsFor(string(bt))
+		if details.tier != "precision" {
+			t.Fatalf("%s tier = %s, want precision", bt, details.tier)
+		}
+		if details.marker == "●" {
+			t.Fatalf("%s marker should not reuse high-reliability marker", bt)
+		}
+		if details.description == "" {
+			t.Fatalf("%s description is empty", bt)
+		}
+	}
+}

@@ -433,12 +433,13 @@ async function handleEvents(token, request, env) {
     }
   }
 
-  // Auth required for ALL event reads — no unauthenticated fallback
-  const headerDeviceId = deviceId || request.headers.get("x-snare-device-id") || "";
-  if (!headerDeviceId) {
-    return json({ error: "authentication required" }, 401);
+  // Auth required for ALL event reads. The token itself must have a known owner
+  // via active registration or stored event history; otherwise status/events
+  // must not turn an unregistered local canary into a misleading "never fired".
+  if (!deviceId) {
+    return json({ error: "token not registered" }, 401);
   }
-  const auth = await validateAuth(request, env, headerDeviceId);
+  const auth = await validateAuth(request, env, deviceId);
   if (!auth.ok) {
     return json({ error: auth.error }, 401);
   }

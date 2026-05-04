@@ -29,8 +29,8 @@ type ScanResult struct {
 
 // OrphanResult holds a discovered canary URL with no manifest record.
 type OrphanResult struct {
-	Path    string
-	URL     string
+	Path string
+	URL  string
 }
 
 // snareURLPattern is the substring we look for to detect canary content on disk.
@@ -285,6 +285,11 @@ func cmdScan(args []string) {
 	fmt.Println("  " + strings.Join(parts, ", "))
 	fmt.Println()
 
+	if nModified == 0 && nMissing == 0 && len(orphans) == 0 {
+		fmt.Println("  ✓ All active canary files are present and unchanged.")
+		fmt.Println("  This is a local health check only; it does not fire alerts.")
+		fmt.Println("  Run `snare status` for event state or `snare test` to verify delivery.")
+	}
 	if nModified > 0 {
 		fmt.Println("  ⚠  MODIFIED canaries may have been tampered with.")
 		fmt.Println("     Run `snare teardown --force && snare arm` to replant.")

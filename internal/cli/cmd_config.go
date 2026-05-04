@@ -1,11 +1,8 @@
 package cli
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"os"
-	"strings"
 
 	"github.com/peg/snare/internal/config"
 	"github.com/peg/snare/internal/manifest"
@@ -23,11 +20,7 @@ func cmdConfig(args []string) {
 		fmt.Println()
 		fmt.Printf("  Device ID:     %s\n", cfg.DeviceID)
 		fmt.Printf("  Callback base: %s\n", cfg.CallbackBase)
-		if cfg.WebhookURL != "" {
-			fmt.Printf("  Webhook URL:   %s\n", cfg.WebhookURL)
-		} else {
-			fmt.Printf("  Webhook URL:   (using global snare.sh fallback)\n")
-		}
+		fmt.Printf("  Webhook:       %s\n", webhookSummary(cfg.WebhookURL))
 		fmt.Printf("  Config file:   ~/.snare/config.json\n")
 		fmt.Println()
 		return
@@ -45,7 +38,7 @@ func cmdConfig(args []string) {
 		if err := cfg.Save(); err != nil {
 			fatal(fmt.Errorf("failed to save config: %w", err))
 		}
-		fmt.Printf("  ✓ Webhook URL updated: %s\n", url)
+		fmt.Printf("  ✓ Webhook URL updated: %s\n", webhookSummary(url))
 		fmt.Println("  Run `snare test` to verify the new webhook works.")
 		// Re-register active tokens with new webhook
 		mfst, _ := manifest.Load()
@@ -105,7 +98,7 @@ func cmdDoctor(args []string) {
 	check("Device ID", "ok", cfg.DeviceID)
 
 	// 2. Callback base is reachable
-	healthURL := strings.Replace(cfg.CallbackBase, "/c", "/health", 1)
+	healthURL := cfg.APIBase() + "/health"
 	resp, err := httpClient.Get(healthURL) //nolint:gosec
 	if err != nil {
 		check("Callback server", "fail", fmt.Sprintf("unreachable (%s)", healthURL))
@@ -120,7 +113,7 @@ func cmdDoctor(args []string) {
 
 	// 3. Webhook configured
 	if cfg.WebhookURL != "" {
-		check("Webhook", "ok", cfg.WebhookURL[:min(40, len(cfg.WebhookURL))]+"...")
+		check("Webhook", "ok", webhookSummary(cfg.WebhookURL))
 	} else {
 		check("Webhook", "warn", "no local webhook (using global snare.sh fallback)")
 	}
@@ -136,33 +129,21 @@ func cmdDoctor(args []string) {
 		} else {
 			check("Active canaries", "ok", fmt.Sprintf("%d armed", len(active)))
 
-			// 5. Verify each canary file still exists and hash matches
-			mismatched := 0
+			// 5. Verify each canary file still exists and its planted content matches.
+			modified := 0
 			missing := 0
-			for _, c := range active {
-				data, err := os.ReadFile(c.Path)
-				if err != nil {
+			for _, result := range ScanManifest(mfst) {
+				switch result.Status {
+				case ScanMissing:
 					missing++
-					continue
-				}
-				h := sha256.Sum256(data)
-				fileHash := hex.EncodeToString(h[:])
-				if string(c.Mode) == "append" {
-					// For append mode, check the planted block is still present
-					if !strings.Contains(string(data), c.ID) {
-						mismatched++
-					}
-				} else {
-					// For new-file mode, check full hash
-					if fileHash != c.ContentHash {
-						mismatched++
-					}
+				case ScanModified:
+					modified++
 				}
 			}
 			if missing > 0 {
 				check("Canary files", "fail", fmt.Sprintf("%d missing from disk — run `snare arm` to replant", missing))
-			} else if mismatched > 0 {
-				check("Canary integrity", "warn", fmt.Sprintf("%d files modified since planting", mismatched))
+			} else if modified > 0 {
+				check("Canary integrity", "warn", fmt.Sprintf("%d files modified since planting", modified))
 			} else {
 				check("Canary files", "ok", "all present and unmodified")
 			}
@@ -173,7 +154,16 @@ func cmdDoctor(args []string) {
 	if hasFlag(args, "--test") {
 		fmt.Println()
 		fmt.Println("  Firing test alert...")
-		testURL := strings.Replace(cfg.CallbackBase, "/c", "/c/snare-test-"+cfg.DeviceID[len(cfg.DeviceID)-8:], 1)
+		shortID := cfg.DeviceID
+		if len(shortID) > 8 {
+			shortID = shortID[len(shortID)-8:]
+		}
+		testToken := "snare-test-" + shortID
+		if err := registerToken(cfg, testToken, "test", "test"); err != nil {
+			fmt.Fprintf(os.Stderr, "  ⚠  webhook registration failed: %v\n", err)
+			fmt.Fprintf(os.Stderr, "     The callback will still fire but your webhook may not receive the alert.\n")
+		}
+		testURL := cfg.CallbackURL(testToken)
 		resp, err := httpClient.Get(testURL) //nolint:gosec
 		if err != nil {
 			check("Test alert", "fail", err.Error())
@@ -197,11 +187,4 @@ func cmdDoctor(args []string) {
 	} else {
 		fmt.Printf("  %d passed — all good 🪤\n\n", pass)
 	}
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

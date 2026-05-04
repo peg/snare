@@ -24,7 +24,7 @@ var httpClient = &http.Client{Timeout: 15 * time.Second}
 // Tiers:
 //
 //	precision — fires via existing SDK/OS plumbing, no agent hunting needed,
-//	            no DNS dependency, zero false positives
+//	            no DNS dependency, near-zero false positives
 //	high      — fires when credential is actively used, but requires agent to
 //	            find and use it, or has a DNS/runtime dependency
 //	medium    — fires conditionally: depends on dotenv loading, base URL
@@ -44,6 +44,62 @@ func reliability(t string) string {
 	// Medium: dotenv-dependent, DNS-dependent, or requires explicit credential scanning
 	default:
 		return "medium"
+	}
+}
+
+type reliabilityDetails struct {
+	tier        string
+	marker      string
+	description string
+}
+
+func reliabilityDetailsFor(t string) reliabilityDetails {
+	switch reliability(t) {
+	case "precision":
+		return reliabilityDetails{
+			tier:        "precision",
+			marker:      "◆",
+			description: "active-use only; near-zero false positives",
+		}
+	case "high":
+		return reliabilityDetails{
+			tier:        "high",
+			marker:      "●",
+			description: "fires on credential use",
+		}
+	default:
+		return reliabilityDetails{
+			tier:        "medium",
+			marker:      "◐",
+			description: "conditional trigger path",
+		}
+	}
+}
+
+func isKnownCanaryType(t string) bool {
+	for _, bt := range allCanaryTypes {
+		if string(bt) == t {
+			return true
+		}
+	}
+	return false
+}
+
+func webhookSummary(webhookURL string) string {
+	if webhookURL == "" {
+		return "using global snare.sh fallback"
+	}
+
+	lower := strings.ToLower(webhookURL)
+	switch {
+	case strings.Contains(lower, "discord.com/api/webhooks"):
+		return "configured (Discord)"
+	case strings.Contains(lower, "hooks.slack.com"):
+		return "configured (Slack)"
+	case strings.Contains(lower, "api.telegram.org"):
+		return "configured (Telegram)"
+	default:
+		return "configured (custom)"
 	}
 }
 
@@ -77,6 +133,7 @@ Flags (arm):
   --webhook <url>              webhook URL (Discord, Slack, Telegram, or custom)
   --label <name>               name your canary (e.g. prod-admin-legacy-2024) — defaults to hostname
   --all                        plant all canary types including dotenv-based ones
+  --select                     interactive checklist to pick which canaries to arm
   --dry-run                    show what would be planted without writing
 
 Flags (plant):
@@ -87,6 +144,7 @@ Flags (plant):
 
 Flags (disarm/teardown):
   --token <id>                 remove a single canary by ID
+  --type <type>                remove active canaries of this type only
   --force                      remove even if content hash mismatches
   --purge                      also remove ~/.snare/ config directory
   --dry-run                    show what would be removed without writing anything
@@ -416,7 +474,7 @@ func requireConfig() (*config.Config, error) {
 		return nil, err
 	}
 	if cfg == nil {
-		return nil, fmt.Errorf("snare not initialized — run `snare init` first")
+		return nil, fmt.Errorf("snare not initialized — run `snare arm` first")
 	}
 	return cfg, nil
 }

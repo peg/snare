@@ -92,21 +92,28 @@ Outbound webhook requests include `X-Snare-Signature: sha256=<hmac>` when `WEBHO
 
 | Type | Location | Mechanism | Trigger | Reliability |
 |------|----------|-----------|---------|-------------|
+| `awsproc` | `~/.aws/config` | `credential_process` shell command | AWS SDK credential resolution | Precision |
+| `ssh` | `~/.ssh/config` | `ProxyCommand curl` callback | SSH connection attempt | Precision |
+| `k8s` | `~/.kube/<name>.yaml` | kubeconfig `server` URL | Any `kubectl` call | Precision |
 | `aws` | `~/.aws/credentials` | `endpoint_url` redirect | Any AWS SDK/CLI call | High |
-| `awsproc` | `~/.aws/config` | `credential_process` shell command | AWS SDK credential resolution | High |
 | `gcp` | `~/.config/gcloud/sa-*.json` | `token_uri` redirect | GCP OAuth token refresh | High |
+| `npm` | `~/.npmrc` | scoped registry URL | `npm install @scope/*` | High |
+| `git` | `~/.gitconfig` | scoped credential helper | `git credential fill` for fake host | High |
+| `pypi` | `~/.config/pip/pip.conf` | `extra-index-url` | `pip install` (queries all indexes) | High |
+| `azure` | `~/.azure/service-principal-credentials.json` | `tokenEndpoint` redirect | Explicit service-principal credential use | Medium |
 | `openai` | `~/.env` | `OPENAI_BASE_URL` redirect | Agent reads dotenv AND honors base URL | Medium |
 | `anthropic` | `~/.env.local` | `ANTHROPIC_BASE_URL` redirect | Agent reads dotenv AND honors base URL | Medium |
-| `ssh` | `~/.ssh/config` | `ProxyCommand curl` callback | SSH connection attempt | High |
-| `k8s` | `~/.kube/<name>.yaml` | kubeconfig `server` URL | Any `kubectl` call | High |
-| `npm` | `~/.npmrc` | scoped registry URL | `npm install @scope/*` | Medium |
-| `pypi` | `~/.config/pip/pip.conf` | `extra-index-url` | `pip install` (queries all indexes) | High |
 | `mcp` | `~/.config/mcp-servers*.json` | Streamable HTTP transport URL | MCP client `initialize` request | Medium |
 | `github` | `~/.config/gh/hosts.yml` | `api_endpoint` field | `gh` CLI call to fake host | Medium |
 | `stripe` | `~/.config/stripe/config.toml` | verify URL in config | Stripe CLI or agent following URL | Medium |
+| `huggingface` | `~/.env.hf` | `HF_ENDPOINT` redirect | Agent reads dotenv AND honors endpoint | Medium |
+| `docker` | `~/.docker/config.json` | registry auth entry | Docker client targets fake registry | Medium |
+| `terraform` | `~/.terraformrc` | provider network mirror | `terraform init` for fake namespace | Medium |
 | `generic` | `~/.env.production` | `API_BASE_URL` | Custom SDK clients | Medium |
 
-**High reliability** = callback URL is the real SDK service endpoint; any credential use redirects to snare.sh.
+**Precision reliability** = callback is wired into SDK/OS credential plumbing and requires active attempted use of the planted fake profile, host, or context.
+
+**High reliability** = callback URL is on a credential-use path, but the agent must find and use the planted credential.
 
 **Medium reliability** = callback URL is less standardized or requires specific agent behavior to trigger.
 
