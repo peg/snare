@@ -242,6 +242,16 @@ func (f *fakeSnareAPI) handleCallback(w http.ResponseWriter, r *http.Request) {
 	f.events[token] = append([]fakeEvent{e}, f.events[token]...)
 	f.mu.Unlock()
 
+	// GCP SDK token refresh expects OAuth-style JSON on POST to token_uri.
+	if r.Method == http.MethodPost {
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"access_token": "snare-cli-test-token",
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+		})
+		return
+	}
+
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.WriteString(w, "ok")
 }
