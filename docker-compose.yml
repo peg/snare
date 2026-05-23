@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   snare:
     build:
@@ -13,6 +11,7 @@ services:
       - snare-data:/data
     environment:
       # Override any of these in a .env file or via docker compose --env-file
+      - SNARE_DASHBOARD_TOKEN=${SNARE_DASHBOARD_TOKEN:?set SNARE_DASHBOARD_TOKEN}
       - SNARE_PORT=${SNARE_PORT:-8080}
       - SNARE_DB=/data/snare.db
       - SNARE_WEBHOOK_URL=${SNARE_WEBHOOK_URL:-}

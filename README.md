@@ -271,6 +271,12 @@ To point canaries at your own server instead of snare.sh, edit `callback_base` i
 
 `snare serve` requires `--dashboard-token` (or `SNARE_DASHBOARD_TOKEN`) to protect the dashboard. Generate one with `openssl rand -hex 32`.
 
+Docker Compose requires the dashboard token as an environment variable:
+
+```sh
+SNARE_DASHBOARD_TOKEN="$(openssl rand -hex 32)" docker compose up -d
+```
+
 > **Important:** Only expose `snare serve` behind a reverse proxy you control (nginx, Caddy, Cloudflare Tunnel). Never bind directly to a public interface. By default the server ignores `X-Forwarded-For` and `X-Real-IP`. If you want real client IP attribution behind a trusted proxy, set `--trusted-proxy <cidr,...>` to the proxy network(s) that are allowed to supply those headers.
 
 ---

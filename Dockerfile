@@ -1,5 +1,5 @@
 # ── Build stage ──────────────────────────────────────────────────────────────
-FROM golang:1.25-alpine AS builder
+FROM golang:1.25.10-alpine AS builder
 
 WORKDIR /src
 
@@ -21,7 +21,7 @@ RUN apk add --no-cache ca-certificates wget && \
 COPY --from=builder /snare /usr/local/bin/snare
 
 VOLUME ["/data"]
-EXPOSE 8080 443
+EXPOSE 8080 80 443
 
 ENTRYPOINT ["snare"]
 CMD ["serve", "--port", "8080", "--db", "/data/snare.db"]

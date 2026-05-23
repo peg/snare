@@ -22,8 +22,23 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: worker/package-lock.json
+
       - name: Run tests
         run: go test ./... -race -count=1
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test worker
+        working-directory: worker
+        run: |
+          npm ci
+          npm test
 
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
@@ -44,16 +59,25 @@ jobs:
             echo "Building $SUFFIX..."
             CGO_ENABLED=0 GOOS=$GOOS GOARCH=$GOARCH go build \
               -ldflags="-s -w -X main.version=${{ github.ref_name }}" \
-              -o "dist/snare_${SUFFIX}" \
+              -o "dist/snare" \
               ./cmd/snare
             cd dist
-            tar -czf "snare_${SUFFIX}.tar.gz" "snare_${SUFFIX}"
+            tar -czf "snare_${SUFFIX}.tar.gz" "snare"
             sha256sum "snare_${SUFFIX}.tar.gz" >> checksums.txt
-            rm "snare_${SUFFIX}"
+            rm "snare"
             cd ..
           done
           echo "=== checksums.txt ==="
           cat dist/checksums.txt
+
+      - name: Smoke test release archives
+        run: |
+          for archive in dist/snare_*.tar.gz; do
+            tmp="$(mktemp -d)"
+            tar -xzf "$archive" -C "$tmp"
+            test -x "$tmp/snare"
+            rm -rf "$tmp"
+          done
 
       - name: Sign checksums with cosign
         run: cosign sign-blob --yes dist/checksums.txt --bundle dist/checksums.txt.bundle
