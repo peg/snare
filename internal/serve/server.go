@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -20,6 +21,7 @@ import (
 )
 
 const sessionCookieName = "snare_session"
+const maxRequestBodyBytes int64 = 1 << 20
 
 // Config holds the server configuration.
 type Config struct {
@@ -119,7 +121,7 @@ func (s *Server) validSession(r *http.Request) bool {
 	if err != nil {
 		return false
 	}
-	return hmac.Equal([]byte(c.Value), []byte(s.sessionMAC()))
+	return secureCompare(c.Value, s.sessionMAC())
 }
 
 // setSessionCookie writes the session cookie to the response.
@@ -161,20 +163,27 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var token string
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
 	if strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
 		var body struct {
 			Token string `json:"token"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			http.Error(w, "bad request", http.StatusBadRequest)
+			status, msg := requestBodyError(err)
+			http.Error(w, msg, status)
 			return
 		}
 		token = body.Token
 	} else {
-		token = r.FormValue("token")
+		if err := r.ParseForm(); err != nil {
+			status, msg := requestBodyError(err)
+			http.Error(w, msg, status)
+			return
+		}
+		token = r.Form.Get("token")
 	}
 
-	if token != s.cfg.DashboardToken {
+	if !secureCompare(token, s.cfg.DashboardToken) {
 		// For HTML form submissions, redirect back to / which shows the login form
 		if strings.Contains(r.Header.Get("Accept"), "text/html") ||
 			r.Header.Get("Content-Type") == "application/x-www-form-urlencoded" {
@@ -216,7 +225,7 @@ func (s *Server) requireDashboardAuth(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		// Accept Bearer token in Authorization header (for API clients)
-		if r.Header.Get("Authorization") == "Bearer "+s.cfg.DashboardToken {
+		if secureCompare(bearerToken(r), s.cfg.DashboardToken) {
 			next(w, r)
 			return
 		}
@@ -249,7 +258,7 @@ button{background:#f5a623;color:#0a0a0b;border:none;padding:.625rem 1.25rem;bord
 func (s *Server) Serve(ctx context.Context) error {
 	defer s.db.close()
 
-	handler := s.mux
+	handler := securityHeaders(s.mux)
 
 	if s.cfg.TLSDomain != "" {
 		return s.serveTLS(ctx, handler)
@@ -329,6 +338,38 @@ func jsonResp(w http.ResponseWriter, status int, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+func decodeJSONBody(w http.ResponseWriter, r *http.Request, v interface{}) error {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
+	return json.NewDecoder(r.Body).Decode(v)
+}
+
+func requestBodyError(err error) (int, string) {
+	var maxErr *http.MaxBytesError
+	if errors.As(err, &maxErr) {
+		return http.StatusRequestEntityTooLarge, "request body too large"
+	}
+	return http.StatusBadRequest, "bad request"
+}
+
+func jsonDecodeError(w http.ResponseWriter, err error) {
+	status, msg := requestBodyError(err)
+	if status == http.StatusBadRequest {
+		msg = "invalid JSON"
+	}
+	jsonResp(w, status, map[string]string{"error": msg})
+}
+
+func securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
+		h.Set("Referrer-Policy", "no-referrer")
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("X-Frame-Options", "DENY")
+		next.ServeHTTP(w, r)
+	})
 }
 
 func clientIP(r *http.Request, trustedProxyNets []*net.IPNet) string {
@@ -436,5 +477,12 @@ func (s *Server) validateDevice(r *http.Request, deviceID string) (bool, error) 
 	if stored == "" {
 		return false, nil
 	}
-	return hashSecret(secret) == stored, nil
+	return secureCompare(hashSecret(secret), stored), nil
+}
+
+func secureCompare(a, b string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	return hmac.Equal([]byte(a), []byte(b))
 }

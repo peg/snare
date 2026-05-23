@@ -101,6 +101,7 @@ func Plant(t Type, params Params, targetPath string, dryRun bool, opts ...bool) 
 	// invalid config (e.g. duplicate provider_installation blocks in .terraformrc).
 	// For these types, fail early if the file already exists.
 	newFileOnly := map[Type]bool{
+		TypeDocker:    true,
 		TypeTerraform: true,
 	}
 	if newFileOnly[t] && fileExists {

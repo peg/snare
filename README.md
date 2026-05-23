@@ -187,7 +187,7 @@ Important state distinction:
 | `github` | `~/.config/gh/hosts.yml` | `gh` CLI targeting fake Enterprise host | Medium |
 | `stripe` | `~/.config/stripe/config.toml` | Stripe CLI or agent following verify URL | Medium |
 | `huggingface` | `~/.env.hf` | Any HF Hub SDK call via `HF_ENDPOINT` | Medium |
-| `docker` | `~/.docker/config.json` | `docker pull`/`login` to fake registry | Medium |
+| `docker` | `~/.docker/config.json` (new file only) | `docker pull`/`login` to fake registry | Medium |
 | `terraform` | `~/.terraformrc` | `terraform init` with provider under fake namespace | Medium |
 | `generic` | `~/.env.production` | Any SDK reading `API_BASE_URL` | Medium |
 
@@ -309,9 +309,10 @@ To point canaries at your own server instead of snare.sh, edit `callback_base` i
 
 `snare serve` requires `--dashboard-token` (or `SNARE_DASHBOARD_TOKEN`) to protect the dashboard. Generate one with `openssl rand -hex 32`.
 
-Docker Compose requires the dashboard token as an environment variable:
+Docker Compose can use `.env.example` as a starting point:
 
 ```sh
+cp .env.example .env
 SNARE_DASHBOARD_TOKEN="$(openssl rand -hex 32)" docker compose up -d
 ```
 

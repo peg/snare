@@ -1,6 +1,7 @@
 package bait_test
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -55,6 +56,11 @@ func testParams(t *testing.T, bt bait.Type) bait.Params {
 		p.FakeToken, e = token.NewGitHubToken()
 	case bait.TypeGit:
 		// Git template only needs ProfileName and CallbackURL
+	case bait.TypeDocker:
+		p.FakeRegistry, e = token.NewDockerRegistryName()
+		if e == nil {
+			p.FakeToken, e = token.NewNPMToken()
+		}
 	}
 	if e != nil {
 		t.Fatalf("generating params for %s: %v", bt, e)
@@ -148,6 +154,68 @@ func TestPlantAppend(t *testing.T) {
 				t.Error("canary TokenID not found after append")
 			}
 		})
+	}
+}
+
+func TestPlantDockerCreatesValidJSON(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	params := testParams(t, bait.TypeDocker)
+
+	placed, err := bait.Plant(bait.TypeDocker, params, path, false)
+	if err != nil {
+		t.Fatalf("Plant: %v", err)
+	}
+	if placed.Mode != manifest.ModeNewFile {
+		t.Fatalf("mode = %s, want %s", placed.Mode, manifest.ModeNewFile)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	var cfg struct {
+		Auths       map[string]map[string]string `json:"auths"`
+		CredHelpers map[string]string            `json:"credHelpers"`
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("docker config is invalid JSON: %v", err)
+	}
+	if cfg.Auths[params.FakeRegistry]["auth"] != params.FakeToken {
+		t.Fatal("docker auth entry missing")
+	}
+	if cfg.CredHelpers[params.FakeRegistry] == "" {
+		t.Fatal("docker credHelpers entry missing")
+	}
+}
+
+func TestPlantDockerRefusesExistingConfig(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	existing := `{"auths":{"registry.example.com":{"auth":"real"}}}`
+	if err := os.WriteFile(path, []byte(existing), 0600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	params := testParams(t, bait.TypeDocker)
+	_, err := bait.Plant(bait.TypeDocker, params, path, false)
+	if err == nil {
+		t.Fatal("Plant error = nil, want existing-file error")
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(data) != existing {
+		t.Fatal("existing Docker config changed")
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("existing Docker config is invalid JSON: %v", err)
+	}
+	if _, err := os.Stat(bait.BackupPath(path)); !os.IsNotExist(err) {
+		t.Fatalf("backup should not exist after refused plant: %v", err)
 	}
 }
 
