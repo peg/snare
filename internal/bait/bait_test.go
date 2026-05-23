@@ -283,6 +283,116 @@ func TestRemoveNewFile(t *testing.T) {
 	}
 }
 
+func TestRemoveNewFilePrunesEmptyParents(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	path := filepath.Join(home, ".config", "gcloud", "sa.json")
+	params := testParams(t, bait.TypeGCP)
+
+	placed, err := bait.Plant(bait.TypeGCP, params, path, false)
+	if err != nil {
+		t.Fatalf("Plant: %v", err)
+	}
+
+	c := manifest.Canary{
+		ID:          params.TokenID,
+		Path:        placed.Path,
+		Mode:        placed.Mode,
+		Content:     placed.Content,
+		ContentHash: manifest.HashContent(placed.Content),
+	}
+
+	if err := bait.Remove(c, false, false); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("file still exists after Remove: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".config", "gcloud")); !os.IsNotExist(err) {
+		t.Fatalf("empty gcloud parent still exists after Remove: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".config")); !os.IsNotExist(err) {
+		t.Fatalf("empty .config parent still exists after Remove: %v", err)
+	}
+	if _, err := os.Stat(home); err != nil {
+		t.Fatalf("home directory should not be pruned: %v", err)
+	}
+}
+
+func TestRemoveNewFileKeepsNonEmptyParents(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".config", "gcloud")
+	path := filepath.Join(dir, "sa.json")
+	sibling := filepath.Join(dir, "real-account.json")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(sibling, []byte("real config"), 0600); err != nil {
+		t.Fatalf("WriteFile sibling: %v", err)
+	}
+	params := testParams(t, bait.TypeGCP)
+
+	placed, err := bait.Plant(bait.TypeGCP, params, path, false)
+	if err != nil {
+		t.Fatalf("Plant: %v", err)
+	}
+
+	c := manifest.Canary{
+		ID:          params.TokenID,
+		Path:        placed.Path,
+		Mode:        placed.Mode,
+		Content:     placed.Content,
+		ContentHash: manifest.HashContent(placed.Content),
+	}
+
+	if err := bait.Remove(c, false, false); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("file still exists after Remove: %v", err)
+	}
+	if _, err := os.Stat(sibling); err != nil {
+		t.Fatalf("sibling file should be preserved: %v", err)
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("non-empty parent should be preserved: %v", err)
+	}
+}
+
+func TestRemoveNewFileDryRunDoesNotPruneParents(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	path := filepath.Join(home, ".config", "gcloud", "sa.json")
+	params := testParams(t, bait.TypeGCP)
+
+	placed, err := bait.Plant(bait.TypeGCP, params, path, false)
+	if err != nil {
+		t.Fatalf("Plant: %v", err)
+	}
+
+	c := manifest.Canary{
+		ID:          params.TokenID,
+		Path:        placed.Path,
+		Mode:        placed.Mode,
+		Content:     placed.Content,
+		ContentHash: manifest.HashContent(placed.Content),
+	}
+
+	if err := bait.Remove(c, false, true); err != nil {
+		t.Fatalf("Remove dry-run: %v", err)
+	}
+
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("file should survive dry-run Remove: %v", err)
+	}
+	if _, err := os.Stat(filepath.Dir(path)); err != nil {
+		t.Fatalf("parent should survive dry-run Remove: %v", err)
+	}
+}
+
 // TestRemoveAppended verifies teardown surgically removes only the canary block.
 func TestRemoveAppended(t *testing.T) {
 	dir := t.TempDir()

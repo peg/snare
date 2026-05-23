@@ -225,6 +225,7 @@ func removeNewFile(c manifest.Canary, force bool, dryRun bool) error {
 
 	if dryRun {
 		fmt.Printf("[dry-run] would delete %s\n", c.Path)
+		pruneEmptyParents(c.Path, true)
 		return nil
 	}
 
@@ -232,7 +233,69 @@ func removeNewFile(c manifest.Canary, force bool, dryRun bool) error {
 		return fmt.Errorf("removing %s: %w", c.Path, err)
 	}
 	fmt.Printf("  deleted %s\n", c.Path)
+	pruneEmptyParents(c.Path, false)
 	return nil
+}
+
+func pruneEmptyParents(removedPath string, dryRun bool) {
+	removedPath = filepath.Clean(removedPath)
+	dir := filepath.Clean(filepath.Dir(removedPath))
+	home, _ := os.UserHomeDir()
+	home = filepath.Clean(home)
+
+	for dir != "." && dir != string(filepath.Separator) && dir != home {
+		info, err := os.Lstat(dir)
+		if os.IsNotExist(err) {
+			return
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  ⚠  could not inspect parent directory %s: %v\n", dir, err)
+			return
+		}
+		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return
+		}
+
+		empty, err := dirEmptyAfterRemoval(dir, removedPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  ⚠  could not inspect parent directory %s: %v\n", dir, err)
+			return
+		}
+		if !empty {
+			return
+		}
+
+		if dryRun {
+			fmt.Printf("[dry-run] would remove empty directory %s\n", dir)
+		} else if err := os.Remove(dir); err != nil {
+			fmt.Fprintf(os.Stderr, "  ⚠  could not remove empty directory %s: %v\n", dir, err)
+			return
+		} else {
+			fmt.Printf("  removed empty directory %s\n", dir)
+		}
+
+		removedPath = dir
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return
+		}
+		dir = parent
+	}
+}
+
+func dirEmptyAfterRemoval(dir, removedPath string) (bool, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false, err
+	}
+	for _, entry := range entries {
+		entryPath := filepath.Clean(filepath.Join(dir, entry.Name()))
+		if entryPath == removedPath {
+			continue
+		}
+		return false, nil
+	}
+	return true, nil
 }
 
 func removeAppended(c manifest.Canary, force bool, dryRun bool) error {
