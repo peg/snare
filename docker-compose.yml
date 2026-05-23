@@ -16,12 +16,16 @@ services:
       - SNARE_DB=/data/snare.db
       - SNARE_WEBHOOK_URL=${SNARE_WEBHOOK_URL:-}
       - SNARE_TLS_DOMAIN=${SNARE_TLS_DOMAIN:-}
-    command: >
-      snare serve
-      --port 8080
-      --db /data/snare.db
-      ${SNARE_WEBHOOK_URL:+--webhook-url $SNARE_WEBHOOK_URL}
-      ${SNARE_TLS_DOMAIN:+--tls-domain $SNARE_TLS_DOMAIN}
+    command:
+      - serve
+      - --port
+      - "8080"
+      - --db
+      - /data/snare.db
+      - --webhook-url
+      - ${SNARE_WEBHOOK_URL:-}
+      - --tls-domain
+      - ${SNARE_TLS_DOMAIN:-}
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
       interval: 30s
