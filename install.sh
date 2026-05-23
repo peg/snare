@@ -59,8 +59,14 @@ if [ -z "$EXPECTED" ]; then
   echo "Failed to find checksum for ${TARBALL} in checksums.txt" >&2
   exit 1
 fi
-ACTUAL=$(sha256sum "${TMP}/${TARBALL}" 2>/dev/null | awk '{print $1}' \
-  || shasum -a 256 "${TMP}/${TARBALL}" | awk '{print $1}')
+if command -v sha256sum >/dev/null 2>&1; then
+  ACTUAL=$(sha256sum "${TMP}/${TARBALL}" | awk '{print $1}')
+elif command -v shasum >/dev/null 2>&1; then
+  ACTUAL=$(shasum -a 256 "${TMP}/${TARBALL}" | awk '{print $1}')
+else
+  echo "Need sha256sum or shasum to verify ${TARBALL}" >&2
+  exit 1
+fi
 if [ "$EXPECTED" != "$ACTUAL" ]; then
   echo "Checksum mismatch — download may be corrupt or tampered" >&2
   echo "  expected: $EXPECTED" >&2

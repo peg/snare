@@ -1,0 +1,14 @@
+.git
+.github
+.snare
+.env
+.env.*
+*.log
+*.tmp
+dist
+build
+coverage
+worker/node_modules
+worker/.wrangler
+node_modules
+.DS_Store
