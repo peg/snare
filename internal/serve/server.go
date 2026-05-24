@@ -378,7 +378,7 @@ func clientIP(r *http.Request, trustedProxyNets []*net.IPNet) string {
 		if ip := firstForwardedIP(r.Header.Get("X-Forwarded-For")); ip != "" {
 			return ip
 		}
-		if ip := strings.TrimSpace(r.Header.Get("X-Real-Ip")); ip != "" {
+		if ip := validHeaderIP(r.Header.Get("X-Real-Ip")); ip != "" {
 			return ip
 		}
 	}
@@ -401,7 +401,15 @@ func firstForwardedIP(xff string) string {
 	if len(parts) == 0 {
 		return ""
 	}
-	return strings.TrimSpace(parts[0])
+	return validHeaderIP(parts[0])
+}
+
+func validHeaderIP(value string) string {
+	ip := strings.TrimSpace(value)
+	if ip == "" || net.ParseIP(ip) == nil {
+		return ""
+	}
+	return ip
 }
 
 func parseTrustedProxyCIDRs(cidrs []string) ([]*net.IPNet, error) {

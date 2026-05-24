@@ -63,6 +63,13 @@ func (s *Server) processAlert(token, ip, ua, method, path, timestamp string, isT
 	if err != nil {
 		log.Printf("get token error: %v", err)
 	}
+	// Unregistered real tokens are usually scanners or typo/probe traffic. Match
+	// the managed Worker path: do not persist them and never relay webhooks.
+	// Test tokens remain allowed so local pipeline checks still produce events.
+	if reg == nil && !isTest {
+		log.Printf("UNREGISTERED token=*** ip=*** — skipping event and webhook")
+		return
+	}
 
 	e := event{
 		TokenID:   token,
@@ -79,17 +86,14 @@ func (s *Server) processAlert(token, ip, ua, method, path, timestamp string, isT
 		e.DeviceID = reg.DeviceID
 	}
 
-	log.Printf("CANARY_FIRED token=%s ip=%s is_test=%v ua=%s", token, ip, isTest, truncate(ua, 80))
+	logName := "CANARY_FIRED"
+	if isTest {
+		logName = "CANARY_TEST"
+	}
+	log.Printf("%s token=*** ip=*** is_test=%v ua=%s", logName, isTest, truncate(ua, 80))
 
 	if err := s.db.insertEvent(e); err != nil {
 		log.Printf("insert event error: %v", err)
-	}
-
-	// Unregistered tokens never fire webhooks — avoids false alerts from
-	// probe traffic hitting random/partial token URLs.
-	if reg == nil {
-		log.Printf("UNREGISTERED token=%s — skipping webhook", token)
-		return
 	}
 
 	// Determine webhook target
