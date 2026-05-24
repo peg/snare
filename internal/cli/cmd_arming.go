@@ -20,9 +20,8 @@ var precisionTypes = []bait.Type{
 	bait.TypeAWSProc, // fires at credential resolution — before any API call
 	bait.TypeSSH,     // fires on SSH connection attempt via ProxyCommand
 	bait.TypeK8s,     // fires on any kubectl/SDK call to fake cluster
-	// TypeGit excluded: credential.helper requires HTTP 401 from the fake host,
-	// but the fake hostname has no DNS record so git errors at DNS resolution
-	// before ever asking for credentials. Medium-high reliability at best.
+	// TypeGit excluded from precision: url.insteadOf now makes fake-host use
+	// reliably callback, but it still requires attacker/tool use of that fake host.
 	// TypeAzure excluded: service-principal-credentials.json not in standard
 	// Azure SDK credential chain — requires agent to explicitly hunt the file.
 }
@@ -30,13 +29,13 @@ var precisionTypes = []bait.Type{
 // selectEntry describes one row in the --select TUI.
 type selectEntry struct {
 	t    bait.Type
-	tier string // "precision", "high", "medium"
+	tier string // "precision", "high", "high-noisy", "medium"
 	path string // short description of where it plants
 }
 
 // allSelectEntries is the canonical ordered list for --select mode.
 var allSelectEntries = []selectEntry{
-	// Precision: fire via SDK/OS hooks, no DNS dependency, zero false positives
+	// Precision: fire via SDK/OS hooks, no DNS dependency, near-zero false positives
 	{bait.TypeAWSProc, "precision", "~/.aws/config (credential_process)"},
 	{bait.TypeSSH, "precision", "~/.ssh/config (ProxyCommand)"},
 	{bait.TypeK8s, "precision", "~/.kube/<name>.yaml (server URL)"},
@@ -44,8 +43,9 @@ var allSelectEntries = []selectEntry{
 	{bait.TypeAWS, "high", "~/.aws/credentials (endpoint_url)"},
 	{bait.TypeGCP, "high", "~/.config/gcloud/sa-*.json (token_uri)"},
 	{bait.TypeNPM, "high", "~/.npmrc (scoped registry)"},
-	{bait.TypeGit, "high", "~/.gitconfig (credential.helper)"},
-	{bait.TypePyPI, "high", "~/.config/pip/pip.conf (extra-index-url) ⚠ side effect"},
+	{bait.TypeGit, "high", "~/.gitconfig (url.insteadOf + credential.helper)"},
+	// High-noisy: strong trigger, but global package config may fire during normal work
+	{bait.TypePyPI, "high-noisy", "~/.config/pip/pip.conf (extra-index-url) ⚠ side effect"},
 	// Medium: dotenv-dependent, DNS-dependent, or needs explicit credential scanning
 	{bait.TypeAzure, "medium", "~/.azure/service-principal-credentials.json"},
 	{bait.TypeOpenAI, "medium", "~/.env (OPENAI_BASE_URL)"},
@@ -76,9 +76,10 @@ func runSelectTUI() ([]bait.Type, error) {
 
 	cursor := 0
 	tierColors := map[string]string{
-		"precision": "\033[33m", // amber
-		"high":      "\033[32m", // green
-		"medium":    "\033[36m", // cyan
+		"precision":  "\033[33m", // amber
+		"high":       "\033[32m", // green
+		"high-noisy": "\033[35m", // magenta
+		"medium":     "\033[36m", // cyan
 	}
 	reset := "\033[0m"
 	bold := "\033[1m"
@@ -209,8 +210,9 @@ Usage:
   snare arm [flags]
 
 By default, snare arm plants only the highest-signal canaries (awsproc, ssh, k8s).
-These fire only on active credential use — zero false positives from your own tooling.
-Running AI agents on this machine? The default precision mode won't fire on your own tooling.
+These fire only on active credential use — near-zero false-positive risk.
+Running AI agents on this machine? Precision mode stays quiet during normal work
+unless the planted fake AWS profile, SSH host, or kube context is actively used.
 Use --all to arm every canary type, or --select to pick interactively.
 
 Flags:
@@ -309,6 +311,7 @@ Naming tip:
 	fmt.Println("  Planting canaries...")
 
 	armTypes := precisionTypes
+	armMode := "precision"
 	switch {
 	case armSelect:
 		selected, err := runSelectTUI()
@@ -320,12 +323,15 @@ Naming tip:
 		for i, t := range selected {
 			names[i] = string(t)
 		}
+		armMode = "custom"
 		fmt.Printf("  Custom mode: planting %s\n", strings.Join(names, ", "))
 	case armAll:
 		armTypes = allCanaryTypes
+		armMode = "full"
 		fmt.Println("  Full mode: planting all 18 canary types (including dotenv-based)")
 	default:
-		fmt.Println("  Precision mode: planting highest-signal canaries only (awsproc, ssh, k8s)")
+		fmt.Println("  Precision mode: planting active-use canaries only (awsproc, ssh, k8s)")
+		fmt.Println("  These stay quiet unless the fake AWS profile, SSH host, or kube context is used.")
 	}
 
 	planted := 0
@@ -416,6 +422,7 @@ Naming tip:
 
 	if dryRun {
 		fmt.Printf("\n  [dry-run] would plant %d canaries\n", planted)
+		fmt.Println("  [dry-run] no files were written and no webhook test was fired.")
 		return
 	}
 
@@ -451,6 +458,19 @@ Naming tip:
 		fmt.Println(" This machine is protected.")
 	}
 	fmt.Println()
-	fmt.Println("  Run `snare status` to check.")
+	if armMode == "precision" {
+		fmt.Println("  Precision mode is safe for first run: alerts require active use of the fake")
+		fmt.Println("  AWS profile, SSH host, or kube context. Passive file reads do not fire them.")
+	} else {
+		fmt.Println("  Canaries are now waiting for a real hit. No event is recorded until bait is used.")
+	}
+	fmt.Println()
+	fmt.Println("  Next checks:")
+	fmt.Println("    snare status   show event state; `never fired` is normal at first")
+	fmt.Println("    snare scan     verify planted files are present and unchanged")
+	fmt.Println("    snare doctor   confidence screen: config, API, ownership, and test health")
+	fmt.Println("    snare repair   re-sync registrations safely if doctor finds drift")
+	fmt.Println("    snare prove    print safe precision trigger commands (awsproc/ssh/k8s)")
+	fmt.Println("    snare events   view real hits when one arrives")
 	fmt.Println("  Run `snare disarm` to remove everything.")
 }

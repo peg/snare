@@ -1,7 +1,6 @@
 package serve
 
 import (
-	"encoding/json"
 	"log"
 	"net/http"
 	"strings"
@@ -115,8 +114,8 @@ func (s *Server) handleCreateDevice(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		DeviceSecret string `json:"device_secret"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		jsonResp(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+	if err := decodeJSONBody(w, r, &body); err != nil {
+		jsonDecodeError(w, err)
 		return
 	}
 	if len(body.DeviceSecret) < 32 {
@@ -157,8 +156,8 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		CanaryType string `json:"canary_type"`
 		Label      string `json:"label"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		jsonResp(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+	if err := decodeJSONBody(w, r, &body); err != nil {
+		jsonDecodeError(w, err)
 		return
 	}
 
@@ -232,8 +231,8 @@ func (s *Server) handleRevoke(w http.ResponseWriter, r *http.Request) {
 		TokenID  string `json:"token_id"`
 		DeviceID string `json:"device_id"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		jsonResp(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+	if err := decodeJSONBody(w, r, &body); err != nil {
+		jsonDecodeError(w, err)
 		return
 	}
 	if body.TokenID == "" {
@@ -290,8 +289,8 @@ func (s *Server) handleRotate(w http.ResponseWriter, r *http.Request) {
 		DeviceID  string `json:"device_id"`
 		NewSecret string `json:"new_secret"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		jsonResp(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+	if err := decodeJSONBody(w, r, &body); err != nil {
+		jsonDecodeError(w, err)
 		return
 	}
 	if body.DeviceID == "" {
@@ -351,7 +350,9 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Auth is required. Device ID comes from the token registration, or from X-Snare-Device-Id header.
+	// Auth is required. Device ID comes from token registration or stored event
+	// ownership. Header-only fallback would make unregistered local canaries look
+	// like registered-but-quiet canaries in `snare status`.
 	deviceID := ""
 	if reg != nil {
 		deviceID = reg.DeviceID
@@ -364,10 +365,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if deviceID == "" {
-		deviceID = r.Header.Get("X-Snare-Device-Id")
-	}
-	if deviceID == "" {
-		jsonResp(w, http.StatusUnauthorized, map[string]string{"error": "authentication required"})
+		jsonResp(w, http.StatusUnauthorized, map[string]string{"error": "token not registered"})
 		return
 	}
 

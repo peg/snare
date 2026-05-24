@@ -260,6 +260,41 @@ describe("event ownership after revoke", () => {
     expect(body.events).toHaveLength(1);
     expect(body.events[0].token).toBe(token);
   });
+
+  it("rejects unregistered tokens even with a valid device header", async () => {
+    const secret = "ownersecret000000000000000000000001";
+    const device = "dev-owner";
+
+    const sha256 = async (input) => {
+      const hashBuf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(input));
+      return Array.from(new Uint8Array(hashBuf)).map(b => b.toString(16).padStart(2, "0")).join("");
+    };
+
+    const kv = new Map([
+      [`device:${device}`, JSON.stringify({ secret_hash: await sha256(secret) })],
+    ]);
+
+    const env = {
+      SNARE_KV: {
+        get: async (key) => kv.has(key) ? kv.get(key) : null,
+        put: async (key, value) => { kv.set(key, value); },
+        list: async ({ prefix, limit }) => ({
+          keys: [...kv.keys()].filter(k => k.startsWith(prefix)).slice(0, limit).map(name => ({ name })),
+        }),
+      },
+    };
+
+    const req = new Request("https://snare.sh/api/events/unregistered-token-001", {
+      headers: {
+        authorization: `Bearer ${secret}`,
+        "x-snare-device-id": device,
+      },
+    });
+    const resp = await worker.fetch(req, env, { waitUntil() {} });
+    expect(resp.status).toBe(401);
+    const body = await resp.json();
+    expect(body.error).toBe("token not registered");
+  });
 });
 
 describe("resolveWebhooks", () => {

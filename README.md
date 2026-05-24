@@ -72,13 +72,13 @@ That's it. Snare initializes, plants the highest-signal canaries, fires a test a
 
 By default, `snare arm` uses **precision mode**: only `awsproc`, `ssh`, and `k8s` canaries are planted. These fire via existing SDK and OS plumbing with near-zero false positive risk.
 
-**Running AI agents on this machine?** The default precision mode won't fire on your own tooling. Use `--select` for an interactive picker, or `--all` to arm every canary type.
+**Running AI agents on this machine?** Precision mode stays quiet during normal work unless the planted fake AWS profile, SSH host, or kube context is actively used. Use `--select` for an interactive picker, or `--all` to arm every canary type.
 
 ```
   ✓ initialized (device: dev-2146102a5849a7b3)
 
   Planting canaries...
-  Precision mode: planting highest-signal canaries only (awsproc, ssh, k8s)
+  Precision mode: planting active-use canaries only (awsproc, ssh, k8s)
     ✓ awsproc      ~/.aws/config
     ✓ ssh          ~/.ssh/config
     ✓ k8s          ~/.kube/staging-deploy.yaml
@@ -86,7 +86,20 @@ By default, `snare arm` uses **precision mode**: only `awsproc`, `ssh`, and `k8s
   ✓ webhook test fired
 
   🪤 3 canaries armed. This machine is protected.
+
+  Precision mode is safe for first run: alerts require active use of the fake
+  AWS profile, SSH host, or kube context. Passive file reads do not fire them.
+
+  Next checks:
+    snare status   show event state; `never fired` is normal at first
+    snare scan     verify planted files are present and unchanged
+    snare doctor   confidence screen: config, API, ownership, and test health
+    snare repair   re-sync registrations safely if doctor finds drift
+    snare prove    print safe precision trigger commands (awsproc/ssh/k8s)
+    snare events   view real hits when one arrives
 ```
+
+Immediately after arming, `snare status` will usually show `never fired`. That is expected: it means Snare has not recorded a real callback for that canary yet. Use `snare scan` for local file integrity, `snare doctor` for setup health, and `snare test` if you want to fire a synthetic callback and check your webhook destination.
 
 To arm all canary types (including dotenv-based ones like OpenAI, Anthropic, etc.):
 
@@ -106,12 +119,15 @@ snare arm --select           # interactive picker: choose which canaries to arm
 snare arm --all              # plant all 18 canary types
 snare disarm                 # remove all canaries (keep config)
 snare disarm --purge         # remove canaries + ~/.snare/ config
-snare status                 # show active canaries + last-seen timestamps
+snare status                 # show active canaries + event state
+snare repair                 # re-register active tokens + run a live test check
+snare sync                   # alias for snare repair
+snare prove [--type <t>]     # guided precision trigger commands (awsproc/ssh/k8s)
 snare events                 # fetch recent alert history from snare.sh
 snare events --summary       # ASN/UA distribution across all canaries
 snare scan                   # check canary integrity on disk
 snare test                   # fire a test alert to verify your webhook
-snare doctor                 # validate configuration and canary health
+snare doctor [--test]        # confidence screen; add --test for live callback proof
 snare config                 # show current config
 snare config set webhook <url>  # update webhook URL
 snare rotate                 # rotate device secret (if config.json was exposed)
@@ -132,18 +148,38 @@ snare teardown --dry-run     # preview what would be removed
 
 ---
 
+## Confidence loop (first 10 minutes)
+
+After `snare arm`, the expected healthy loop is:
+
+- `snare status` shows active canaries and event state. `never fired` is normal until someone actively uses a planted fake credential.
+- `snare scan` is local-only integrity: present/modified/missing/orphaned files. It does not fire alerts.
+- `snare doctor` is the confidence screen: config, callback health, local canary files, token ownership, events API readability, and webhook test history.
+- `snare doctor --test` runs a live callback test and verifies it is readable in the events API.
+- `snare test` sends a synthetic callback test only; check your webhook destination for the routed alert.
+- `snare events` shows real hit history; empty output on fresh installs is expected.
+- `snare repair` (or `snare sync`) safely re-registers active tokens and re-tests callback/event readability when drift is detected.
+- `snare prove` prints safe precision trigger commands so you can intentionally prove alerts fire for `awsproc`, `ssh`, and `k8s`.
+
+Important state distinction:
+
+- `never fired` means token is registered/readable and no real callback has happened yet.
+- `events unavailable` means API/auth/readability failed for that token; run `snare doctor`, then `snare repair` if needed.
+
+---
+
 ## Canary types
 
 | Type | Location | Trigger | Tier |
 |------|----------|---------|------|
 | `awsproc` | `~/.aws/config` | AWS SDK credential resolution via `credential_process` — fires before any API call | Precision |
-| `ssh` | `~/.ssh/config` | SSH connection via `ProxyCommand` callback | Precision |
-| `k8s` | `~/.kube/<name>.yaml` | Any `kubectl` call to fake cluster | Precision |
+| `ssh` | `~/.ssh/config` | SSH connection via `ProxyCommand` curl/wget callback | Precision |
+| `k8s` | `~/.kube/<name>.yaml` | `kubectl` exec credential callback, plus fake API server URL | Precision |
 | `aws` | `~/.aws/credentials` | Any AWS SDK/CLI call via `endpoint_url` | High |
 | `gcp` | `~/.config/gcloud/sa-*.json` | GCP auth attempt via `token_uri` redirect | High |
 | `npm` | `~/.npmrc` | `npm install` of scoped package from fake registry | High |
-| `git` | `~/.gitconfig` | `git credential fill` against fake host via `credential.helper` | High |
-| `pypi` | `~/.config/pip/pip.conf` | `pip install` queries fake extra index — **fires on your own installs too** | High |
+| `git` | `~/.gitconfig` | Fake Git host URL rewrite plus credential-helper fallback | High |
+| `pypi` | `~/.config/pip/pip.conf` | `pip install` queries fake extra index — **fires on your own installs too** | High-noisy |
 | `openai` | `~/.env` | Any OpenAI SDK call via `OPENAI_BASE_URL` | Medium |
 | `anthropic` | `~/.env.local` | Any Anthropic SDK call via `ANTHROPIC_BASE_URL` | Medium |
 | `azure` | `~/.azure/service-principal-credentials.json` | Azure SDK token fetch via `tokenEndpoint` | Medium |
@@ -151,13 +187,15 @@ snare teardown --dry-run     # preview what would be removed
 | `github` | `~/.config/gh/hosts.yml` | `gh` CLI targeting fake Enterprise host | Medium |
 | `stripe` | `~/.config/stripe/config.toml` | Stripe CLI or agent following verify URL | Medium |
 | `huggingface` | `~/.env.hf` | Any HF Hub SDK call via `HF_ENDPOINT` | Medium |
-| `docker` | `~/.docker/config.json` | `docker pull`/`login` to fake registry | Medium |
+| `docker` | `~/.docker/config.json` (new file only) | `docker pull`/`login` to fake registry | Medium |
 | `terraform` | `~/.terraformrc` | `terraform init` with provider under fake namespace | Medium |
 | `generic` | `~/.env.production` | Any SDK reading `API_BASE_URL` | Medium |
 
-**Precision** canaries fire via existing SDK and OS plumbing — near-zero false positives, no side effects on your own tooling. Default with `snare arm`.
+**Precision** canaries fire via existing SDK and OS plumbing — near-zero false positives during normal work because they require active use of the planted fake profile, host, or context. Default with `snare arm`.
 
-**High** canaries fire when the credential is actively used by anyone — human attacker, compromised agent, scanner. Some (pypi) have side effects on your own installs.
+**High** canaries fire when the credential is actively used by anyone — human attacker, compromised agent, scanner.
+
+**High-noisy** canaries fire readily, but may also trigger during normal developer workflows. `pypi` is useful for aggressive monitoring, not the quiet default.
 
 **Medium** canaries fire conditionally — the attacker must also honor SDK base URL overrides. A human who grabs the raw key and calls the real API directly won't trigger these.
 
@@ -271,9 +309,10 @@ To point canaries at your own server instead of snare.sh, edit `callback_base` i
 
 `snare serve` requires `--dashboard-token` (or `SNARE_DASHBOARD_TOKEN`) to protect the dashboard. Generate one with `openssl rand -hex 32`.
 
-Docker Compose requires the dashboard token as an environment variable:
+Docker Compose can use `.env.example` as a starting point:
 
 ```sh
+cp .env.example .env
 SNARE_DASHBOARD_TOKEN="$(openssl rand -hex 32)" docker compose up -d
 ```
 

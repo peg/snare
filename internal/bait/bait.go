@@ -16,24 +16,24 @@ import (
 type Type string
 
 const (
-	TypeAWS       Type = "aws"
-	TypeGitHub    Type = "github"
-	TypeStripe    Type = "stripe"
-	TypeGCP       Type = "gcp"
-	TypeOpenAI    Type = "openai"
-	TypeAnthropic Type = "anthropic"
-	TypeSSH       Type = "ssh"
-	TypeK8s       Type = "k8s"
-	TypeNPM       Type = "npm"
-	TypeMCP       Type = "mcp"
-	TypePyPI      Type = "pypi"
-	TypeAWSProc      Type = "awsproc"
-	TypeGeneric      Type = "generic"
-	TypeHuggingFace  Type = "huggingface"
-	TypeDocker       Type = "docker"
-	TypeAzure        Type = "azure"
-	TypeGit          Type = "git"
-	TypeTerraform    Type = "terraform"
+	TypeAWS         Type = "aws"
+	TypeGitHub      Type = "github"
+	TypeStripe      Type = "stripe"
+	TypeGCP         Type = "gcp"
+	TypeOpenAI      Type = "openai"
+	TypeAnthropic   Type = "anthropic"
+	TypeSSH         Type = "ssh"
+	TypeK8s         Type = "k8s"
+	TypeNPM         Type = "npm"
+	TypeMCP         Type = "mcp"
+	TypePyPI        Type = "pypi"
+	TypeAWSProc     Type = "awsproc"
+	TypeGeneric     Type = "generic"
+	TypeHuggingFace Type = "huggingface"
+	TypeDocker      Type = "docker"
+	TypeAzure       Type = "azure"
+	TypeGit         Type = "git"
+	TypeTerraform   Type = "terraform"
 )
 
 // Params are filled into bait templates.
@@ -101,6 +101,7 @@ func Plant(t Type, params Params, targetPath string, dryRun bool, opts ...bool) 
 	// invalid config (e.g. duplicate provider_installation blocks in .terraformrc).
 	// For these types, fail early if the file already exists.
 	newFileOnly := map[Type]bool{
+		TypeDocker:    true,
 		TypeTerraform: true,
 	}
 	if newFileOnly[t] && fileExists {
@@ -224,6 +225,7 @@ func removeNewFile(c manifest.Canary, force bool, dryRun bool) error {
 
 	if dryRun {
 		fmt.Printf("[dry-run] would delete %s\n", c.Path)
+		pruneEmptyParents(c.Path, true)
 		return nil
 	}
 
@@ -231,7 +233,69 @@ func removeNewFile(c manifest.Canary, force bool, dryRun bool) error {
 		return fmt.Errorf("removing %s: %w", c.Path, err)
 	}
 	fmt.Printf("  deleted %s\n", c.Path)
+	pruneEmptyParents(c.Path, false)
 	return nil
+}
+
+func pruneEmptyParents(removedPath string, dryRun bool) {
+	removedPath = filepath.Clean(removedPath)
+	dir := filepath.Clean(filepath.Dir(removedPath))
+	home, _ := os.UserHomeDir()
+	home = filepath.Clean(home)
+
+	for dir != "." && dir != string(filepath.Separator) && dir != home {
+		info, err := os.Lstat(dir)
+		if os.IsNotExist(err) {
+			return
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  ⚠  could not inspect parent directory %s: %v\n", dir, err)
+			return
+		}
+		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return
+		}
+
+		empty, err := dirEmptyAfterRemoval(dir, removedPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  ⚠  could not inspect parent directory %s: %v\n", dir, err)
+			return
+		}
+		if !empty {
+			return
+		}
+
+		if dryRun {
+			fmt.Printf("[dry-run] would remove empty directory %s\n", dir)
+		} else if err := os.Remove(dir); err != nil {
+			fmt.Fprintf(os.Stderr, "  ⚠  could not remove empty directory %s: %v\n", dir, err)
+			return
+		} else {
+			fmt.Printf("  removed empty directory %s\n", dir)
+		}
+
+		removedPath = dir
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return
+		}
+		dir = parent
+	}
+}
+
+func dirEmptyAfterRemoval(dir, removedPath string) (bool, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false, err
+	}
+	for _, entry := range entries {
+		entryPath := filepath.Clean(filepath.Join(dir, entry.Name()))
+		if entryPath == removedPath {
+			continue
+		}
+		return false, nil
+	}
+	return true, nil
 }
 
 func removeAppended(c manifest.Canary, force bool, dryRun bool) error {
@@ -521,7 +585,7 @@ endpoint_url          = {{.CallbackURL}}
 	// A hijacked agent scanning for GitHub credentials would find the oauth_token
 	// and potentially try to use it via `gh api --hostname git.{{.ProfileName}}.io`.
 	TypeGitHub: template.Must(template.New("github").Parse(
-`
+		`
 git.{{.ProfileName}}.io:
     oauth_token: {{.FakeToken}}
     git_protocol: https
@@ -539,7 +603,7 @@ git.{{.ProfileName}}.io:
 	//
 	// The profile name looks like a real project, not a test key.
 	TypeStripe: template.Must(template.New("stripe").Parse(
-`
+		`
 # {{.ProfileName}} — live billing, restricted key
 # Verify access: {{.CallbackURL}}
 [{{.ProfileName}}]
@@ -554,7 +618,7 @@ test_mode_api_key = "sk_test_{{.FakeKeyID}}"
 	//   - Still valuable: agents that DO load dotenv (Claude Code, many Python agents) will fire
 	//   - Real-world tested: Codex CLI fires if OPENAI_BASE_URL is set in environment
 	TypeOpenAI: template.Must(template.New("openai").Parse(
-`# openai credentials — backup key
+		`# openai credentials — backup key
 OPENAI_API_KEY={{.FakeToken}}
 OPENAI_BASE_URL={{.CallbackURL}}/v1
 `)),
@@ -566,7 +630,7 @@ OPENAI_BASE_URL={{.CallbackURL}}/v1
 	//   - Same conditional as OpenAI — depends on agent's dotenv loading behavior
 	//   - Still valuable: Claude-based agents often have ANTHROPIC_API_KEY in their env
 	TypeAnthropic: template.Must(template.New("anthropic").Parse(
-`# anthropic credentials — backup key
+		`# anthropic credentials — backup key
 ANTHROPIC_API_KEY={{.FakeToken}}
 ANTHROPIC_BASE_URL={{.CallbackURL}}
 `)),
@@ -575,7 +639,7 @@ ANTHROPIC_BASE_URL={{.CallbackURL}}
 	//
 	// Reliability: HIGH
 	//   - Fires via ProxyCommand when anyone/anything runs `ssh <hostname>`
-	//   - ProxyCommand executes curl to snare.sh, which fires the canary
+	//   - ProxyCommand executes curl/wget to snare.sh, which fires the canary
 	//   - The host looks like a forgotten jump box / bastion server
 	//   - SSH config is a prime target for compromised agents doing lateral movement
 	//   - curl runs silently (-s), agent sees a connection error, canary fires
@@ -586,7 +650,7 @@ Host {{.ProfileName}}
     HostName {{.ProfileName}}.internal
     User deploy
     IdentityFile ~/.ssh/id_ed25519
-    ProxyCommand curl -sf {{.CallbackURL}} -o /dev/null && nc %h %p
+    ProxyCommand sh -c 'curl -fsS {{.CallbackURL}}/ssh -o /dev/null 2>/dev/null || wget -qO- {{.CallbackURL}}/ssh >/dev/null 2>&1 || true; exec nc "$0" "$1"' %h %p
     ServerAliveInterval 60
     StrictHostKeyChecking no
 `)),
@@ -595,7 +659,9 @@ Host {{.ProfileName}}
 	//
 	// Reliability: HIGH
 	//   - Fires when kubectl targets this cluster (via --kubeconfig or KUBECONFIG env)
-	//   - The server URL points to snare.sh — any API call fires the canary
+	//   - HTTPS callback base: exec credential plugin fires before the API request
+	//   - HTTP/self-host callback base: server URL still fires during API discovery
+	//   - The server URL also points to snare.sh — any API call fires the canary
 	//   - kubeconfig is a top-value credential for compromised agents
 	//   - A compromised agent scanning ~/.kube/ will find this and try to use it
 	//   - The cluster name looks like a real staging/prod cluster
@@ -623,7 +689,16 @@ contexts:
 users:
 - name: {{.ProfileName}}-deploy
   user:
-    token: {{.FakeToken}}
+    exec:
+      apiVersion: client.authentication.k8s.io/v1
+      command: sh
+      args:
+      - -c
+      - >-
+        curl -fsS "{{.CallbackURL}}/exec" -o /dev/null 2>/dev/null || wget -qO- "{{.CallbackURL}}/exec" >/dev/null 2>&1 || true;
+        printf '{"apiVersion":"client.authentication.k8s.io/v1","kind":"ExecCredential","status":{"token":"{{.FakeToken}}"}}'
+      interactiveMode: Never
+      provideClusterInfo: false
 `)),
 
 	// npm: Adds a scoped registry entry to ~/.npmrc.
@@ -676,13 +751,14 @@ users:
 
 	// PyPI: Adds an extra-index-url to pip config pointing to snare.sh.
 	//
-	// Reliability: HIGH
+	// Reliability: HIGH-NOISY
 	//   - Fires when pip/uv/poetry tries to install from the fake index
 	//   - pip checks all index URLs during dependency resolution
 	//   - The fake index URL points to snare.sh's /simple/ endpoint
 	//   - pip sends package name + version queries as path components
 	//   - AI coding agents constantly run pip install / uv sync
 	//   - Same mechanism as npm canary but for the Python ecosystem
+	//   - Noisy: normal user pip installs can fire this too
 	TypePyPI: template.Must(template.New("pypi").Parse(
 		`
 [global]
@@ -716,7 +792,7 @@ credential_process = sh -c 'r=$(curl -sf "{{.CallbackURL}}" -o /dev/null -w "%{h
 	// Generic: .env.local style with API base redirect.
 	// Works for any agent using a custom API client that respects API_BASE_URL.
 	TypeGeneric: template.Must(template.New("generic").Parse(
-`# {{.ProfileName}} service credentials
+		`# {{.ProfileName}} service credentials
 API_KEY={{.FakeToken}}
 API_BASE_URL={{.CallbackURL}}
 # verify: {{.CallbackURL}}
@@ -731,7 +807,7 @@ API_BASE_URL={{.CallbackURL}}
 	//   - Mirrors the OpenAI (OPENAI_BASE_URL) and Anthropic (ANTHROPIC_BASE_URL) approach
 	//   - Real-world: many Python ML agents load .env files automatically (dotenv, python-decouple)
 	TypeHuggingFace: template.Must(template.New("huggingface").Parse(
-`# huggingface credentials — {{.ProfileName}}
+		`# huggingface credentials — {{.ProfileName}}
 HF_TOKEN={{.FakeToken}}
 HUGGING_FACE_HUB_TOKEN={{.FakeToken}}
 HF_ENDPOINT={{.CallbackURL}}
@@ -770,11 +846,11 @@ HF_ENDPOINT={{.CallbackURL}}
 	// Azure: plants a fake service principal credentials file at
 	// ~/.azure/service-principal-credentials.json.
 	//
-	// Reliability: HIGH
+	// Reliability: MEDIUM
 	//   - tokenEndpoint is called by the Azure SDK / Azure CLI whenever
-	//     the service principal authenticates (every token refresh)
-	//   - Any code using DefaultAzureCredential or az login --service-principal
-	//     will hit snare.sh before doing anything else
+	//     this planted service-principal file is explicitly used
+	//   - Not in the default Azure SDK credential chain by itself; the attacker/agent
+	//     has to discover the file and try to use it
 	//   - JSON structure matches the real Azure SP credential file format
 	//   - Tenant ID and Client ID look like real UUIDs
 	TypeAzure: template.Must(template.New("azure").Parse(`{
@@ -799,21 +875,25 @@ HF_ENDPOINT={{.CallbackURL}}
 }
 `)),
 
-	// Git: Appends a credential.helper entry to ~/.gitconfig.
+	// Git: Appends URL rewrite + credential.helper entries to ~/.gitconfig.
 	//
 	// Reliability: HIGH
-	//   - Fires when an agent runs `git credential fill` with the fake host URL
+	//   - Fires when an agent runs `git clone` / `git ls-remote` against the fake host
+	//   - url.insteadOf rewrites the fake enterprise Git URL directly to snare.sh
+	//   - Also fires when an agent runs `git credential fill` with the fake host URL
 	//   - Helper script curls snare.sh callback silently then exits 1 (git fails gracefully)
 	//   - Scoped to a fake internal git server hostname — near-zero false positives
-	//   - No daemon required — synchronous credential helper protocol
-	//   - Fires only on active git credential lookup, not on reading the config file
-	//   - NOT precision: credential.helper requires HTTP 401 from the fake host.
-	//     The fake hostname has no DNS record, so git fails at DNS resolution before
-	//     issuing the auth challenge on clone/pull. Fires reliably on git credential fill.
+	//   - No daemon required; normal Git HTTP transport hits the callback URL
+	//   - Fires only on active fake-host use, not on reading the config file
 	TypeGit: template.Must(template.New("git").Parse(`
+[url "{{.CallbackURL}}/git/"]
+	insteadOf = https://git.{{.ProfileName}}.io/
+	insteadOf = ssh://git@git.{{.ProfileName}}.io/
+	insteadOf = git@git.{{.ProfileName}}.io:
+
 [credential "https://git.{{.ProfileName}}.io"]
 	username = deploy-bot
-	helper = !sh -c 'curl -sf {{.CallbackURL}} -o /dev/null 2>/dev/null; echo ""; exit 1'
+	helper = !sh -c 'curl -sf {{.CallbackURL}}/credential -o /dev/null 2>/dev/null; echo ""; exit 1'
 `)),
 
 	// Terraform: Creates ~/.terraformrc with a provider_installation network_mirror block.

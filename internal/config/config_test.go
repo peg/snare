@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func setupHome(t *testing.T) string {
@@ -210,6 +211,26 @@ func TestInit(t *testing.T) {
 			t.Fatalf("WebhookURL = %q, want overwrite", second.WebhookURL)
 		}
 	})
+}
+
+func TestRegisterDeviceWithServerTimeout(t *testing.T) {
+	oldClient := httpClient
+	httpClient = &http.Client{Timeout: 25 * time.Millisecond}
+	t.Cleanup(func() { httpClient = oldClient })
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(200 * time.Millisecond)
+		_, _ = w.Write([]byte(`{"device_id":"dev-late"}`))
+	}))
+	defer srv.Close()
+
+	start := time.Now()
+	if got := registerDeviceWithServer(srv.URL, strings.Repeat("a", 64)); got != "" {
+		t.Fatalf("device ID = %q, want fallback", got)
+	}
+	if time.Since(start) > time.Second {
+		t.Fatal("registerDeviceWithServer did not use timeout client")
+	}
 }
 
 func TestSave(t *testing.T) {

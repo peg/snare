@@ -180,6 +180,54 @@ func TestValidateDevice_unknownDevice(t *testing.T) {
 	}
 }
 
+func TestValidateDevice_malformedStoredHash(t *testing.T) {
+	s := testServer(t)
+	_, err := s.db.db.Exec(
+		`INSERT INTO devices (device_id, secret_hash, created_at) VALUES (?, ?, ?)`,
+		"dev-badhash", "not-a-sha256", "2024-01-01T00:00:00Z",
+	)
+	if err != nil {
+		t.Fatalf("insert device: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/register", nil)
+	req.Header.Set("Authorization", "Bearer "+strings.Repeat("a", 64))
+
+	ok, err := s.validateDevice(req, "dev-badhash")
+	if err != nil {
+		t.Fatalf("validateDevice: %v", err)
+	}
+	if ok {
+		t.Fatal("malformed stored hash validated")
+	}
+}
+
+func TestSecurityHeaders(t *testing.T) {
+	h := securityHeaders(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	if rr.Header().Get("X-Frame-Options") != "DENY" {
+		t.Fatal("missing X-Frame-Options")
+	}
+	if !strings.Contains(rr.Header().Get("Content-Security-Policy"), "frame-ancestors 'none'") {
+		t.Fatal("missing CSP frame-ancestors")
+	}
+}
+
+func TestJSONBodyLimit(t *testing.T) {
+	s := testServer(t)
+	body := `{"device_secret":"` + strings.Repeat("a", int(maxRequestBodyBytes)) + `"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/devices", strings.NewReader(body))
+	rr := httptest.NewRecorder()
+
+	s.handleCreateDevice(rr, req)
+	if rr.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413", rr.Code)
+	}
+}
+
 // ─── POST /api/devices ───────────────────────────────────────────────────────
 
 func TestHandleCreateDevice(t *testing.T) {
@@ -438,6 +486,29 @@ func TestHandleEventsAfterRevokeStillRequiresOriginalOwner(t *testing.T) {
 	s.handleEvents(ownerRR, ownerReq)
 	if ownerRR.Code != http.StatusOK {
 		t.Fatalf("owner status = %d, want 200: %s", ownerRR.Code, ownerRR.Body.String())
+	}
+}
+
+func TestHandleEventsRejectsUnregisteredTokenEvenWithValidDeviceHeader(t *testing.T) {
+	s := testServer(t)
+	deviceID := "dev-owner"
+	secret := "ownersecret000000000000000000000001"
+
+	if err := s.db.createDevice(deviceID, secret); err != nil {
+		t.Fatalf("create device: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/events/unregistered-token-001", nil)
+	req.Header.Set("Authorization", "Bearer "+secret)
+	req.Header.Set("X-Snare-Device-Id", deviceID)
+	rr := httptest.NewRecorder()
+	s.handleEvents(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("unregistered token status = %d, want 401: %s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "token not registered") {
+		t.Fatalf("unregistered token response should explain registration state: %s", rr.Body.String())
 	}
 }
 

@@ -21,6 +21,14 @@ func cmdDisarm(args []string) {
 	purge := hasFlag(args, "--purge")
 	force := hasFlag(args, "--force")
 	tokenID := flagValue(args, "--token")
+	typeFilter := flagValue(args, "--type")
+
+	if tokenID != "" && typeFilter != "" {
+		fatal(fmt.Errorf("use either --token or --type, not both"))
+	}
+	if typeFilter != "" && !isKnownCanaryType(typeFilter) {
+		fatal(fmt.Errorf("unknown canary type %q", typeFilter))
+	}
 
 	m, err := manifest.Load()
 	if err != nil {
@@ -39,6 +47,12 @@ func cmdDisarm(args []string) {
 				fatal(fmt.Errorf("canary %s not found", tokenID))
 			}
 			targets = []manifest.Canary{*c}
+		} else if typeFilter != "" {
+			for _, c := range m.Active() {
+				if c.Type == typeFilter {
+					targets = append(targets, c)
+				}
+			}
 		} else {
 			targets = m.Active()
 		}
@@ -352,8 +366,14 @@ func guidedInit(force bool) {
 	fmt.Println()
 }
 
+type canaryEventState struct {
+	available bool
+	lastSeen  string
+	count     int
+}
+
 // cmdStatus shows active canaries on this machine.
-// Fetches last-seen timestamps from snare.sh API for each canary.
+// Fetches real, non-test event timestamps from snare.sh API for each canary.
 func cmdStatus(args []string) {
 	m, err := manifest.Load()
 	if err != nil {
@@ -370,14 +390,15 @@ func cmdStatus(args []string) {
 	cfg, _ := config.Load()
 	var apiBase string
 	if cfg != nil {
-		apiBase = strings.TrimSuffix(cfg.CallbackBase, "/c")
+		apiBase = cfg.APIBase()
 	}
 
-	// Fetch last-seen from API (best-effort, don't fail status on network error)
-	lastSeenMap := make(map[string]string) // tokenID → timestamp
-	eventCountMap := make(map[string]int)
+	// Fetch last event from API (best-effort, don't fail status on network error).
+	// A 404 with an empty events array means "registered, but no events yet".
+	eventStates := make(map[string]canaryEventState)
 	if apiBase != "" {
 		for _, c := range active {
+			state := canaryEventState{}
 			evURL := apiBase + "/api/events/" + c.ID
 			req, _ := http.NewRequest("GET", evURL, nil)
 			if cfg.DeviceSecret != "" {
@@ -385,10 +406,15 @@ func cmdStatus(args []string) {
 				req.Header.Set("X-Snare-Device-Id", cfg.DeviceID)
 			}
 			resp, err := httpClient.Do(req)
-			if err != nil || resp.StatusCode != 200 {
+			if err != nil {
+				eventStates[c.ID] = state
+				continue
+			}
+			if resp.StatusCode != 200 && resp.StatusCode != 404 {
 				if resp != nil {
 					resp.Body.Close()
 				}
+				eventStates[c.ID] = state
 				continue
 			}
 			var result struct {
@@ -399,28 +425,42 @@ func cmdStatus(args []string) {
 			}
 			data, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
+			if resp.StatusCode == 404 {
+				// Registered tokens with no events return {"events":[]}.
+				// Other 404s (for example token-not-owned responses from older/self-hosted
+				// servers) are unavailable, not "never fired".
+				if err := json.Unmarshal(data, &result); err == nil && result.Events != nil {
+					state.available = true
+				}
+				eventStates[c.ID] = state
+				continue
+			}
+			state.available = true
 			if err := json.Unmarshal(data, &result); err != nil {
+				state.available = false
+				eventStates[c.ID] = state
 				continue
 			}
 			// Find most recent non-test event
 			for _, e := range result.Events {
 				if !e.IsTest {
-					lastSeenMap[c.ID] = e.Timestamp
+					state.lastSeen = e.Timestamp
 					break
 				}
 			}
 			// Count non-test events
-			count := 0
 			for _, e := range result.Events {
 				if !e.IsTest {
-					count++
+					state.count++
 				}
 			}
-			eventCountMap[c.ID] = count
+			eventStates[c.ID] = state
 		}
 	}
 
 	fmt.Printf("Active canaries (%d):\n\n", len(active))
+	anyNever := false
+	anyUnknown := false
 	for _, c := range active {
 		age := time.Since(c.PlantedAt).Round(time.Minute)
 		if age < time.Minute {
@@ -430,37 +470,54 @@ func cmdStatus(args []string) {
 		if label == "" {
 			label = "-"
 		}
-		lastSeen := "never"
-		if ts, ok := lastSeenMap[c.ID]; ok {
-			lastSeen = ts
-		} else if c.LastSeen != nil {
-			lastSeen = c.LastSeen.Format("2006-01-02 15:04 UTC")
-		}
+		lastEvent := "unknown (events unavailable; run `snare doctor`)"
 		alerts := ""
-		if count, ok := eventCountMap[c.ID]; ok && count > 0 {
-			alerts = fmt.Sprintf(" ⚠ %d alert(s)", count)
+		if state, ok := eventStates[c.ID]; ok && state.available {
+			if state.lastSeen != "" {
+				lastEvent = state.lastSeen
+			} else {
+				lastEvent = "never fired"
+				anyNever = true
+			}
+			if state.count > 0 {
+				alerts = fmt.Sprintf(" ⚠ %d alert(s)", state.count)
+			}
+		} else if c.LastSeen != nil {
+			lastEvent = c.LastSeen.Format("2006-01-02 15:04 UTC") + " (cached)"
+		} else {
+			anyUnknown = true
 		}
-		rel := reliability(c.Type)
-		relMark := "●" // high
-		if rel == "medium" {
-			relMark = "◐"
-		}
-		fmt.Printf("  %s  %s\n", relMark, c.ID)
-		fmt.Printf("    type:        %s (%s reliability)\n", c.Type, rel)
+		rel := reliabilityDetailsFor(c.Type)
+		fmt.Printf("  %s  %s\n", rel.marker, c.ID)
+		fmt.Printf("    type:        %s (%s reliability)\n", c.Type, rel.tier)
 		fmt.Printf("    label:       %s\n", label)
 		fmt.Printf("    path:        %s\n", c.Path)
 		fmt.Printf("    planted:     %s ago\n", age)
-		fmt.Printf("    last seen:   %s%s\n", lastSeen, alerts)
+		fmt.Printf("    last event:  %s%s\n", lastEvent, alerts)
 		fmt.Println()
 	}
-	fmt.Println("  ● high reliability  ◐ medium reliability")
+	fmt.Println("  ◆ precision reliability — active-use only; near-zero false positives")
+	fmt.Println("  ● high reliability      — fires on credential use")
+	fmt.Println("  ▲ high-noisy reliability — strong trigger, may fire during normal work")
+	fmt.Println("  ◐ medium reliability    — conditional trigger path")
 	fmt.Println()
+	if anyNever {
+		fmt.Println("  `never fired` means no real callback has been recorded for that canary yet.")
+		fmt.Println("  On a fresh install, that is expected until someone tries the fake credential.")
+		fmt.Println()
+	}
+	if anyUnknown {
+		fmt.Println("  Some event states were unavailable. Run `snare doctor` to check callback/API health.")
+		fmt.Println()
+	}
+	fmt.Println("  Run `snare scan` to verify local canary files are still present.")
 	fmt.Println("  Run `snare events` to fetch recent alert history.")
 }
 
-// cmdTest fires a synthetic callback to verify the full alert pipeline.
+// cmdTest fires a synthetic callback to exercise the alert path.
 // It registers the test token with snare.sh first so the worker knows where
-// to deliver the alert, then fires the callback and waits briefly to confirm.
+// to route the alert, then fires the callback. External webhook delivery is
+// asynchronous, so the user still needs to check their webhook destination.
 func cmdTest(args []string) {
 	cfg, err := requireConfig()
 	if err != nil {
@@ -475,14 +532,13 @@ func cmdTest(args []string) {
 	testTokenID := "snare-test-" + shortID
 
 	// Register the test token so the worker routes alerts to this device's webhook.
-	// This is what actually proves the full pipeline works end-to-end.
 	if err := registerToken(cfg, testTokenID, "test", "test"); err != nil {
 		fmt.Fprintf(os.Stderr, "  ⚠  webhook registration failed: %v\n", err)
 		fmt.Fprintf(os.Stderr, "  The callback will still fire but your webhook may not receive the alert.\n\n")
 	}
 
 	callbackURL := cfg.CallbackURL(testTokenID)
-	fmt.Printf("Firing test alert...\n  %s\n\n", callbackURL)
+	fmt.Println("Firing test alert...")
 
 	err = httpGet(callbackURL)
 	if err != nil {
@@ -491,15 +547,23 @@ func cmdTest(args []string) {
 		os.Exit(1)
 	}
 
-	fmt.Println("✓ Test alert fired — check your webhook destination.")
+	fmt.Println("✓ Test callback fired — check your webhook destination.")
 	fmt.Println("  If no alert arrives within 30 seconds, verify your webhook is configured correctly.")
 }
 
 // cmdTeardown removes planted canaries.
 func cmdTeardown(args []string) {
 	tokenID := flagValue(args, "--token")
+	typeFilter := flagValue(args, "--type")
 	force := hasFlag(args, "--force")
 	dryRun := hasFlag(args, "--dry-run")
+
+	if tokenID != "" && typeFilter != "" {
+		fatal(fmt.Errorf("use either --token or --type, not both"))
+	}
+	if typeFilter != "" && !isKnownCanaryType(typeFilter) {
+		fatal(fmt.Errorf("unknown canary type %q", typeFilter))
+	}
 
 	m, err := manifest.Load()
 	if err != nil {
@@ -514,6 +578,16 @@ func cmdTeardown(args []string) {
 			fatal(fmt.Errorf("canary %s not found in manifest", tokenID))
 		}
 		targets = []manifest.Canary{*c}
+	} else if typeFilter != "" {
+		for _, c := range m.Active() {
+			if c.Type == typeFilter {
+				targets = append(targets, c)
+			}
+		}
+		if len(targets) == 0 {
+			fmt.Printf("No active %s canaries to remove.\n", typeFilter)
+			return
+		}
 	} else {
 		targets = m.Active()
 		if len(targets) == 0 {

@@ -49,3 +49,34 @@ func TestAllCanaryTypesMatchesImplementedInventory(t *testing.T) {
 		seen[bt] = true
 	}
 }
+
+func TestReliabilityDetailsForPrecisionTypes(t *testing.T) {
+	for _, bt := range []bait.Type{bait.TypeAWSProc, bait.TypeSSH, bait.TypeK8s} {
+		details := reliabilityDetailsFor(string(bt))
+		if details.tier != "precision" {
+			t.Fatalf("%s tier = %s, want precision", bt, details.tier)
+		}
+		if details.marker == "●" {
+			t.Fatalf("%s marker should not reuse high-reliability marker", bt)
+		}
+		if details.description == "" {
+			t.Fatalf("%s description is empty", bt)
+		}
+	}
+}
+
+func TestReliabilityDemotionsAndNoisyTier(t *testing.T) {
+	if got := reliability(string(bait.TypeAzure)); got != "medium" {
+		t.Fatalf("azure reliability = %s, want medium", got)
+	}
+	if got := reliability(string(bait.TypeDocker)); got != "medium" {
+		t.Fatalf("docker reliability = %s, want medium", got)
+	}
+	if got := reliability(string(bait.TypePyPI)); got != "high-noisy" {
+		t.Fatalf("pypi reliability = %s, want high-noisy", got)
+	}
+	details := reliabilityDetailsFor(string(bait.TypePyPI))
+	if details.marker != "▲" || details.description == "" {
+		t.Fatalf("unexpected pypi reliability details: %+v", details)
+	}
+}

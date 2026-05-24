@@ -24,11 +24,12 @@ var httpClient = &http.Client{Timeout: 15 * time.Second}
 // Tiers:
 //
 //	precision — fires via existing SDK/OS plumbing, no agent hunting needed,
-//	            no DNS dependency, zero false positives
-//	high      — fires when credential is actively used, but requires agent to
-//	            find and use it, or has a DNS/runtime dependency
-//	medium    — fires conditionally: depends on dotenv loading, base URL
-//	            override support, or agent doing explicit credential scanning
+//	            no DNS dependency, near-zero false positives
+//	high       — fires when credential is actively used, but requires agent to
+//	             find and use it
+//	high-noisy — fires readily, but may also fire during normal developer work
+//	medium     — fires conditionally: depends on dotenv loading, base URL
+//	             override support, or agent doing explicit credential scanning
 func reliability(t string) string {
 	switch bait.Type(t) {
 	// Precision: fires via SDK/OS hooks before or during connection, no DNS needed
@@ -36,14 +37,78 @@ func reliability(t string) string {
 		return "precision"
 	// High: fires on active credential use, requires agent to find+use the cred
 	case bait.TypeAWS, // endpoint_url fires on any AWS SDK call with that profile
-		bait.TypeGCP,  // token_uri fires on GCP SDK auth (needs explicit file load)
-		bait.TypePyPI, // extra-index-url fires on pip install (own installs too — see warning)
-		bait.TypeNPM,  // scoped registry fires on npm install (scoped packages only)
-		bait.TypeGit:  // credential.helper fires if agent does git credential fill
+		bait.TypeGCP, // token_uri fires on GCP SDK auth (needs explicit file load)
+		bait.TypeNPM, // scoped registry fires on npm install (scoped packages only)
+		bait.TypeGit: // url.insteadOf fires on fake-host clone/ls-remote
 		return "high"
+	// High-noisy: strong trigger, but global config can fire during normal work
+	case bait.TypePyPI: // extra-index-url fires on pip install (own installs too — see warning)
+		return "high-noisy"
 	// Medium: dotenv-dependent, DNS-dependent, or requires explicit credential scanning
 	default:
 		return "medium"
+	}
+}
+
+type reliabilityDetails struct {
+	tier        string
+	marker      string
+	description string
+}
+
+func reliabilityDetailsFor(t string) reliabilityDetails {
+	switch reliability(t) {
+	case "precision":
+		return reliabilityDetails{
+			tier:        "precision",
+			marker:      "◆",
+			description: "active-use only; near-zero false positives",
+		}
+	case "high":
+		return reliabilityDetails{
+			tier:        "high",
+			marker:      "●",
+			description: "fires on credential use",
+		}
+	case "high-noisy":
+		return reliabilityDetails{
+			tier:        "high-noisy",
+			marker:      "▲",
+			description: "fires readily; may trigger during normal work",
+		}
+	default:
+		return reliabilityDetails{
+			tier:        "medium",
+			marker:      "◐",
+			description: "conditional trigger path",
+		}
+	}
+}
+
+func isKnownCanaryType(t string) bool {
+	for _, bt := range allCanaryTypes {
+		if string(bt) == t {
+			return true
+		}
+	}
+	return false
+}
+
+func webhookSummary(webhookURL string) string {
+	if webhookURL == "" {
+		return "using global snare.sh fallback"
+	}
+
+	lower := strings.ToLower(webhookURL)
+	switch {
+	case strings.Contains(lower, "discord.com/api/webhooks"):
+		return "configured (Discord)"
+	case strings.Contains(lower, "hooks.slack.com"):
+		return "configured (Slack)"
+	case strings.Contains(lower, "api.telegram.org"):
+		return "configured (Telegram)"
+	default:
+		return "configured (custom)"
 	}
 }
 
@@ -59,9 +124,12 @@ Commands:
   snare disarm [flags]         one-command teardown
   snare status                 show active canaries
   snare scan                   check canary integrity on disk
+  snare repair                 safely re-sync token registrations + test health
+  snare sync                   alias for snare repair
+  snare prove [flags]          guided precision canary trigger proof (awsproc/ssh/k8s)
   snare events                 fetch recent alert events from snare.sh
   snare test                   fire a test alert to verify your webhook
-  snare doctor                 validate configuration and canary health
+  snare doctor [--test]        confidence screen: config, API, canaries, ownership, callbacks
   snare config                 show current config
   snare config set webhook <url>  update webhook URL
   snare serve [flags]          run self-hosted callback server (replaces snare.sh)
@@ -77,6 +145,7 @@ Flags (arm):
   --webhook <url>              webhook URL (Discord, Slack, Telegram, or custom)
   --label <name>               name your canary (e.g. prod-admin-legacy-2024) — defaults to hostname
   --all                        plant all canary types including dotenv-based ones
+  --select                     interactive checklist to pick which canaries to arm
   --dry-run                    show what would be planted without writing
 
 Flags (plant):
@@ -87,6 +156,7 @@ Flags (plant):
 
 Flags (disarm/teardown):
   --token <id>                 remove a single canary by ID
+  --type <type>                remove active canaries of this type only
   --force                      remove even if content hash mismatches
   --purge                      also remove ~/.snare/ config directory
   --dry-run                    show what would be removed without writing anything
@@ -126,6 +196,10 @@ func Run(args []string, version string) {
 		cmdStatus(rest)
 	case "scan":
 		cmdScan(rest)
+	case "repair", "sync":
+		cmdRepair(rest)
+	case "prove":
+		cmdProve(rest)
 	case "events":
 		cmdEvents(rest)
 	case "test":
@@ -416,7 +490,7 @@ func requireConfig() (*config.Config, error) {
 		return nil, err
 	}
 	if cfg == nil {
-		return nil, fmt.Errorf("snare not initialized — run `snare init` first")
+		return nil, fmt.Errorf("snare not initialized — run `snare arm` first")
 	}
 	return cfg, nil
 }

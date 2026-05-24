@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/peg/snare/internal/bait"
 	"github.com/peg/snare/internal/config"
@@ -179,8 +180,249 @@ func TestCmdConfigShow(t *testing.T) {
 	if !strings.Contains(stdout, "snare.sh") {
 		t.Errorf("config: expected callback_base in output, got:\n%s", stdout)
 	}
-	if !strings.Contains(stdout, "hooks.example.com") {
-		t.Errorf("config: expected webhook_url in output, got:\n%s", stdout)
+	if !strings.Contains(stdout, "Webhook:") || !strings.Contains(stdout, "configured") {
+		t.Errorf("config: expected redacted webhook status in output, got:\n%s", stdout)
+	}
+	if strings.Contains(stdout, "hooks.example.com") || strings.Contains(stdout, "https://hooks.example.com/test") {
+		t.Errorf("config: should not print webhook URLs, got:\n%s", stdout)
+	}
+}
+
+// TestCmdStatusExplainsPrecisionNeverFired verifies the first-run status view
+// treats precision as its own tier and explains that no hits yet is expected.
+func TestCmdStatusExplainsPrecisionNeverFired(t *testing.T) {
+	home := t.TempDir()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/events/") {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = io.WriteString(w, `{"events":[]}`)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	snareDir := filepath.Join(home, ".snare")
+	if err := os.MkdirAll(snareDir, 0700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+
+	cfg := map[string]string{
+		"device_id":     "dev-status-test",
+		"device_secret": "deadbeefdeadbeefdeadbeefdeadbeef",
+		"callback_base": srv.URL + "/c",
+		"webhook_url":   "https://hooks.example.com/test",
+	}
+	cfgData, _ := json.MarshalIndent(cfg, "", "  ")
+	if err := os.WriteFile(filepath.Join(snareDir, "config.json"), cfgData, 0600); err != nil {
+		t.Fatalf("WriteFile config: %v", err)
+	}
+
+	now := time.Now().Add(-2 * time.Minute)
+	m := manifest.Manifest{
+		Version:  2,
+		DeviceID: "dev-status-test",
+		Canaries: []manifest.Canary{
+			{
+				ID:        "statustokawsproc001",
+				Type:      "awsproc",
+				Label:     "prod-admin",
+				Path:      filepath.Join(home, ".aws", "config"),
+				Mode:      manifest.ModeAppend,
+				Active:    true,
+				PlantedAt: now,
+			},
+			{
+				ID:        "statustokssh001",
+				Type:      "ssh",
+				Label:     "prod-admin",
+				Path:      filepath.Join(home, ".ssh", "config"),
+				Mode:      manifest.ModeAppend,
+				Active:    true,
+				PlantedAt: now,
+			},
+			{
+				ID:        "statustokk8s001",
+				Type:      "k8s",
+				Label:     "prod-admin",
+				Path:      filepath.Join(home, ".kube", "prod-admin.yaml"),
+				Mode:      manifest.ModeNewFile,
+				Active:    true,
+				PlantedAt: now,
+			},
+		},
+	}
+	if err := os.WriteFile(filepath.Join(snareDir, "manifest.json"), mustMarshalJSON(t, m), 0600); err != nil {
+		t.Fatalf("WriteFile manifest: %v", err)
+	}
+
+	stdout, _, exitCode := runSnare(t, home, "status")
+	if exitCode != 0 {
+		t.Fatalf("status: want exit 0, got %d\nstdout:\n%s", exitCode, stdout)
+	}
+	for _, want := range []string{
+		"precision reliability",
+		"never fired",
+		"expected until someone tries the fake credential",
+		"snare scan",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("status output missing %q:\n%s", want, stdout)
+		}
+	}
+	if strings.Contains(stdout, "hooks.example.com") {
+		t.Errorf("status should not print webhook URLs, got:\n%s", stdout)
+	}
+}
+
+func TestCmdStatusDoesNotCallUnavailableEventsNeverFired(t *testing.T) {
+	home := t.TempDir()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/events/") {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = io.WriteString(w, `{"error":"token not registered"}`)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	snareDir := filepath.Join(home, ".snare")
+	if err := os.MkdirAll(snareDir, 0700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+
+	cfg := map[string]string{
+		"device_id":     "dev-status-test",
+		"device_secret": "deadbeefdeadbeefdeadbeefdeadbeef",
+		"callback_base": srv.URL + "/c",
+		"webhook_url":   "https://hooks.example.com/test",
+	}
+	cfgData, _ := json.MarshalIndent(cfg, "", "  ")
+	if err := os.WriteFile(filepath.Join(snareDir, "config.json"), cfgData, 0600); err != nil {
+		t.Fatalf("WriteFile config: %v", err)
+	}
+
+	m := manifest.Manifest{
+		Version:  2,
+		DeviceID: "dev-status-test",
+		Canaries: []manifest.Canary{
+			{
+				ID:        "statustokunregistered001",
+				Type:      "awsproc",
+				Label:     "prod-admin",
+				Path:      filepath.Join(home, ".aws", "config"),
+				Mode:      manifest.ModeAppend,
+				Active:    true,
+				PlantedAt: time.Now().Add(-2 * time.Minute),
+			},
+		},
+	}
+	if err := os.WriteFile(filepath.Join(snareDir, "manifest.json"), mustMarshalJSON(t, m), 0600); err != nil {
+		t.Fatalf("WriteFile manifest: %v", err)
+	}
+
+	stdout, _, exitCode := runSnare(t, home, "status")
+	if exitCode != 0 {
+		t.Fatalf("status: want exit 0, got %d\nstdout:\n%s", exitCode, stdout)
+	}
+	if !strings.Contains(stdout, "events unavailable") {
+		t.Fatalf("status should show unavailable event state, got:\n%s", stdout)
+	}
+	if strings.Contains(stdout, "never fired") {
+		t.Fatalf("status must not call unavailable event state never fired, got:\n%s", stdout)
+	}
+}
+
+func TestCmdTeardownTypeFilterDryRun(t *testing.T) {
+	home := t.TempDir()
+	snareDir := filepath.Join(home, ".snare")
+	if err := os.MkdirAll(snareDir, 0700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+
+	pipPath := filepath.Join(home, ".config", "pip", "pip.conf")
+	npmPath := filepath.Join(home, ".npmrc")
+	if err := os.MkdirAll(filepath.Dir(pipPath), 0700); err != nil {
+		t.Fatalf("MkdirAll pip: %v", err)
+	}
+	pipContent := "[global]\nextra-index-url = https://snare.sh/c/pypitok\n"
+	npmContent := "@scope:registry=https://snare.sh/c/npmtok\n"
+	if err := os.WriteFile(pipPath, []byte(pipContent), 0600); err != nil {
+		t.Fatalf("WriteFile pip: %v", err)
+	}
+	if err := os.WriteFile(npmPath, []byte(npmContent), 0600); err != nil {
+		t.Fatalf("WriteFile npm: %v", err)
+	}
+
+	m := manifest.Manifest{
+		Version:  2,
+		DeviceID: "dev-teardown-test",
+		Canaries: []manifest.Canary{
+			{
+				ID:          "pypitok",
+				Type:        "pypi",
+				Path:        pipPath,
+				Mode:        manifest.ModeNewFile,
+				Content:     pipContent,
+				ContentHash: manifest.HashContent(pipContent),
+				Active:      true,
+				PlantedAt:   time.Now(),
+			},
+			{
+				ID:          "npmtok",
+				Type:        "npm",
+				Path:        npmPath,
+				Mode:        manifest.ModeNewFile,
+				Content:     npmContent,
+				ContentHash: manifest.HashContent(npmContent),
+				Active:      true,
+				PlantedAt:   time.Now(),
+			},
+		},
+	}
+	if err := os.WriteFile(filepath.Join(snareDir, "manifest.json"), mustMarshalJSON(t, m), 0600); err != nil {
+		t.Fatalf("WriteFile manifest: %v", err)
+	}
+
+	stdout, stderr, exitCode := runSnare(t, home, "teardown", "--type", "pypi", "--dry-run")
+	if exitCode != 0 {
+		t.Fatalf("teardown --type pypi --dry-run: want exit 0, got %d\nstdout:\n%s\nstderr:\n%s", exitCode, stdout, stderr)
+	}
+	if !strings.Contains(stdout, "would remove 1 canary") || !strings.Contains(stdout, pipPath) {
+		t.Fatalf("teardown should target only pypi canary, got:\n%s", stdout)
+	}
+	if strings.Contains(stdout, npmPath) {
+		t.Fatalf("teardown --type pypi should not include npm canary, got:\n%s", stdout)
+	}
+	if _, err := os.Stat(pipPath); err != nil {
+		t.Fatalf("dry-run should not remove pypi file: %v", err)
+	}
+	if _, err := os.Stat(npmPath); err != nil {
+		t.Fatalf("dry-run should not remove npm file: %v", err)
+	}
+
+	stdout, stderr, exitCode = runSnare(t, home, "disarm", "--type", "pypi", "--dry-run")
+	if exitCode != 0 {
+		t.Fatalf("disarm --type pypi --dry-run: want exit 0, got %d\nstdout:\n%s\nstderr:\n%s", exitCode, stdout, stderr)
+	}
+	if !strings.Contains(stdout, "would remove 1 canary") || !strings.Contains(stdout, pipPath) {
+		t.Fatalf("disarm should target only pypi canary, got:\n%s", stdout)
+	}
+	if strings.Contains(stdout, npmPath) {
+		t.Fatalf("disarm --type pypi should not include npm canary, got:\n%s", stdout)
+	}
+
+	stdout, stderr, exitCode = runSnare(t, home, "teardown", "--type", "definitely-not-a-type", "--dry-run")
+	if exitCode == 0 {
+		t.Fatalf("teardown unknown --type should fail closed\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+	}
+	if !strings.Contains(stdout+stderr, "unknown canary type") {
+		t.Fatalf("teardown unknown --type should explain failure, got:\n%s\n%s", stdout, stderr)
 	}
 }
 

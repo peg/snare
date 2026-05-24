@@ -94,7 +94,7 @@ func cmdEvents(args []string) {
 		defer resp.Body.Close()
 
 		if resp.StatusCode == 401 || resp.StatusCode == 403 {
-			fmt.Fprintf(os.Stderr, "  ✗ auth failed — run `snare init --force` to re-register\n")
+			fmt.Fprintf(os.Stderr, "  ✗ auth failed — run `snare repair` to re-sync registrations and auth\n")
 			authFailed = true
 			break
 		}
@@ -260,6 +260,11 @@ func cmdEvents(args []string) {
 				fmt.Printf("    %-44s %d %s  (last: %s)\n", display, hits, hitWord, last)
 			}
 		}
+		if totalEvents == 0 {
+			fmt.Println()
+			fmt.Println("  No real hits yet. That is expected after first arm; canaries wait quietly")
+			fmt.Println("  until someone actively uses a fake credential.")
+		}
 		return
 	}
 
@@ -287,8 +292,10 @@ func cmdEvents(args []string) {
 	}
 
 	if found == 0 {
-		fmt.Println("  No events recorded yet. Canaries are active and waiting.")
-		fmt.Println("  Run `snare test` to verify your alert pipeline.")
+		fmt.Println("  No real events recorded yet.")
+		fmt.Println("  That is expected after first arm; canaries wait quietly until someone")
+		fmt.Println("  actively uses a fake credential.")
+		fmt.Println("  Run `snare scan` to verify local files or `snare test` to verify delivery.")
 	}
 }
 

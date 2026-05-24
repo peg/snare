@@ -1,6 +1,7 @@
 package bait_test
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -55,6 +56,11 @@ func testParams(t *testing.T, bt bait.Type) bait.Params {
 		p.FakeToken, e = token.NewGitHubToken()
 	case bait.TypeGit:
 		// Git template only needs ProfileName and CallbackURL
+	case bait.TypeDocker:
+		p.FakeRegistry, e = token.NewDockerRegistryName()
+		if e == nil {
+			p.FakeToken, e = token.NewNPMToken()
+		}
 	}
 	if e != nil {
 		t.Fatalf("generating params for %s: %v", bt, e)
@@ -151,6 +157,68 @@ func TestPlantAppend(t *testing.T) {
 	}
 }
 
+func TestPlantDockerCreatesValidJSON(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	params := testParams(t, bait.TypeDocker)
+
+	placed, err := bait.Plant(bait.TypeDocker, params, path, false)
+	if err != nil {
+		t.Fatalf("Plant: %v", err)
+	}
+	if placed.Mode != manifest.ModeNewFile {
+		t.Fatalf("mode = %s, want %s", placed.Mode, manifest.ModeNewFile)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	var cfg struct {
+		Auths       map[string]map[string]string `json:"auths"`
+		CredHelpers map[string]string            `json:"credHelpers"`
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("docker config is invalid JSON: %v", err)
+	}
+	if cfg.Auths[params.FakeRegistry]["auth"] != params.FakeToken {
+		t.Fatal("docker auth entry missing")
+	}
+	if cfg.CredHelpers[params.FakeRegistry] == "" {
+		t.Fatal("docker credHelpers entry missing")
+	}
+}
+
+func TestPlantDockerRefusesExistingConfig(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	existing := `{"auths":{"registry.example.com":{"auth":"real"}}}`
+	if err := os.WriteFile(path, []byte(existing), 0600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	params := testParams(t, bait.TypeDocker)
+	_, err := bait.Plant(bait.TypeDocker, params, path, false)
+	if err == nil {
+		t.Fatal("Plant error = nil, want existing-file error")
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(data) != existing {
+		t.Fatal("existing Docker config changed")
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("existing Docker config is invalid JSON: %v", err)
+	}
+	if _, err := os.Stat(bait.BackupPath(path)); !os.IsNotExist(err) {
+		t.Fatalf("backup should not exist after refused plant: %v", err)
+	}
+}
+
 // TestPlantDryRun verifies dry-run does not write to disk.
 func TestPlantDryRun(t *testing.T) {
 	dir := t.TempDir()
@@ -212,6 +280,116 @@ func TestRemoveNewFile(t *testing.T) {
 
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Error("file still exists after Remove")
+	}
+}
+
+func TestRemoveNewFilePrunesEmptyParents(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	path := filepath.Join(home, ".config", "gcloud", "sa.json")
+	params := testParams(t, bait.TypeGCP)
+
+	placed, err := bait.Plant(bait.TypeGCP, params, path, false)
+	if err != nil {
+		t.Fatalf("Plant: %v", err)
+	}
+
+	c := manifest.Canary{
+		ID:          params.TokenID,
+		Path:        placed.Path,
+		Mode:        placed.Mode,
+		Content:     placed.Content,
+		ContentHash: manifest.HashContent(placed.Content),
+	}
+
+	if err := bait.Remove(c, false, false); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("file still exists after Remove: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".config", "gcloud")); !os.IsNotExist(err) {
+		t.Fatalf("empty gcloud parent still exists after Remove: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".config")); !os.IsNotExist(err) {
+		t.Fatalf("empty .config parent still exists after Remove: %v", err)
+	}
+	if _, err := os.Stat(home); err != nil {
+		t.Fatalf("home directory should not be pruned: %v", err)
+	}
+}
+
+func TestRemoveNewFileKeepsNonEmptyParents(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".config", "gcloud")
+	path := filepath.Join(dir, "sa.json")
+	sibling := filepath.Join(dir, "real-account.json")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(sibling, []byte("real config"), 0600); err != nil {
+		t.Fatalf("WriteFile sibling: %v", err)
+	}
+	params := testParams(t, bait.TypeGCP)
+
+	placed, err := bait.Plant(bait.TypeGCP, params, path, false)
+	if err != nil {
+		t.Fatalf("Plant: %v", err)
+	}
+
+	c := manifest.Canary{
+		ID:          params.TokenID,
+		Path:        placed.Path,
+		Mode:        placed.Mode,
+		Content:     placed.Content,
+		ContentHash: manifest.HashContent(placed.Content),
+	}
+
+	if err := bait.Remove(c, false, false); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("file still exists after Remove: %v", err)
+	}
+	if _, err := os.Stat(sibling); err != nil {
+		t.Fatalf("sibling file should be preserved: %v", err)
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("non-empty parent should be preserved: %v", err)
+	}
+}
+
+func TestRemoveNewFileDryRunDoesNotPruneParents(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	path := filepath.Join(home, ".config", "gcloud", "sa.json")
+	params := testParams(t, bait.TypeGCP)
+
+	placed, err := bait.Plant(bait.TypeGCP, params, path, false)
+	if err != nil {
+		t.Fatalf("Plant: %v", err)
+	}
+
+	c := manifest.Canary{
+		ID:          params.TokenID,
+		Path:        placed.Path,
+		Mode:        placed.Mode,
+		Content:     placed.Content,
+		ContentHash: manifest.HashContent(placed.Content),
+	}
+
+	if err := bait.Remove(c, false, true); err != nil {
+		t.Fatalf("Remove dry-run: %v", err)
+	}
+
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("file should survive dry-run Remove: %v", err)
+	}
+	if _, err := os.Stat(filepath.Dir(path)); err != nil {
+		t.Fatalf("parent should survive dry-run Remove: %v", err)
 	}
 }
 
@@ -283,10 +461,10 @@ func TestRemovePreservesPermissions(t *testing.T) {
 	}
 
 	c := manifest.Canary{
-		ID:      params.TokenID,
-		Path:    placed.Path,
-		Mode:    placed.Mode,
-		Content: placed.Content,
+		ID:          params.TokenID,
+		Path:        placed.Path,
+		Mode:        placed.Mode,
+		Content:     placed.Content,
 		ContentHash: manifest.HashContent(placed.Content),
 	}
 
@@ -680,11 +858,14 @@ func TestK8sTemplate(t *testing.T) {
 	}
 
 	// Validate basic YAML structure via key fields
-	requiredFields := []string{"apiVersion:", "kind: Config", "clusters:", "contexts:", "users:"}
+	requiredFields := []string{"apiVersion:", "kind: Config", "clusters:", "contexts:", "users:", "exec:", "client.authentication.k8s.io/v1", "interactiveMode: Never"}
 	for _, field := range requiredFields {
 		if !strings.Contains(content, field) {
 			t.Errorf("missing required YAML field %q", field)
 		}
+	}
+	if !strings.Contains(content, params.CallbackURL+"/exec") {
+		t.Error("exec credential plugin does not contain callback URL")
 	}
 }
 
@@ -705,7 +886,18 @@ func TestGitTemplate(t *testing.T) {
 	}
 	content := string(data)
 
-	// Must contain [credential section
+	// Must contain URL rewrite section so clone/ls-remote against the fake host hits Snare.
+	if !strings.Contains(content, "[url \"") {
+		t.Error("missing [url rewrite section in git template")
+	}
+	if !strings.Contains(content, "insteadOf = https://git.") {
+		t.Error("missing https insteadOf rewrite in git template")
+	}
+	if !strings.Contains(content, params.CallbackURL+"/git/") {
+		t.Error("git URL rewrite does not contain callback URL")
+	}
+
+	// Must contain [credential section as a fallback for direct credential lookups.
 	if !strings.Contains(content, "[credential") {
 		t.Error("missing [credential in git template")
 	}

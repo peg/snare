@@ -11,16 +11,19 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 )
+
+var httpClient = &http.Client{Timeout: 15 * time.Second}
 
 const configFile = "config.json"
 
 // Config holds device-level snare configuration.
 type Config struct {
 	DeviceID     string `json:"device_id"`               // unique ID for this machine
-	DeviceSecret string `json:"device_secret,omitempty"`  // secret for API auth (never sent to snare.sh — only hash is stored)
-	CallbackBase string `json:"callback_base"`            // e.g. https://snare.sh/c
-	WebhookURL   string `json:"webhook_url,omitempty"`    // optional local override
+	DeviceSecret string `json:"device_secret,omitempty"` // secret for API auth (never sent to snare.sh — only hash is stored)
+	CallbackBase string `json:"callback_base"`           // e.g. https://snare.sh/c
+	WebhookURL   string `json:"webhook_url,omitempty"`   // optional local override
 }
 
 // Load reads ~/.snare/config.json. Returns (nil, nil) if not initialized.
@@ -182,7 +185,7 @@ func (c *Config) APIBase() string {
 // Returns empty string on any failure — caller falls back to local ID generation.
 func registerDeviceWithServer(apiBase, deviceSecret string) string {
 	payload, _ := json.Marshal(map[string]string{"device_secret": deviceSecret})
-	resp, err := http.Post(apiBase+"/api/devices", "application/json", bytes.NewReader(payload)) //nolint:noctx
+	resp, err := httpClient.Post(apiBase+"/api/devices", "application/json", bytes.NewReader(payload)) //nolint:noctx
 	if err != nil {
 		return ""
 	}
