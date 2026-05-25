@@ -9,6 +9,9 @@ Versioning: [Semantic Versioning](https://semver.org/)
 
 ## [Unreleased]
 
+### Added
+- `snare prove --report` and `snare prove --format json` for first-success proof reports that capture precision trigger commands, observed callbacks, status, and cleanup commands.
+
 ## [0.2.0] - 2026-05-01
 
 ### Added

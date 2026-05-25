@@ -126,7 +126,7 @@ Commands:
   snare scan                   check canary integrity on disk
   snare repair                 safely re-sync token registrations + test health
   snare sync                   alias for snare repair
-  snare prove [flags]          guided precision canary trigger proof (awsproc/ssh/k8s)
+  snare prove [flags]          guided precision proof with optional report output
   snare events                 fetch recent alert events from snare.sh
   snare test                   fire a test alert to verify your webhook
   snare doctor [--test]        confidence screen: config, API, canaries, ownership, callbacks
@@ -147,6 +147,12 @@ Flags (arm):
   --all                        plant all canary types including dotenv-based ones
   --select                     interactive checklist to pick which canaries to arm
   --dry-run                    show what would be planted without writing
+
+Flags (prove):
+  --type <type>                precision canary type: awsproc, ssh, or k8s
+  --run                        execute safe trigger commands and verify callbacks
+  --report                     print a first-success proof report
+  --format text|json           output format for proof reports (json implies --report)
 
 Flags (plant):
   --label <name>               name your canary (e.g. prod-admin-legacy-2024) — defaults to hostname
