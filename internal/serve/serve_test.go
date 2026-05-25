@@ -3,6 +3,7 @@ package serve
 import (
 	"bytes"
 	"encoding/json"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -26,6 +27,21 @@ func testServer(t *testing.T) *Server {
 	}
 	t.Cleanup(func() { s.db.close() })
 	return s
+}
+
+func captureLogs(t *testing.T, fn func()) string {
+	t.Helper()
+	var buf bytes.Buffer
+	oldWriter := log.Writer()
+	oldFlags := log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	defer func() {
+		log.SetOutput(oldWriter)
+		log.SetFlags(oldFlags)
+	}()
+	fn()
+	return buf.String()
 }
 
 // ─── Canary callback handler ──────────────────────────────────────────────────
@@ -85,13 +101,56 @@ func TestClientIPOnlyTrustsConfiguredProxies(t *testing.T) {
 	}
 }
 
+func TestClientIPRejectsMalformedTrustedProxyHeaders(t *testing.T) {
+	trusted, err := parseTrustedProxyCIDRs([]string{"198.51.100.0/24"})
+	if err != nil {
+		t.Fatalf("parseTrustedProxyCIDRs: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/c/test-token-abc123", nil)
+	req.RemoteAddr = "198.51.100.10:1234"
+	req.Header.Set("X-Forwarded-For", "not-an-ip")
+	req.Header.Set("X-Real-Ip", "203.0.113.9")
+	if got := clientIP(req, trusted); got != "203.0.113.9" {
+		t.Fatalf("clientIP with malformed XFF and valid X-Real-IP = %q, want X-Real-IP", got)
+	}
+
+	req.Header.Set("X-Real-Ip", "also-not-an-ip")
+	if got := clientIP(req, trusted); got != "198.51.100.10" {
+		t.Fatalf("clientIP with malformed forwarded headers = %q, want remote addr", got)
+	}
+}
+
 func TestHandleCanary_storesEvent(t *testing.T) {
 	s := testServer(t)
+	const tokenID = "stored-token123"
+
+	if err := s.db.createDevice("dev-store-test", "secret0000000000000000000000001"); err != nil {
+		t.Fatalf("createDevice: %v", err)
+	}
+	if err := s.db.upsertToken(tokenReg{
+		TokenID:      tokenID,
+		DeviceID:     "dev-store-test",
+		WebhookURL:   "",
+		CanaryType:   "aws",
+		Label:        "store-test",
+		RegisteredAt: "2024-01-01T00:00:00Z",
+	}); err != nil {
+		t.Fatalf("upsertToken: %v", err)
+	}
 
 	// Call processAlert directly (it's synchronous in tests, no goroutine race).
-	s.processAlert("stored-token123", "1.2.3.4", "TestAgent/1.0", "GET", "/c/stored-token123", "2024-01-01T00:00:00Z", false)
+	logs := captureLogs(t, func() {
+		s.processAlert(tokenID, "1.2.3.4", "TestAgent/1.0", "GET", "/c/"+tokenID, "2024-01-01T00:00:00Z", false)
+	})
+	if strings.Contains(logs, tokenID) || strings.Contains(logs, "1.2.3.4") {
+		t.Fatalf("processAlert log exposed token/IP: %q", logs)
+	}
+	if !strings.Contains(logs, "CANARY_FIRED token=*** ip=***") {
+		t.Fatalf("processAlert log did not include redacted canary marker: %q", logs)
+	}
 
-	events, err := s.db.getEvents("stored-token123")
+	events, err := s.db.getEvents(tokenID)
 	if err != nil {
 		t.Fatalf("getEvents: %v", err)
 	}
@@ -103,6 +162,29 @@ func TestHandleCanary_storesEvent(t *testing.T) {
 	}
 	if events[0].UserAgent != "TestAgent/1.0" {
 		t.Errorf("UserAgent = %q, want TestAgent/1.0", events[0].UserAgent)
+	}
+}
+
+func TestHandleCanary_unregisteredTokenDoesNotStoreEvent(t *testing.T) {
+	s := testServer(t)
+	const tokenID = "some-unregistered-token-abc123"
+
+	logs := captureLogs(t, func() {
+		s.processAlert(tokenID, "1.2.3.4", "TestAgent/1.0", "GET", "/c/"+tokenID, "2024-01-01T00:00:00Z", false)
+	})
+	if strings.Contains(logs, tokenID) || strings.Contains(logs, "1.2.3.4") {
+		t.Fatalf("unregistered token log exposed token/IP: %q", logs)
+	}
+	if !strings.Contains(logs, "UNREGISTERED token=*** ip=***") {
+		t.Fatalf("unregistered token log did not include redacted marker: %q", logs)
+	}
+
+	events, err := s.db.getEvents(tokenID)
+	if err != nil {
+		t.Fatalf("getEvents: %v", err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("unregistered token stored %d event(s), want 0", len(events))
 	}
 }
 
