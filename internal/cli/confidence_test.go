@@ -617,6 +617,51 @@ Host proof-bastion
 			t.Fatalf("prove output missing %q:\n%s", want, stdout)
 		}
 	}
+
+	stdout, stderr, exitCode = runSnare(t, home, "prove", "--format", "json")
+	if exitCode != 0 {
+		t.Fatalf("prove --format json should succeed:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+	}
+	if strings.Contains(stdout, "snare prove — precision proof flow") {
+		t.Fatalf("json report should not include human proof output:\n%s", stdout)
+	}
+	var report struct {
+		Version   int    `json:"version"`
+		DeviceID  string `json:"device_id"`
+		Mode      string `json:"mode"`
+		RanProofs bool   `json:"ran_proofs"`
+		Summary   struct {
+			Total  int `json:"total"`
+			Passed int `json:"passed"`
+			Failed int `json:"failed"`
+			NotRun int `json:"not_run"`
+		} `json:"summary"`
+		Proofs []struct {
+			Type        string `json:"type"`
+			Tier        string `json:"tier"`
+			Status      string `json:"status"`
+			Command     string `json:"command"`
+			Trigger     string `json:"trigger"`
+			NextCommand string `json:"next_command"`
+		} `json:"proofs"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &report); err != nil {
+		t.Fatalf("json report did not parse: %v\n%s", err, stdout)
+	}
+	if report.Version != 1 || report.DeviceID != deviceID || report.Mode != "precision" || report.RanProofs {
+		t.Fatalf("unexpected report header: %+v", report)
+	}
+	if report.Summary.Total != 3 || report.Summary.NotRun != 3 || report.Summary.Passed != 0 || report.Summary.Failed != 0 {
+		t.Fatalf("unexpected report summary: %+v", report.Summary)
+	}
+	if len(report.Proofs) != 3 {
+		t.Fatalf("expected 3 proof entries, got %d", len(report.Proofs))
+	}
+	for _, proof := range report.Proofs {
+		if proof.Tier != "precision" || proof.Status != "not-run" || proof.Command == "" || proof.Trigger == "" || !strings.HasPrefix(proof.NextCommand, "snare teardown --token ") {
+			t.Fatalf("unexpected proof entry: %+v", proof)
+		}
+	}
 }
 
 func TestProveRunUsesManifestPathsAndObservesCallbacks(t *testing.T) {
@@ -716,13 +761,13 @@ exit 1
 
 	stdout, stderr, exitCode = runSnareWithEnv(t, home, map[string]string{
 		"PATH": binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
-	}, "prove", "--run")
+	}, "prove", "--run", "--report")
 	if exitCode != 0 {
-		t.Fatalf("prove --run should observe callbacks:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+		t.Fatalf("prove --run --report should observe callbacks:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
 	}
-	for _, want := range []string{"Precision proof complete", "awsproc", "ssh", "k8s"} {
+	for _, want := range []string{"Precision proof complete", "Proof report", "summary:   3 total, 3 passed, 0 failed, 0 not run", "observed:", "awsproc", "ssh", "k8s"} {
 		if !strings.Contains(stdout, want) {
-			t.Fatalf("prove --run output missing %q:\n%s", want, stdout)
+			t.Fatalf("prove --run --report output missing %q:\n%s", want, stdout)
 		}
 	}
 

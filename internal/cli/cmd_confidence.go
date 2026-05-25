@@ -54,6 +54,39 @@ type precisionProofRecipe struct {
 	Binary   string
 }
 
+type proofReport struct {
+	Version     int                `json:"version"`
+	GeneratedAt string             `json:"generated_at"`
+	DeviceID    string             `json:"device_id"`
+	Mode        string             `json:"mode"`
+	RanProofs   bool               `json:"ran_proofs"`
+	Summary     proofReportSummary `json:"summary"`
+	Proofs      []proofReportEntry `json:"proofs"`
+	NextSteps   []string           `json:"next_steps"`
+}
+
+type proofReportSummary struct {
+	Total  int `json:"total"`
+	Passed int `json:"passed"`
+	Failed int `json:"failed"`
+	NotRun int `json:"not_run"`
+}
+
+type proofReportEntry struct {
+	Type        string `json:"type"`
+	Tier        string `json:"tier"`
+	TokenID     string `json:"token_id"`
+	Label       string `json:"label,omitempty"`
+	Path        string `json:"path"`
+	Command     string `json:"command"`
+	Expected    string `json:"expected"`
+	Trigger     string `json:"trigger"`
+	Status      string `json:"status"`
+	ObservedAt  string `json:"observed_at,omitempty"`
+	Error       string `json:"error,omitempty"`
+	NextCommand string `json:"next_command"`
+}
+
 func cmdDoctor(args []string) {
 	if hasFlag(args, "--help") || hasFlag(args, "-h") {
 		fmt.Print(`snare doctor — confidence checks for first-run trust
@@ -380,19 +413,38 @@ func cmdProve(args []string) {
 		fmt.Print(`snare prove — guided precision canary proof commands
 
 Usage:
-  snare prove [--type awsproc|ssh|k8s] [--run]
+  snare prove [--type awsproc|ssh|k8s] [--run] [--report] [--format text|json]
 
 Default behavior:
   Prints exact safe trigger commands for active precision canaries.
 
 With --run:
   Executes the trigger command and confirms a new real callback is readable.
+
+With --report:
+  Prints a first-success proof report with commands, observed callbacks, and next steps.
+
+With --format json:
+  Emits only the proof report as JSON. Implies --report.
 `)
 		return
 	}
 
 	typeFilter := flagValue(args, "--type")
 	run := hasFlag(args, "--run")
+	reportRequested := hasFlag(args, "--report")
+	format := flagValue(args, "--format")
+	if format == "" {
+		format = "text"
+	}
+	format = strings.ToLower(format)
+	if format != "text" && format != "json" {
+		fatal(fmt.Errorf("unsupported --format %q (expected text or json)", format))
+	}
+	jsonOutput := format == "json"
+	if jsonOutput {
+		reportRequested = true
+	}
 
 	if typeFilter != "" && !isPrecisionCanaryType(typeFilter) {
 		fatal(fmt.Errorf("unsupported --type %q (expected awsproc, ssh, or k8s)", typeFilter))
@@ -431,75 +483,234 @@ With --run:
 		fatal(fmt.Errorf("no runnable precision canary proofs found"))
 	}
 
-	fmt.Println()
-	fmt.Println("  snare prove — precision proof flow")
-	fmt.Println()
-	for _, recipe := range recipes {
-		fmt.Printf("  %-8s %s\n", recipe.Canary.Type, shortTokenID(recipe.Canary.ID))
-		fmt.Printf("    command: %s\n", recipe.Command)
-		fmt.Printf("    expect:  %s\n", recipe.Expected)
+	report := buildProofReport(cfg, recipes, run)
+
+	if !jsonOutput {
 		fmt.Println()
+		fmt.Println("  snare prove — precision proof flow")
+		fmt.Println()
+		for _, recipe := range recipes {
+			fmt.Printf("  %-8s %s\n", recipe.Canary.Type, shortTokenID(recipe.Canary.ID))
+			fmt.Printf("    command: %s\n", recipe.Command)
+			fmt.Printf("    expect:  %s\n", recipe.Expected)
+			fmt.Println()
+		}
 	}
 
 	if !run {
-		fmt.Println("  These commands intentionally trigger active precision canaries.")
-		fmt.Println("  Add `--run` to execute them and verify callbacks end-to-end.")
-		fmt.Println()
+		if !jsonOutput {
+			fmt.Println("  These commands intentionally trigger active precision canaries.")
+			fmt.Println("  Add `--run` to execute them and verify callbacks end-to-end.")
+			fmt.Println()
+		}
+		if reportRequested {
+			if jsonOutput {
+				printProofReportJSON(report)
+			} else {
+				printProofReport(report)
+			}
+		}
 		return
 	}
 
 	failures := 0
-	for _, recipe := range recipes {
+	for i, recipe := range recipes {
 		before := probeTokenEvents(cfg, recipe.Canary.ID)
 		if before.AuthFailed {
-			fmt.Fprintf(os.Stderr, "  ✗ %-8s auth failed before proof — run `snare repair`\n", recipe.Canary.Type)
+			msg := "auth failed before proof — run `snare repair`"
+			report.Proofs[i].Status = "failed"
+			report.Proofs[i].Error = msg
+			fmt.Fprintf(os.Stderr, "  ✗ %-8s %s\n", recipe.Canary.Type, msg)
 			failures++
 			continue
 		}
 		if before.Unregistered {
-			fmt.Fprintf(os.Stderr, "  ✗ %-8s token is unregistered — run `snare repair`\n", recipe.Canary.Type)
+			msg := "token is unregistered — run `snare repair`"
+			report.Proofs[i].Status = "failed"
+			report.Proofs[i].Error = msg
+			fmt.Fprintf(os.Stderr, "  ✗ %-8s %s\n", recipe.Canary.Type, msg)
 			failures++
 			continue
 		}
 		if before.Unavailable {
-			fmt.Fprintf(os.Stderr, "  ✗ %-8s events API unavailable — run `snare doctor`\n", recipe.Canary.Type)
+			msg := "events API unavailable — run `snare doctor`"
+			report.Proofs[i].Status = "failed"
+			report.Proofs[i].Error = msg
+			fmt.Fprintf(os.Stderr, "  ✗ %-8s %s\n", recipe.Canary.Type, msg)
 			failures++
 			continue
 		}
 
 		if _, err := exec.LookPath(recipe.Binary); err != nil {
-			fmt.Fprintf(os.Stderr, "  ✗ %-8s missing `%s` binary; run the printed command manually when installed\n", recipe.Canary.Type, recipe.Binary)
+			msg := fmt.Sprintf("missing `%s` binary; run the printed command manually when installed", recipe.Binary)
+			report.Proofs[i].Status = "failed"
+			report.Proofs[i].Error = msg
+			fmt.Fprintf(os.Stderr, "  ✗ %-8s %s\n", recipe.Canary.Type, msg)
 			failures++
 			continue
 		}
 
 		baseline := countEventsByKind(before.Events, false)
-		fmt.Printf("  Running %-8s proof...\n", recipe.Canary.Type)
+		if !jsonOutput {
+			fmt.Printf("  Running %-8s proof...\n", recipe.Canary.Type)
+		}
 		if err := runProofCommand(recipe.Command, 15*time.Second); err != nil {
-			fmt.Fprintf(os.Stderr, "    ✗ trigger command failed: %v\n", err)
+			msg := fmt.Sprintf("trigger command failed: %v", err)
+			report.Proofs[i].Status = "failed"
+			report.Proofs[i].Error = msg
+			fmt.Fprintf(os.Stderr, "    ✗ %s\n", msg)
 			failures++
 			continue
 		}
 
 		ts, err := waitForEventCountAbove(cfg, recipe.Canary.ID, baseline, false, 8*time.Second)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "    ✗ callback not observed: %v\n", err)
+			msg := fmt.Sprintf("callback not observed: %v", err)
+			report.Proofs[i].Status = "failed"
+			report.Proofs[i].Error = msg
+			fmt.Fprintf(os.Stderr, "    ✗ %s\n", msg)
 			failures++
 			continue
 		}
 		if ts == "" {
 			ts = "just now"
 		}
-		fmt.Printf("    ✓ callback observed at %s\n", ts)
+		report.Proofs[i].Status = "passed"
+		report.Proofs[i].ObservedAt = ts
+		if !jsonOutput {
+			fmt.Printf("    ✓ callback observed at %s\n", ts)
+		}
+	}
+	finalizeProofReport(&report)
+
+	if reportRequested {
+		if jsonOutput {
+			printProofReportJSON(report)
+		} else {
+			printProofReport(report)
+		}
 	}
 
-	fmt.Println()
+	if !jsonOutput {
+		fmt.Println()
+	}
 	if failures > 0 {
-		fmt.Printf("  %d proof step(s) failed. Use `snare doctor --test` and `snare repair` for diagnostics.\n\n", failures)
+		if !jsonOutput {
+			fmt.Printf("  %d proof step(s) failed. Use `snare doctor --test` and `snare repair` for diagnostics.\n\n", failures)
+		}
 		os.Exit(1)
 	}
-	fmt.Println("  ✓ Precision proof complete. Alerts are firing as expected.")
+	if !jsonOutput {
+		fmt.Println("  ✓ Precision proof complete. Alerts are firing as expected.")
+		fmt.Println()
+	}
+}
+
+func buildProofReport(cfg *config.Config, recipes []precisionProofRecipe, run bool) proofReport {
+	status := "not-run"
+	if run {
+		status = "pending"
+	}
+
+	proofs := make([]proofReportEntry, 0, len(recipes))
+	for _, recipe := range recipes {
+		proofs = append(proofs, proofReportEntry{
+			Type:        recipe.Canary.Type,
+			Tier:        "precision",
+			TokenID:     recipe.Canary.ID,
+			Label:       recipe.Canary.Label,
+			Path:        recipe.Canary.Path,
+			Command:     recipe.Command,
+			Expected:    recipe.Expected,
+			Trigger:     precisionTriggerDescription(recipe.Canary.Type),
+			Status:      status,
+			NextCommand: "snare teardown --token " + recipe.Canary.ID,
+		})
+	}
+
+	report := proofReport{
+		Version:     1,
+		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		DeviceID:    cfg.DeviceID,
+		Mode:        "precision",
+		RanProofs:   run,
+		Proofs:      proofs,
+		NextSteps: []string{
+			"snare events",
+			"snare doctor",
+			"snare disarm",
+		},
+	}
+	finalizeProofReport(&report)
+	return report
+}
+
+func finalizeProofReport(report *proofReport) {
+	report.Summary = proofReportSummary{Total: len(report.Proofs)}
+	for _, proof := range report.Proofs {
+		switch proof.Status {
+		case "passed":
+			report.Summary.Passed++
+		case "failed":
+			report.Summary.Failed++
+		case "not-run", "pending":
+			report.Summary.NotRun++
+		}
+	}
+}
+
+func printProofReport(report proofReport) {
+	fmt.Println("  Proof report")
+	fmt.Printf("    device:    %s\n", report.DeviceID)
+	fmt.Printf("    mode:      %s\n", report.Mode)
+	fmt.Printf("    generated: %s\n", report.GeneratedAt)
+	fmt.Printf("    summary:   %d total, %d passed, %d failed, %d not run\n",
+		report.Summary.Total, report.Summary.Passed, report.Summary.Failed, report.Summary.NotRun)
 	fmt.Println()
+
+	for _, proof := range report.Proofs {
+		fmt.Printf("    %-8s %-7s %s\n", proof.Type, proof.Status, shortTokenID(proof.TokenID))
+		fmt.Printf("      tier:     %s\n", proof.Tier)
+		fmt.Printf("      trigger:  %s\n", proof.Trigger)
+		fmt.Printf("      path:     %s\n", proof.Path)
+		fmt.Printf("      command:  %s\n", proof.Command)
+		fmt.Printf("      expect:   %s\n", proof.Expected)
+		if proof.ObservedAt != "" {
+			fmt.Printf("      observed: %s\n", proof.ObservedAt)
+		}
+		if proof.Error != "" {
+			fmt.Printf("      error:    %s\n", proof.Error)
+		}
+		fmt.Printf("      cleanup:  %s\n", proof.NextCommand)
+		fmt.Println()
+	}
+
+	fmt.Println("    next:")
+	for _, step := range report.NextSteps {
+		fmt.Printf("      %s\n", step)
+	}
+	fmt.Println()
+}
+
+func printProofReportJSON(report proofReport) {
+	data, err := json.MarshalIndent(report, "", "  ")
+	if err != nil {
+		fatal(fmt.Errorf("encoding proof report: %w", err))
+	}
+	fmt.Println(string(data))
+}
+
+func precisionTriggerDescription(t string) string {
+	switch t {
+	case "awsproc":
+		return "AWS credential_process executes during SDK credential resolution before an AWS API call"
+	case "ssh":
+		return "SSH ProxyCommand executes before the fake host connection is established"
+	case "k8s":
+		return "kubeconfig server/exec credential path is contacted by kubectl or a Kubernetes SDK"
+	default:
+		return "active precision canary use"
+	}
 }
 
 func probeTokenEvents(cfg *config.Config, tokenID string) tokenProbeResult {

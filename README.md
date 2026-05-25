@@ -95,11 +95,11 @@ By default, `snare arm` uses **precision mode**: only `awsproc`, `ssh`, and `k8s
     snare scan     verify planted files are present and unchanged
     snare doctor   confidence screen: config, API, ownership, and test health
     snare repair   re-sync registrations safely if doctor finds drift
-    snare prove    print safe precision trigger commands (awsproc/ssh/k8s)
+    snare prove --run --report   safely trigger precision canaries and print a proof report
     snare events   view real hits when one arrives
 ```
 
-Immediately after arming, `snare status` will usually show `never fired`. That is expected: it means Snare has not recorded a real callback for that canary yet. Use `snare scan` for local file integrity, `snare doctor` for setup health, and `snare test` if you want to fire a synthetic callback and check your webhook destination.
+Immediately after arming, `snare status` will usually show `never fired`. That is expected: it means Snare has not recorded a real callback for that canary yet. Use `snare scan` for local file integrity, `snare doctor` for setup health, and `snare prove --run --report` when you want to safely trigger the precision canaries and produce a first-success report.
 
 To arm all canary types (including dotenv-based ones like OpenAI, Anthropic, etc.):
 
@@ -123,6 +123,8 @@ snare status                 # show active canaries + event state
 snare repair                 # re-register active tokens + run a live test check
 snare sync                   # alias for snare repair
 snare prove [--type <t>]     # guided precision trigger commands (awsproc/ssh/k8s)
+snare prove --run --report   # execute safe triggers and print a proof report
+snare prove --format json    # machine-readable proof report output
 snare events                 # fetch recent alert history from snare.sh
 snare events --summary       # ASN/UA distribution across all canaries
 snare scan                   # check canary integrity on disk
@@ -160,6 +162,7 @@ After `snare arm`, the expected healthy loop is:
 - `snare events` shows real hit history; empty output on fresh installs is expected.
 - `snare repair` (or `snare sync`) safely re-registers active tokens and re-tests callback/event readability when drift is detected.
 - `snare prove` prints safe precision trigger commands so you can intentionally prove alerts fire for `awsproc`, `ssh`, and `k8s`.
+- `snare prove --run --report` executes those triggers, confirms callbacks through the events API, and prints a compact proof report with cleanup commands.
 
 Important state distinction:
 
