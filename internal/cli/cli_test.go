@@ -128,6 +128,26 @@ func TestCmdArmHelp(t *testing.T) {
 	}
 }
 
+// TestCmdServeHelp verifies that `snare serve --help` prints help text and exits 0
+// without requiring a dashboard token or starting the server.
+func TestCmdServeHelp(t *testing.T) {
+	home := t.TempDir()
+	stdout, stderr, exitCode := runSnare(t, home, "serve", "--help")
+
+	if exitCode != 0 {
+		t.Errorf("serve --help: want exit 0, got %d; stderr:\n%s", exitCode, stderr)
+	}
+	if !strings.Contains(stdout, "snare serve") {
+		t.Errorf("serve --help: expected 'snare serve' in output, got:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "--dashboard-token") {
+		t.Errorf("serve --help: expected '--dashboard-token' in output, got:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "--trusted-proxy") {
+		t.Errorf("serve --help: expected '--trusted-proxy' in output, got:\n%s", stdout)
+	}
+}
+
 // TestCmdDoctorNoConfig verifies that `snare doctor` exits with a non-zero code
 // and prints a useful error message when snare has not been initialized.
 func TestCmdDoctorNoConfig(t *testing.T) {

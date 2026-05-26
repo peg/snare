@@ -82,7 +82,7 @@ Device IDs are server-assigned via `POST /api/devices` — clients cannot choose
 3. Fire all webhooks in parallel via `Promise.allSettled`
 4. Failures logged to CF Workers Logs but don't affect the response
 
-Outbound webhook requests include `X-Snare-Signature: sha256=<hmac>` when `WEBHOOK_SIGNING_SECRET` CF secret is configured. Receivers can verify alerts came from snare.sh.
+Outbound webhook requests include `X-Snare-Signature: sha256=<hmac>` when the Cloudflare Worker `WEBHOOK_SIGNING_SECRET` secret is configured. Receivers can verify alerts came from the configured Snare callback deployment.
 
 **Supported webhook formats:** Discord (embed), Slack (attachment), Telegram (HTML), generic JSON (`event: "canary.fired"`).
 
