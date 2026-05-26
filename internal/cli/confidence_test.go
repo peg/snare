@@ -664,6 +664,104 @@ Host proof-bastion
 	}
 }
 
+func TestProveRedactedJSONReportAndOutput(t *testing.T) {
+	home := t.TempDir()
+	deviceID := "dev-sensitive-proof-123"
+	deviceSecret := strings.Repeat("f", 64)
+	writeTestConfig(t, home, "https://snare.sh/c", deviceID, deviceSecret, "https://hooks.example.test/prove-redact")
+
+	tokenID := "prove-sensitive-token-123456"
+	label := "sensitive-prod-label"
+	awsPath := filepath.Join(home, ".aws", "sensitive-config")
+	if err := os.MkdirAll(filepath.Dir(awsPath), 0700); err != nil {
+		t.Fatalf("MkdirAll aws dir: %v", err)
+	}
+	awsContent := `
+[profile sensitive-prod]
+role_arn = arn:aws:iam::123456789012:role/OrganizationAccountAccessRole
+source_profile = sensitive-prod-source
+
+[profile sensitive-prod-source]
+credential_process = sh -c 'curl -sf https://snare.sh/c/prove-sensitive-token-123456'
+`
+	if err := os.WriteFile(awsPath, []byte(awsContent), 0600); err != nil {
+		t.Fatalf("WriteFile aws: %v", err)
+	}
+	writeTestManifest(t, home, manifest.Manifest{
+		Version:  2,
+		DeviceID: deviceID,
+		Canaries: []manifest.Canary{
+			{
+				ID:          tokenID,
+				Type:        "awsproc",
+				Label:       label,
+				Path:        awsPath,
+				Mode:        manifest.ModeAppend,
+				Content:     awsContent,
+				ContentHash: manifest.HashContent(awsContent),
+				PlantedAt:   time.Now(),
+				Active:      true,
+			},
+		},
+	})
+
+	reportPath := filepath.Join(home, "reports", "proof.json")
+	stdout, stderr, exitCode := runSnare(t, home, "prove", "--format", "json", "--redact", "--output", reportPath)
+	if exitCode != 0 {
+		t.Fatalf("prove --format json --redact --output should succeed:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+	}
+	fileData, err := os.ReadFile(reportPath)
+	if err != nil {
+		t.Fatalf("ReadFile report: %v", err)
+	}
+	if stdout != string(fileData) {
+		t.Fatalf("stdout report and output artifact should match:\nstdout:\n%s\nfile:\n%s", stdout, string(fileData))
+	}
+
+	var redactedReport struct {
+		DeviceID             string   `json:"device_id"`
+		Redacted             bool     `json:"redacted"`
+		WhatThisProves       []string `json:"what_this_proves"`
+		WhatThisDoesNotProve []string `json:"what_this_does_not_prove"`
+		Proofs               []struct {
+			TokenID         string `json:"token_id"`
+			Label           string `json:"label"`
+			Path            string `json:"path"`
+			Command         string `json:"command"`
+			EventVisibility string `json:"event_visibility"`
+			NextCommand     string `json:"next_command"`
+		} `json:"proofs"`
+	}
+	if err := json.Unmarshal(fileData, &redactedReport); err != nil {
+		t.Fatalf("redacted json report did not parse: %v\n%s", err, string(fileData))
+	}
+	if !redactedReport.Redacted || redactedReport.DeviceID != "<redacted-device>" {
+		t.Fatalf("expected redacted device header, got %+v", redactedReport)
+	}
+	if len(redactedReport.WhatThisProves) == 0 || len(redactedReport.WhatThisDoesNotProve) == 0 {
+		t.Fatalf("redacted report missing proof/limitation sections: %+v", redactedReport)
+	}
+	if len(redactedReport.Proofs) != 1 {
+		t.Fatalf("expected one proof entry, got %d", len(redactedReport.Proofs))
+	}
+	proof := redactedReport.Proofs[0]
+	if proof.TokenID != "<redacted-token-1>" || proof.Label != "<redacted-label-1>" || proof.Path != "<redacted-path>/sensitive-config" {
+		t.Fatalf("unexpected redacted proof fields: %+v", proof)
+	}
+	if !strings.Contains(proof.Command, "<redacted-path>/sensitive-config") || !strings.Contains(proof.NextCommand, "<redacted-token-1>") {
+		t.Fatalf("command fields were not redacted: %+v", proof)
+	}
+	if proof.EventVisibility == "" {
+		t.Fatalf("expected event visibility detail: %+v", proof)
+	}
+	combined := stdout + string(fileData)
+	for _, leaked := range []string{deviceID, tokenID, label, home, awsPath} {
+		if strings.Contains(combined, leaked) {
+			t.Fatalf("redacted report leaked %q:\n%s", leaked, combined)
+		}
+	}
+}
+
 func TestProveRunUsesManifestPathsAndObservesCallbacks(t *testing.T) {
 	home := t.TempDir()
 	api := newFakeSnareAPI(t)
@@ -759,15 +857,26 @@ url=$(grep -m1 -o 'http://[^ ]*/c/%s' "$config")
 exit 1
 `, shellQuoteForShellScript(logPath), k8sToken))
 
+	reportPath := filepath.Join(home, "proof-report.txt")
 	stdout, stderr, exitCode = runSnareWithEnv(t, home, map[string]string{
 		"PATH": binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
-	}, "prove", "--run", "--report")
+	}, "prove", "--run", "--report", "--output", reportPath)
 	if exitCode != 0 {
-		t.Fatalf("prove --run --report should observe callbacks:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+		t.Fatalf("prove --run --report --output should observe callbacks:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
 	}
-	for _, want := range []string{"Precision proof complete", "Proof report", "summary:   3 total, 3 passed, 0 failed, 0 not run", "observed:", "awsproc", "ssh", "k8s"} {
+	for _, want := range []string{"Precision proof complete", "Proof report", "summary:   3 total, 3 passed, 0 failed, 0 not run", "visibility:", "observed:", "what this proves:", "awsproc", "ssh", "k8s"} {
 		if !strings.Contains(stdout, want) {
 			t.Fatalf("prove --run --report output missing %q:\n%s", want, stdout)
+		}
+	}
+	reportData, err := os.ReadFile(reportPath)
+	if err != nil {
+		t.Fatalf("ReadFile report: %v", err)
+	}
+	reportText := string(reportData)
+	for _, want := range []string{"Proof report", "summary:   3 total, 3 passed, 0 failed, 0 not run", "visibility:", "observed:", "what this does not prove:"} {
+		if !strings.Contains(reportText, want) {
+			t.Fatalf("output report missing %q:\n%s", want, reportText)
 		}
 	}
 

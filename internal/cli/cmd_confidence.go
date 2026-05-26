@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -8,6 +9,8 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -55,14 +58,17 @@ type precisionProofRecipe struct {
 }
 
 type proofReport struct {
-	Version     int                `json:"version"`
-	GeneratedAt string             `json:"generated_at"`
-	DeviceID    string             `json:"device_id"`
-	Mode        string             `json:"mode"`
-	RanProofs   bool               `json:"ran_proofs"`
-	Summary     proofReportSummary `json:"summary"`
-	Proofs      []proofReportEntry `json:"proofs"`
-	NextSteps   []string           `json:"next_steps"`
+	Version              int                `json:"version"`
+	GeneratedAt          string             `json:"generated_at"`
+	DeviceID             string             `json:"device_id"`
+	Mode                 string             `json:"mode"`
+	RanProofs            bool               `json:"ran_proofs"`
+	Redacted             bool               `json:"redacted"`
+	Summary              proofReportSummary `json:"summary"`
+	Proofs               []proofReportEntry `json:"proofs"`
+	WhatThisProves       []string           `json:"what_this_proves"`
+	WhatThisDoesNotProve []string           `json:"what_this_does_not_prove"`
+	NextSteps            []string           `json:"next_steps"`
 }
 
 type proofReportSummary struct {
@@ -73,18 +79,20 @@ type proofReportSummary struct {
 }
 
 type proofReportEntry struct {
-	Type        string `json:"type"`
-	Tier        string `json:"tier"`
-	TokenID     string `json:"token_id"`
-	Label       string `json:"label,omitempty"`
-	Path        string `json:"path"`
-	Command     string `json:"command"`
-	Expected    string `json:"expected"`
-	Trigger     string `json:"trigger"`
-	Status      string `json:"status"`
-	ObservedAt  string `json:"observed_at,omitempty"`
-	Error       string `json:"error,omitempty"`
-	NextCommand string `json:"next_command"`
+	Type            string `json:"type"`
+	Tier            string `json:"tier"`
+	TokenID         string `json:"token_id"`
+	Label           string `json:"label,omitempty"`
+	Path            string `json:"path"`
+	Command         string `json:"command"`
+	Expected        string `json:"expected"`
+	Trigger         string `json:"trigger"`
+	Status          string `json:"status"`
+	EventVisibility string `json:"event_visibility"`
+	ObservedAt      string `json:"observed_at,omitempty"`
+	ObservedAfterMS int64  `json:"observed_after_ms,omitempty"`
+	Error           string `json:"error,omitempty"`
+	NextCommand     string `json:"next_command"`
 }
 
 func cmdDoctor(args []string) {
@@ -413,7 +421,7 @@ func cmdProve(args []string) {
 		fmt.Print(`snare prove — guided precision canary proof commands
 
 Usage:
-  snare prove [--type awsproc|ssh|k8s] [--run] [--report] [--format text|json]
+  snare prove [--type awsproc|ssh|k8s] [--run] [--report] [--format text|json] [--output <path>] [--redact]
 
 Default behavior:
   Prints exact safe trigger commands for active precision canaries.
@@ -426,6 +434,12 @@ With --report:
 
 With --format json:
   Emits only the proof report as JSON. Implies --report.
+
+With --output:
+  Writes the same proof report artifact to a file.
+
+With --redact:
+  Redacts device IDs, token IDs, labels, cleanup tokens, and local absolute paths.
 `)
 		return
 	}
@@ -433,6 +447,14 @@ With --format json:
 	typeFilter := flagValue(args, "--type")
 	run := hasFlag(args, "--run")
 	reportRequested := hasFlag(args, "--report")
+	redactReport := hasFlag(args, "--redact")
+	outputPath := flagValue(args, "--output")
+	if hasFlag(args, "--output") && (outputPath == "" || strings.HasPrefix(outputPath, "--")) {
+		fatal(fmt.Errorf("--output requires a path"))
+	}
+	if outputPath != "" {
+		reportRequested = true
+	}
 	format := flagValue(args, "--format")
 	if format == "" {
 		format = "text"
@@ -504,11 +526,7 @@ With --format json:
 			fmt.Println()
 		}
 		if reportRequested {
-			if jsonOutput {
-				printProofReportJSON(report)
-			} else {
-				printProofReport(report)
-			}
+			emitProofReport(report, format, outputPath, redactReport)
 		}
 		return
 	}
@@ -519,6 +537,7 @@ With --format json:
 		if before.AuthFailed {
 			msg := "auth failed before proof — run `snare repair`"
 			report.Proofs[i].Status = "failed"
+			report.Proofs[i].EventVisibility = "events API auth failed before trigger"
 			report.Proofs[i].Error = msg
 			fmt.Fprintf(os.Stderr, "  ✗ %-8s %s\n", recipe.Canary.Type, msg)
 			failures++
@@ -527,6 +546,7 @@ With --format json:
 		if before.Unregistered {
 			msg := "token is unregistered — run `snare repair`"
 			report.Proofs[i].Status = "failed"
+			report.Proofs[i].EventVisibility = "token is not registered or readable by this device"
 			report.Proofs[i].Error = msg
 			fmt.Fprintf(os.Stderr, "  ✗ %-8s %s\n", recipe.Canary.Type, msg)
 			failures++
@@ -535,6 +555,7 @@ With --format json:
 		if before.Unavailable {
 			msg := "events API unavailable — run `snare doctor`"
 			report.Proofs[i].Status = "failed"
+			report.Proofs[i].EventVisibility = "events API unavailable before trigger"
 			report.Proofs[i].Error = msg
 			fmt.Fprintf(os.Stderr, "  ✗ %-8s %s\n", recipe.Canary.Type, msg)
 			failures++
@@ -544,6 +565,7 @@ With --format json:
 		if _, err := exec.LookPath(recipe.Binary); err != nil {
 			msg := fmt.Sprintf("missing `%s` binary; run the printed command manually when installed", recipe.Binary)
 			report.Proofs[i].Status = "failed"
+			report.Proofs[i].EventVisibility = "not checked because trigger binary is missing"
 			report.Proofs[i].Error = msg
 			fmt.Fprintf(os.Stderr, "  ✗ %-8s %s\n", recipe.Canary.Type, msg)
 			failures++
@@ -551,12 +573,15 @@ With --format json:
 		}
 
 		baseline := countEventsByKind(before.Events, false)
+		report.Proofs[i].EventVisibility = "events API readable before trigger"
 		if !jsonOutput {
 			fmt.Printf("  Running %-8s proof...\n", recipe.Canary.Type)
 		}
+		startedAt := time.Now()
 		if err := runProofCommand(recipe.Command, 15*time.Second); err != nil {
 			msg := fmt.Sprintf("trigger command failed: %v", err)
 			report.Proofs[i].Status = "failed"
+			report.Proofs[i].EventVisibility = "events API readable before trigger; callback observation skipped because trigger command failed"
 			report.Proofs[i].Error = msg
 			fmt.Fprintf(os.Stderr, "    ✗ %s\n", msg)
 			failures++
@@ -567,6 +592,7 @@ With --format json:
 		if err != nil {
 			msg := fmt.Sprintf("callback not observed: %v", err)
 			report.Proofs[i].Status = "failed"
+			report.Proofs[i].EventVisibility = "events API readable before trigger; no new callback observed after trigger"
 			report.Proofs[i].Error = msg
 			fmt.Fprintf(os.Stderr, "    ✗ %s\n", msg)
 			failures++
@@ -576,7 +602,9 @@ With --format json:
 			ts = "just now"
 		}
 		report.Proofs[i].Status = "passed"
+		report.Proofs[i].EventVisibility = "callback observed through events API after trigger"
 		report.Proofs[i].ObservedAt = ts
+		report.Proofs[i].ObservedAfterMS = time.Since(startedAt).Milliseconds()
 		if !jsonOutput {
 			fmt.Printf("    ✓ callback observed at %s\n", ts)
 		}
@@ -584,11 +612,7 @@ With --format json:
 	finalizeProofReport(&report)
 
 	if reportRequested {
-		if jsonOutput {
-			printProofReportJSON(report)
-		} else {
-			printProofReport(report)
-		}
+		emitProofReport(report, format, outputPath, redactReport)
 	}
 
 	if !jsonOutput {
@@ -614,27 +638,35 @@ func buildProofReport(cfg *config.Config, recipes []precisionProofRecipe, run bo
 
 	proofs := make([]proofReportEntry, 0, len(recipes))
 	for _, recipe := range recipes {
+		eventVisibility := "not checked yet"
+		if !run {
+			eventVisibility = "not checked; run with --run to verify callback visibility through events API"
+		}
 		proofs = append(proofs, proofReportEntry{
-			Type:        recipe.Canary.Type,
-			Tier:        "precision",
-			TokenID:     recipe.Canary.ID,
-			Label:       recipe.Canary.Label,
-			Path:        recipe.Canary.Path,
-			Command:     recipe.Command,
-			Expected:    recipe.Expected,
-			Trigger:     precisionTriggerDescription(recipe.Canary.Type),
-			Status:      status,
-			NextCommand: "snare teardown --token " + recipe.Canary.ID,
+			Type:            recipe.Canary.Type,
+			Tier:            "precision",
+			TokenID:         recipe.Canary.ID,
+			Label:           recipe.Canary.Label,
+			Path:            recipe.Canary.Path,
+			Command:         recipe.Command,
+			Expected:        recipe.Expected,
+			Trigger:         precisionTriggerDescription(recipe.Canary.Type),
+			Status:          status,
+			EventVisibility: eventVisibility,
+			NextCommand:     "snare teardown --token " + recipe.Canary.ID,
 		})
 	}
 
 	report := proofReport{
-		Version:     1,
-		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
-		DeviceID:    cfg.DeviceID,
-		Mode:        "precision",
-		RanProofs:   run,
-		Proofs:      proofs,
+		Version:              1,
+		GeneratedAt:          time.Now().UTC().Format(time.RFC3339),
+		DeviceID:             cfg.DeviceID,
+		Mode:                 "precision",
+		RanProofs:            run,
+		Redacted:             false,
+		Proofs:               proofs,
+		WhatThisProves:       proofReportProves(run),
+		WhatThisDoesNotProve: proofReportLimitations(run),
 		NextSteps: []string{
 			"snare events",
 			"snare doctor",
@@ -659,45 +691,234 @@ func finalizeProofReport(report *proofReport) {
 	}
 }
 
-func printProofReport(report proofReport) {
-	fmt.Println("  Proof report")
-	fmt.Printf("    device:    %s\n", report.DeviceID)
-	fmt.Printf("    mode:      %s\n", report.Mode)
-	fmt.Printf("    generated: %s\n", report.GeneratedAt)
-	fmt.Printf("    summary:   %d total, %d passed, %d failed, %d not run\n",
-		report.Summary.Total, report.Summary.Passed, report.Summary.Failed, report.Summary.NotRun)
-	fmt.Println()
-
-	for _, proof := range report.Proofs {
-		fmt.Printf("    %-8s %-7s %s\n", proof.Type, proof.Status, shortTokenID(proof.TokenID))
-		fmt.Printf("      tier:     %s\n", proof.Tier)
-		fmt.Printf("      trigger:  %s\n", proof.Trigger)
-		fmt.Printf("      path:     %s\n", proof.Path)
-		fmt.Printf("      command:  %s\n", proof.Command)
-		fmt.Printf("      expect:   %s\n", proof.Expected)
-		if proof.ObservedAt != "" {
-			fmt.Printf("      observed: %s\n", proof.ObservedAt)
-		}
-		if proof.Error != "" {
-			fmt.Printf("      error:    %s\n", proof.Error)
-		}
-		fmt.Printf("      cleanup:  %s\n", proof.NextCommand)
-		fmt.Println()
+func emitProofReport(report proofReport, format, outputPath string, redact bool) {
+	if redact {
+		report = redactProofReport(report)
+	} else {
+		report.Redacted = false
 	}
+	finalizeProofReport(&report)
 
-	fmt.Println("    next:")
-	for _, step := range report.NextSteps {
-		fmt.Printf("      %s\n", step)
+	rendered, err := renderProofReport(report, format)
+	if err != nil {
+		fatal(err)
 	}
-	fmt.Println()
+	if outputPath != "" {
+		if err := writeProofReportFile(outputPath, rendered); err != nil {
+			fatal(err)
+		}
+	}
+	fmt.Print(rendered)
 }
 
-func printProofReportJSON(report proofReport) {
-	data, err := json.MarshalIndent(report, "", "  ")
-	if err != nil {
-		fatal(fmt.Errorf("encoding proof report: %w", err))
+func renderProofReport(report proofReport, format string) (string, error) {
+	switch format {
+	case "json":
+		var b bytes.Buffer
+		enc := json.NewEncoder(&b)
+		enc.SetEscapeHTML(false)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(report); err != nil {
+			return "", fmt.Errorf("encoding proof report: %w", err)
+		}
+		return b.String(), nil
+	case "text":
+		return formatProofReport(report), nil
+	default:
+		return "", fmt.Errorf("unsupported proof report format %q", format)
 	}
-	fmt.Println(string(data))
+}
+
+func writeProofReportFile(path, rendered string) error {
+	dir := filepath.Dir(path)
+	if dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			return fmt.Errorf("creating proof report directory: %w", err)
+		}
+	}
+	if err := os.WriteFile(path, []byte(rendered), 0600); err != nil {
+		return fmt.Errorf("writing proof report: %w", err)
+	}
+	return nil
+}
+
+func formatProofReport(report proofReport) string {
+	var b strings.Builder
+	b.WriteString("  Proof report\n")
+	fmt.Fprintf(&b, "    device:    %s\n", report.DeviceID)
+	fmt.Fprintf(&b, "    mode:      %s\n", report.Mode)
+	fmt.Fprintf(&b, "    generated: %s\n", report.GeneratedAt)
+	fmt.Fprintf(&b, "    redacted:  %t\n", report.Redacted)
+	fmt.Fprintf(&b, "    summary:   %d total, %d passed, %d failed, %d not run\n",
+		report.Summary.Total, report.Summary.Passed, report.Summary.Failed, report.Summary.NotRun)
+	b.WriteString("\n")
+
+	for _, proof := range report.Proofs {
+		fmt.Fprintf(&b, "    %-8s %-7s %s\n", proof.Type, proof.Status, shortTokenID(proof.TokenID))
+		fmt.Fprintf(&b, "      tier:       %s\n", proof.Tier)
+		fmt.Fprintf(&b, "      trigger:    %s\n", proof.Trigger)
+		fmt.Fprintf(&b, "      path:       %s\n", proof.Path)
+		fmt.Fprintf(&b, "      command:    %s\n", proof.Command)
+		fmt.Fprintf(&b, "      expect:     %s\n", proof.Expected)
+		if proof.EventVisibility != "" {
+			fmt.Fprintf(&b, "      visibility: %s\n", proof.EventVisibility)
+		}
+		if proof.ObservedAt != "" {
+			if proof.ObservedAfterMS > 0 {
+				fmt.Fprintf(&b, "      observed:   %s (%d ms after trigger)\n", proof.ObservedAt, proof.ObservedAfterMS)
+			} else {
+				fmt.Fprintf(&b, "      observed:   %s\n", proof.ObservedAt)
+			}
+		}
+		if proof.Error != "" {
+			fmt.Fprintf(&b, "      error:      %s\n", proof.Error)
+		}
+		fmt.Fprintf(&b, "      cleanup:    %s\n", proof.NextCommand)
+		b.WriteString("\n")
+	}
+
+	writeProofReportSection(&b, "what this proves", report.WhatThisProves)
+	writeProofReportSection(&b, "what this does not prove", report.WhatThisDoesNotProve)
+	writeProofReportSection(&b, "next", report.NextSteps)
+	return b.String()
+}
+
+func writeProofReportSection(b *strings.Builder, title string, lines []string) {
+	if len(lines) == 0 {
+		return
+	}
+	fmt.Fprintf(b, "    %s:\n", title)
+	for _, line := range lines {
+		fmt.Fprintf(b, "      %s\n", line)
+	}
+	b.WriteString("\n")
+}
+
+func proofReportProves(run bool) []string {
+	if run {
+		return []string{
+			"Snare found active precision canaries and executed their safe trigger commands.",
+			"Passed proofs produced real non-test callbacks that were readable through Snare's events API.",
+		}
+	}
+	return []string{
+		"Snare found active precision canaries and generated safe trigger commands for them.",
+		"No callbacks were fired because --run was not provided.",
+	}
+}
+
+func proofReportLimitations(run bool) []string {
+	limitations := []string{
+		"It covers only the selected active precision canaries, not every planted token or canary type.",
+		"It does not prove downstream notification delivery unless alerts are also observed outside this report.",
+	}
+	if !run {
+		limitations = append(limitations, "It does not prove callback delivery until rerun with --run.")
+	}
+	return limitations
+}
+
+type redactionPair struct {
+	Old string
+	New string
+}
+
+func redactProofReport(report proofReport) proofReport {
+	report.Redacted = true
+	pairs := make([]redactionPair, 0, 2+len(report.Proofs)*4)
+
+	if report.DeviceID != "" {
+		pairs = append(pairs, redactionPair{Old: report.DeviceID, New: "<redacted-device>"})
+		report.DeviceID = "<redacted-device>"
+	}
+
+	tokenRedactions := map[string]string{}
+	labelRedactions := map[string]string{}
+	tokenIndex := 1
+	labelIndex := 1
+	for i := range report.Proofs {
+		proof := &report.Proofs[i]
+		if proof.TokenID != "" {
+			redacted := numberedRedaction(tokenRedactions, proof.TokenID, "token", &tokenIndex)
+			pairs = append(pairs, redactionPair{Old: proof.TokenID, New: redacted})
+			proof.TokenID = redacted
+		}
+		if proof.Label != "" {
+			redacted := numberedRedaction(labelRedactions, proof.Label, "label", &labelIndex)
+			pairs = append(pairs, redactionPair{Old: proof.Label, New: redacted})
+			proof.Label = redacted
+		}
+		if proof.Path != "" {
+			redacted := redactLocalPath(proof.Path)
+			if redacted != proof.Path {
+				pairs = append(pairs,
+					redactionPair{Old: shellQuote(proof.Path), New: shellQuote(redacted)},
+					redactionPair{Old: proof.Path, New: redacted},
+				)
+				proof.Path = redacted
+			}
+		}
+	}
+
+	sort.SliceStable(pairs, func(i, j int) bool {
+		return len(pairs[i].Old) > len(pairs[j].Old)
+	})
+
+	for i := range report.Proofs {
+		proof := &report.Proofs[i]
+		proof.Command = applyRedactions(proof.Command, pairs)
+		proof.Expected = applyRedactions(proof.Expected, pairs)
+		proof.Trigger = applyRedactions(proof.Trigger, pairs)
+		proof.EventVisibility = applyRedactions(proof.EventVisibility, pairs)
+		proof.Error = applyRedactions(proof.Error, pairs)
+		proof.NextCommand = applyRedactions(proof.NextCommand, pairs)
+	}
+	report.WhatThisProves = applyRedactionsToSlice(report.WhatThisProves, pairs)
+	report.WhatThisDoesNotProve = applyRedactionsToSlice(report.WhatThisDoesNotProve, pairs)
+	report.NextSteps = applyRedactionsToSlice(report.NextSteps, pairs)
+	return report
+}
+
+func numberedRedaction(seen map[string]string, value, kind string, next *int) string {
+	if redacted, ok := seen[value]; ok {
+		return redacted
+	}
+	redacted := fmt.Sprintf("<redacted-%s-%d>", kind, *next)
+	*next = *next + 1
+	seen[value] = redacted
+	return redacted
+}
+
+func redactLocalPath(path string) string {
+	if path == "" {
+		return path
+	}
+	if filepath.IsAbs(path) || strings.HasPrefix(path, "~/") {
+		base := filepath.Base(path)
+		if base == "." || base == string(os.PathSeparator) || base == "" {
+			return "<redacted-path>"
+		}
+		return filepath.ToSlash(filepath.Join("<redacted-path>", base))
+	}
+	return path
+}
+
+func applyRedactionsToSlice(lines []string, pairs []redactionPair) []string {
+	out := make([]string, len(lines))
+	for i, line := range lines {
+		out[i] = applyRedactions(line, pairs)
+	}
+	return out
+}
+
+func applyRedactions(s string, pairs []redactionPair) string {
+	for _, pair := range pairs {
+		if pair.Old == "" || pair.Old == pair.New {
+			continue
+		}
+		s = strings.ReplaceAll(s, pair.Old, pair.New)
+	}
+	return s
 }
 
 func precisionTriggerDescription(t string) string {
