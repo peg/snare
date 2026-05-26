@@ -14,6 +14,8 @@ Versioning: [Semantic Versioning](https://semver.org/)
 - `snare prove --redact` for share-safe proof reports that remove device IDs, token IDs, labels, cleanup tokens, and absolute local paths.
 - Enterprise evaluation, self-hosting, and SIEM integration guides for security-review-friendly pilots.
 - `snare serve --help` for self-hosted callback server flag discovery.
+- `snare prove --pack mcp` to safely trigger planted MCP canaries with a Streamable HTTP `initialize` probe and verify callbacks through the events API.
+- `snare prove --pack all` to run precision and MCP proof recipes in one report.
 
 ### Changed
 - Proof reports now include event visibility, observed callback latency, and explicit “what this proves” / “what this does not prove” sections.

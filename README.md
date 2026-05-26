@@ -97,6 +97,7 @@ By default, `snare arm` uses **precision mode**: only `awsproc`, `ssh`, and `k8s
     snare repair   re-sync registrations safely if doctor finds drift
     snare prove --run --report   safely trigger precision canaries and print a proof report
     snare prove --format json --redact --output proof.json   write a share-safe proof artifact
+    snare prove --pack mcp --run --report   prove MCP canaries after `--all` or `plant --type mcp`
     snare events   view real hits when one arrives
 ```
 
@@ -126,7 +127,9 @@ snare status                 # show active canaries + event state
 snare repair                 # re-register active tokens + run a live test check
 snare sync                   # alias for snare repair
 snare prove [--type <t>]     # guided precision trigger commands (awsproc/ssh/k8s)
+snare prove --pack mcp       # guided MCP initialize proof for planted MCP canaries
 snare prove --run --report   # execute safe triggers and print a proof report
+snare prove --pack all --run --report  # prove precision + MCP canaries together
 snare prove --format json    # machine-readable proof report output
 snare prove --redact --output proof.json --format json  # share-safe proof artifact
 snare events                 # fetch recent alert history from snare.sh
@@ -166,7 +169,8 @@ After `snare arm`, the expected healthy loop is:
 - `snare events` shows real hit history; empty output on fresh installs is expected.
 - `snare repair` (or `snare sync`) safely re-registers active tokens and re-tests callback/event readability when drift is detected.
 - `snare prove` prints safe precision trigger commands so you can intentionally prove alerts fire for `awsproc`, `ssh`, and `k8s`.
-- `snare prove --run --report` executes those triggers, confirms callbacks through the events API, and prints a compact proof report with cleanup commands, event visibility, observed latency, and explicit proof/limitation notes.
+- `snare prove --pack mcp` prints a safe MCP Streamable HTTP initialize probe for planted `mcp` canaries without modifying active MCP client configs.
+- `snare prove --run --report` executes the selected proof triggers, confirms callbacks through the events API, and prints a compact proof report with cleanup commands, event visibility, observed latency, and explicit proof/limitation notes.
 - `snare prove --format json --redact --output proof.json` writes a machine-readable artifact with device IDs, token IDs, labels, cleanup tokens, and absolute local paths redacted.
 
 Important state distinction:
@@ -246,6 +250,14 @@ This is why `awsproc`, `ssh`, and `k8s` are planted by default — they fire onl
 ### mcp
 
 Plants a fake MCP server config in a discoverable but non-auto-loaded location. A compromised agent scanning for MCP servers will find it and attempt to connect. The HTTP transport URL points to snare.sh. It won't interfere with your active Claude/Cursor/VS Code configs.
+
+To intentionally prove an MCP canary without wiring it into an active client, run:
+
+```sh
+snare prove --pack mcp --run --report
+```
+
+That sends one Streamable HTTP `initialize` request to the planted fake server URL and verifies the callback through the events API.
 
 ---
 
