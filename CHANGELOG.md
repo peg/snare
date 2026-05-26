@@ -9,8 +9,17 @@ Versioning: [Semantic Versioning](https://semver.org/)
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-05-26
+
 ### Added
+- `snare prove` for guided precision canary proof commands covering `awsproc`, `ssh`, and `k8s` canaries.
+- `snare prove --run` to execute safe precision triggers and confirm callback visibility through the events API.
 - `snare prove --report` and `snare prove --format json` for first-success proof reports that capture precision trigger commands, observed callbacks, status, and cleanup commands.
+
+## [0.2.1] - 2026-05-23
+
+### Fixed
+- Hardened release archives and self-hosted deployment packaging.
 
 ## [0.2.0] - 2026-05-01
 
