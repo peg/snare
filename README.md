@@ -110,6 +110,8 @@ snare arm --all --webhook https://discord.com/api/webhooks/YOUR/WEBHOOK
 
 Supported webhook destinations: Discord, Slack, Telegram, or any endpoint that accepts JSON. Treat webhook URLs as secrets — don't commit, screenshot, or share them.
 
+Evaluating Snare for a team or lab? Start with the [enterprise evaluation guide](docs/enterprise-evaluation.md), then wire alerts to your SIEM with the [webhook integration docs](docs/integrations/generic-webhook.md).
+
 ---
 
 ## Commands
@@ -258,7 +260,9 @@ Each alert includes:
 - User agent (identifies the exact SDK: `Boto3/1.34.46`, `kubectl/v1.35.1`, etc.)
 - "Likely AI agent" flag when the request comes from cloud infrastructure
 
-Alerts are signed with `X-Snare-Signature` (HMAC-SHA256) so you can verify they came from snare.sh.
+Alerts are signed with `X-Snare-Signature` (HMAC-SHA256) when webhook signing is configured, so receivers can verify the sender.
+
+See [generic webhooks](docs/integrations/generic-webhook.md), [Splunk](docs/integrations/splunk.md), [Datadog](docs/integrations/datadog.md), and [Microsoft Sentinel](docs/integrations/sentinel.md) for SIEM integration patterns.
 
 ---
 
@@ -302,27 +306,29 @@ Fake credential content lives locally in `~/.snare/manifest.json` (0600) and is 
 
 ## Self-hosting
 
-The Cloudflare Worker is open source in this repo (`worker/`). Deploy it to your own account:
+Use self-hosting when you need a custom callback domain, full network-layer control, private retention, or SIEM relay behavior. The repo includes both the Cloudflare Worker source (`worker/`) and a standalone `snare serve` path with Docker Compose.
+
+Quick standalone server:
 
 ```sh
-cd worker
-npx wrangler deploy
+SNARE_DASHBOARD_TOKEN="$(openssl rand -hex 32)" \
+  snare serve --port 8080 --db /var/lib/snare/snare.db
 ```
 
-Set `WEBHOOK_URLS` as a Cloudflare Worker secret for alert delivery. Set `WEBHOOK_SIGNING_SECRET` to sign outbound requests.
-
-To point canaries at your own server instead of snare.sh, edit `callback_base` in `~/.snare/config.json` after `snare init`.
-
-`snare serve` requires `--dashboard-token` (or `SNARE_DASHBOARD_TOKEN`) to protect the dashboard. Generate one with `openssl rand -hex 32`.
-
-Docker Compose can use `.env.example` as a starting point:
+Quick Docker Compose path:
 
 ```sh
-cp .env.example .env
-SNARE_DASHBOARD_TOKEN="$(openssl rand -hex 32)" docker compose up -d
+{
+  echo "SNARE_DASHBOARD_TOKEN=$(openssl rand -hex 32)"
+  echo "SNARE_PORT=8080"
+} > .env
+docker compose up -d
+curl -fsS http://localhost:8080/health
 ```
 
-> **Important:** Only expose `snare serve` behind a reverse proxy you control (nginx, Caddy, Cloudflare Tunnel). Never bind directly to a public interface. By default the server ignores `X-Forwarded-For` and `X-Real-IP`. If you want real client IP attribution behind a trusted proxy, set `--trusted-proxy <cidr,...>` to the proxy network(s) that are allowed to supply those headers.
+Only expose `snare serve` behind a reverse proxy you control. By default the server ignores `X-Forwarded-For` and `X-Real-IP`; set `--trusted-proxy <cidr,...>` only for proxy networks that are allowed to supply those headers.
+
+See the [self-hosting guide](docs/self-hosting.md) for reverse proxy, backup, upgrade, Cloudflare Worker, and client `callback_base` steps.
 
 ---
 

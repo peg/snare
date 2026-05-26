@@ -14,11 +14,36 @@ import (
 
 // cmdServe starts the self-hosted snare HTTP server.
 func cmdServe(args []string) {
-	portStr    := flagValue(args, "--port")
-	dbPath     := flagValue(args, "--db")
-	tlsDomain  := flagValue(args, "--tls-domain")
+	if hasFlag(args, "--help") || hasFlag(args, "-h") {
+		fmt.Print(`snare serve — run a self-hosted callback server
+
+Usage:
+  snare serve [--port <port>] [--db <path>] [--dashboard-token <token>] [--webhook-url <url>] [--tls-domain <domain>] [--trusted-proxy <cidr,...>]
+
+Required:
+  --dashboard-token <token>   token for dashboard and dashboard API auth
+                              also accepted via SNARE_DASHBOARD_TOKEN
+
+Flags:
+  --port <port>               listen port (default: 8080)
+  --db <path>                 SQLite database path (default: ~/.snare/serve/snare.db)
+  --webhook-url <url>         global fallback webhook destination
+  --tls-domain <domain>       enable Let's Encrypt TLS for this domain
+  --trusted-proxy <cidr,...>  trusted reverse proxy CIDRs allowed to set client IP headers
+  --help                      show this help
+
+Examples:
+  SNARE_DASHBOARD_TOKEN="$(openssl rand -hex 32)" snare serve
+  snare serve --port 8080 --db /data/snare.db --dashboard-token "$SNARE_DASHBOARD_TOKEN"
+`)
+		return
+	}
+
+	portStr := flagValue(args, "--port")
+	dbPath := flagValue(args, "--db")
+	tlsDomain := flagValue(args, "--tls-domain")
 	webhookURL := flagValue(args, "--webhook-url")
-	dashToken  := flagValue(args, "--dashboard-token")
+	dashToken := flagValue(args, "--dashboard-token")
 	trustedProxy := flagValue(args, "--trusted-proxy")
 
 	// Also accept token from env var

@@ -35,6 +35,8 @@ Out of scope:
 
 **Privacy guarantee:** The `/c/{token}` callback endpoint never reads, stores, or forwards request bodies. Only header-derived metadata is stored (IP, user agent, timestamp, ASN). This applies to the managed snare.sh worker. Self-hosted deployments are controlled by the operator.
 
+For a team/security review checklist covering data flow, files touched, proof artifacts, SIEM routing, and cleanup, see [docs/enterprise-evaluation.md](docs/enterprise-evaluation.md).
+
 **Device secret:** The CLI generates a 256-bit device secret at `~/.snare/config.json` (0600 permissions). This secret authenticates API calls to snare.sh. If compromised, run `snare rotate` immediately.
 
 ## Supported Versions
