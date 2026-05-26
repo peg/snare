@@ -691,19 +691,6 @@ func finalizeProofReport(report *proofReport) {
 	}
 }
 
-func printProofReport(report proofReport) {
-	fmt.Print(formatProofReport(report))
-}
-
-func printProofReportJSON(report proofReport) {
-	rendered, err := renderProofReport(report, "json")
-	if err != nil {
-		fatal(fmt.Errorf("encoding proof report: %w", err))
-	}
-	fmt.Print(rendered)
-
-}
-
 func emitProofReport(report proofReport, format, outputPath string, redact bool) {
 	if redact {
 		report = redactProofReport(report)
