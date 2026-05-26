@@ -50,8 +50,9 @@ type webhookTestResult struct {
 	ObservedAt  string
 }
 
-type precisionProofRecipe struct {
+type proofRecipe struct {
 	Canary   manifest.Canary
+	Tier     string
 	Command  string
 	Expected string
 	Binary   string
@@ -418,13 +419,17 @@ Safety:
 
 func cmdProve(args []string) {
 	if hasFlag(args, "--help") || hasFlag(args, "-h") {
-		fmt.Print(`snare prove — guided precision canary proof commands
+		fmt.Print(`snare prove — guided canary proof commands
 
 Usage:
-  snare prove [--type awsproc|ssh|k8s] [--run] [--report] [--format text|json] [--output <path>] [--redact]
+  snare prove [--pack precision|mcp|all] [--type awsproc|ssh|k8s|mcp] [--run] [--report] [--format text|json] [--output <path>] [--redact]
 
 Default behavior:
   Prints exact safe trigger commands for active precision canaries.
+
+MCP pack:
+  snare prove --pack mcp prints a Streamable HTTP initialize probe for active MCP canaries.
+  The probe uses the planted non-auto-loaded MCP config and does not modify active client configs.
 
 With --run:
   Executes the trigger command and confirms a new real callback is readable.
@@ -444,7 +449,8 @@ With --redact:
 		return
 	}
 
-	typeFilter := flagValue(args, "--type")
+	typeFilter := strings.ToLower(flagValue(args, "--type"))
+	packFilterRaw := strings.ToLower(flagValue(args, "--pack"))
 	run := hasFlag(args, "--run")
 	reportRequested := hasFlag(args, "--report")
 	redactReport := hasFlag(args, "--redact")
@@ -468,8 +474,22 @@ With --redact:
 		reportRequested = true
 	}
 
-	if typeFilter != "" && !isPrecisionCanaryType(typeFilter) {
-		fatal(fmt.Errorf("unsupported --type %q (expected awsproc, ssh, or k8s)", typeFilter))
+	if typeFilter != "" && !isProofCanaryType(typeFilter) {
+		fatal(fmt.Errorf("unsupported --type %q (expected awsproc, ssh, k8s, or mcp)", typeFilter))
+	}
+
+	packFilter := packFilterRaw
+	if packFilter == "" {
+		packFilter = "precision"
+		if typeFilter == "mcp" {
+			packFilter = "mcp"
+		}
+	}
+	if !isProofPack(packFilter) {
+		fatal(fmt.Errorf("unsupported --pack %q (expected precision, mcp, or all)", packFilter))
+	}
+	if typeFilter != "" && !proofTypeInPack(typeFilter, packFilter) {
+		fatal(fmt.Errorf("--type %s is not part of --pack %s", typeFilter, packFilter))
 	}
 
 	cfg, err := requireConfig()
@@ -482,19 +502,23 @@ With --redact:
 		fatal(err)
 	}
 
-	targets := selectPrecisionCanaries(m.Active(), typeFilter)
+	targets := selectProofCanaries(m.Active(), typeFilter, packFilter)
 	if len(targets) == 0 {
 		if typeFilter != "" {
-			fmt.Printf("No active %s precision canary found. Run `snare arm` or `snare arm --all`.\n", typeFilter)
-		} else {
+			fmt.Printf("No active %s canary found. Run `snare arm --all` or `snare plant --type %s`.\n", typeFilter, typeFilter)
+		} else if packFilter == "precision" {
 			fmt.Println("No active precision canaries found. Run `snare arm` first.")
+		} else if packFilter == "all" {
+			fmt.Println("No active proof-capable canaries found. Run `snare arm` or `snare plant --type mcp`.")
+		} else {
+			fmt.Printf("No active %s canaries found. Run `snare arm --all` or `snare plant --type mcp`.\n", packFilter)
 		}
 		return
 	}
 
-	recipes := make([]precisionProofRecipe, 0, len(targets))
+	recipes := make([]proofRecipe, 0, len(targets))
 	for _, c := range targets {
-		recipe, err := buildPrecisionProofRecipe(c)
+		recipe, err := buildProofRecipe(c)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "  ⚠  skipping %s (%s): %v\n", c.Type, shortTokenID(c.ID), err)
 			continue
@@ -502,14 +526,14 @@ With --redact:
 		recipes = append(recipes, recipe)
 	}
 	if len(recipes) == 0 {
-		fatal(fmt.Errorf("no runnable precision canary proofs found"))
+		fatal(fmt.Errorf("no runnable %s canary proofs found", packFilter))
 	}
 
-	report := buildProofReport(cfg, recipes, run)
+	report := buildProofReport(cfg, recipes, run, packFilter)
 
 	if !jsonOutput {
 		fmt.Println()
-		fmt.Println("  snare prove — precision proof flow")
+		fmt.Printf("  snare prove — %s proof flow\n", proofModeLabel(report.Mode))
 		fmt.Println()
 		for _, recipe := range recipes {
 			fmt.Printf("  %-8s %s\n", recipe.Canary.Type, shortTokenID(recipe.Canary.ID))
@@ -521,7 +545,7 @@ With --redact:
 
 	if !run {
 		if !jsonOutput {
-			fmt.Println("  These commands intentionally trigger active precision canaries.")
+			fmt.Println("  These commands intentionally trigger active canaries.")
 			fmt.Println("  Add `--run` to execute them and verify callbacks end-to-end.")
 			fmt.Println()
 		}
@@ -625,12 +649,12 @@ With --redact:
 		os.Exit(1)
 	}
 	if !jsonOutput {
-		fmt.Println("  ✓ Precision proof complete. Alerts are firing as expected.")
+		fmt.Printf("  ✓ %s. Alerts are firing as expected.\n", proofCompletionLabel(report.Mode))
 		fmt.Println()
 	}
 }
 
-func buildProofReport(cfg *config.Config, recipes []precisionProofRecipe, run bool) proofReport {
+func buildProofReport(cfg *config.Config, recipes []proofRecipe, run bool, mode string) proofReport {
 	status := "not-run"
 	if run {
 		status = "pending"
@@ -644,13 +668,13 @@ func buildProofReport(cfg *config.Config, recipes []precisionProofRecipe, run bo
 		}
 		proofs = append(proofs, proofReportEntry{
 			Type:            recipe.Canary.Type,
-			Tier:            "precision",
+			Tier:            recipe.Tier,
 			TokenID:         recipe.Canary.ID,
 			Label:           recipe.Canary.Label,
 			Path:            recipe.Canary.Path,
 			Command:         recipe.Command,
 			Expected:        recipe.Expected,
-			Trigger:         precisionTriggerDescription(recipe.Canary.Type),
+			Trigger:         proofTriggerDescription(recipe.Canary.Type),
 			Status:          status,
 			EventVisibility: eventVisibility,
 			NextCommand:     "snare teardown --token " + recipe.Canary.ID,
@@ -661,12 +685,12 @@ func buildProofReport(cfg *config.Config, recipes []precisionProofRecipe, run bo
 		Version:              1,
 		GeneratedAt:          time.Now().UTC().Format(time.RFC3339),
 		DeviceID:             cfg.DeviceID,
-		Mode:                 "precision",
+		Mode:                 mode,
 		RanProofs:            run,
 		Redacted:             false,
 		Proofs:               proofs,
-		WhatThisProves:       proofReportProves(run),
-		WhatThisDoesNotProve: proofReportLimitations(run),
+		WhatThisProves:       proofReportProves(run, mode),
+		WhatThisDoesNotProve: proofReportLimitations(run, mode),
 		NextSteps: []string{
 			"snare events",
 			"snare doctor",
@@ -794,22 +818,23 @@ func writeProofReportSection(b *strings.Builder, title string, lines []string) {
 	b.WriteString("\n")
 }
 
-func proofReportProves(run bool) []string {
+func proofReportProves(run bool, mode string) []string {
+	label := proofModeLabel(mode)
 	if run {
 		return []string{
-			"Snare found active precision canaries and executed their safe trigger commands.",
+			fmt.Sprintf("Snare found active %s canaries and executed their safe trigger commands.", label),
 			"Passed proofs produced real non-test callbacks that were readable through Snare's events API.",
 		}
 	}
 	return []string{
-		"Snare found active precision canaries and generated safe trigger commands for them.",
+		fmt.Sprintf("Snare found active %s canaries and generated safe trigger commands for them.", label),
 		"No callbacks were fired because --run was not provided.",
 	}
 }
 
-func proofReportLimitations(run bool) []string {
+func proofReportLimitations(run bool, mode string) []string {
 	limitations := []string{
-		"It covers only the selected active precision canaries, not every planted token or canary type.",
+		fmt.Sprintf("It covers only the selected active %s canaries, not every planted token or canary type.", proofModeLabel(mode)),
 		"It does not prove downstream notification delivery unless alerts are also observed outside this report.",
 	}
 	if !run {
@@ -921,7 +946,7 @@ func applyRedactions(s string, pairs []redactionPair) string {
 	return s
 }
 
-func precisionTriggerDescription(t string) string {
+func proofTriggerDescription(t string) string {
 	switch t {
 	case "awsproc":
 		return "AWS credential_process executes during SDK credential resolution before an AWS API call"
@@ -929,8 +954,10 @@ func precisionTriggerDescription(t string) string {
 		return "SSH ProxyCommand executes before the fake host connection is established"
 	case "k8s":
 		return "kubeconfig server/exec credential path is contacted by kubectl or a Kubernetes SDK"
+	case "mcp":
+		return "MCP client sends a Streamable HTTP initialize request to the planted fake server URL"
 	default:
-		return "active precision canary use"
+		return "active canary use"
 	}
 }
 
@@ -1130,13 +1157,72 @@ func isPrecisionCanaryType(t string) bool {
 	}
 }
 
-func selectPrecisionCanaries(active []manifest.Canary, typeFilter string) []manifest.Canary {
+func isProofCanaryType(t string) bool {
+	return isPrecisionCanaryType(t) || t == "mcp"
+}
+
+func isProofPack(pack string) bool {
+	switch pack {
+	case "precision", "mcp", "all":
+		return true
+	default:
+		return false
+	}
+}
+
+func proofTypeInPack(t, pack string) bool {
+	if pack == "all" {
+		return isProofCanaryType(t)
+	}
+	if pack == "precision" {
+		return isPrecisionCanaryType(t)
+	}
+	return pack == "mcp" && t == "mcp"
+}
+
+func proofTypeOrder(pack string) []string {
+	switch pack {
+	case "mcp":
+		return []string{"mcp"}
+	case "all":
+		return []string{"awsproc", "ssh", "k8s", "mcp"}
+	default:
+		return []string{"awsproc", "ssh", "k8s"}
+	}
+}
+
+func proofModeLabel(mode string) string {
+	switch mode {
+	case "mcp":
+		return "MCP"
+	case "all":
+		return "combined"
+	default:
+		return "precision"
+	}
+}
+
+func proofCompletionLabel(mode string) string {
+	switch mode {
+	case "mcp":
+		return "MCP proof complete"
+	case "all":
+		return "Proof complete"
+	default:
+		return "Precision proof complete"
+	}
+}
+
+func selectProofCanaries(active []manifest.Canary, typeFilter, packFilter string) []manifest.Canary {
 	latestByType := map[string]manifest.Canary{}
 	for _, c := range active {
-		if !isPrecisionCanaryType(c.Type) {
+		if !isProofCanaryType(c.Type) {
 			continue
 		}
 		if typeFilter != "" && c.Type != typeFilter {
+			continue
+		}
+		if typeFilter == "" && !proofTypeInPack(c.Type, packFilter) {
 			continue
 		}
 		prev, ok := latestByType[c.Type]
@@ -1145,8 +1231,11 @@ func selectPrecisionCanaries(active []manifest.Canary, typeFilter string) []mani
 		}
 	}
 
-	order := []string{"awsproc", "ssh", "k8s"}
+	order := proofTypeOrder(packFilter)
 	out := make([]manifest.Canary, 0, len(order))
+	if typeFilter != "" {
+		order = []string{typeFilter}
+	}
 	for _, typ := range order {
 		if c, ok := latestByType[typ]; ok {
 			out = append(out, c)
@@ -1155,15 +1244,26 @@ func selectPrecisionCanaries(active []manifest.Canary, typeFilter string) []mani
 	return out
 }
 
-func buildPrecisionProofRecipe(c manifest.Canary) (precisionProofRecipe, error) {
+func buildProofRecipe(c manifest.Canary) (proofRecipe, error) {
+	if isPrecisionCanaryType(c.Type) {
+		return buildPrecisionProofRecipe(c)
+	}
+	if c.Type == "mcp" {
+		return buildMCPProofRecipe(c)
+	}
+	return proofRecipe{}, fmt.Errorf("unsupported proof type %q", c.Type)
+}
+
+func buildPrecisionProofRecipe(c manifest.Canary) (proofRecipe, error) {
 	switch c.Type {
 	case "awsproc":
 		profile := extractAWSProcProfile(c.Content)
 		if profile == "" {
-			return precisionProofRecipe{}, fmt.Errorf("could not parse profile name from canary content")
+			return proofRecipe{}, fmt.Errorf("could not parse profile name from canary content")
 		}
-		return precisionProofRecipe{
+		return proofRecipe{
 			Canary:   c,
+			Tier:     "precision",
 			Binary:   "aws",
 			Command:  "AWS_EC2_METADATA_DISABLED=true AWS_CONFIG_FILE=" + shellQuote(c.Path) + " AWS_SHARED_CREDENTIALS_FILE=/dev/null aws sts get-caller-identity --profile " + shellQuote(profile) + " --no-cli-pager",
 			Expected: "AWS CLI may fail auth, but callback should fire immediately during credential resolution",
@@ -1171,24 +1271,69 @@ func buildPrecisionProofRecipe(c manifest.Canary) (precisionProofRecipe, error) 
 	case "ssh":
 		host := extractSSHHost(c.Content)
 		if host == "" {
-			return precisionProofRecipe{}, fmt.Errorf("could not parse ssh host from canary content")
+			return proofRecipe{}, fmt.Errorf("could not parse ssh host from canary content")
 		}
-		return precisionProofRecipe{
+		return proofRecipe{
 			Canary:   c,
+			Tier:     "precision",
 			Binary:   "ssh",
 			Command:  "ssh -F " + shellQuote(c.Path) + " -o BatchMode=yes -o ConnectTimeout=3 " + shellQuote(host) + " true",
 			Expected: "SSH connection fails quickly, but ProxyCommand callback should fire",
 		}, nil
 	case "k8s":
-		return precisionProofRecipe{
+		return proofRecipe{
 			Canary:   c,
+			Tier:     "precision",
 			Binary:   "kubectl",
 			Command:  "kubectl --kubeconfig " + shellQuote(c.Path) + " get namespaces --request-timeout=5s",
 			Expected: "kubectl request should fail/timeout, but exec credential/server callback should fire",
 		}, nil
 	default:
-		return precisionProofRecipe{}, fmt.Errorf("unsupported precision type %q", c.Type)
+		return proofRecipe{}, fmt.Errorf("unsupported precision type %q", c.Type)
 	}
+}
+
+func buildMCPProofRecipe(c manifest.Canary) (proofRecipe, error) {
+	serverName, serverURL := extractMCPServerURL(c.Content)
+	if serverURL == "" {
+		return proofRecipe{}, fmt.Errorf("could not parse MCP server URL from canary content")
+	}
+	payload := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"snare-prove","version":"1.0"}}}`
+	return proofRecipe{
+		Canary: c,
+		Tier:   "medium",
+		Binary: "curl",
+		Command: "curl -fsS --max-time 5 -X POST " + shellQuote(serverURL) +
+			" -H " + shellQuote("Content-Type: application/json") +
+			" -H " + shellQuote("Accept: application/json, text/event-stream") +
+			" --data " + shellQuote(payload),
+		Expected: fmt.Sprintf("MCP initialize probe for %s may receive a non-MCP response, but the callback should fire", serverName),
+	}, nil
+}
+
+type mcpServerConfig struct {
+	URL string `json:"url"`
+}
+
+func extractMCPServerURL(content string) (string, string) {
+	var cfg struct {
+		MCPServers map[string]mcpServerConfig `json:"mcpServers"`
+	}
+	if err := json.Unmarshal([]byte(content), &cfg); err != nil || len(cfg.MCPServers) == 0 {
+		return "", ""
+	}
+	names := make([]string, 0, len(cfg.MCPServers))
+	for name := range cfg.MCPServers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		url := strings.TrimSpace(cfg.MCPServers[name].URL)
+		if url != "" {
+			return name, url
+		}
+	}
+	return "", ""
 }
 
 func runProofCommand(command string, timeout time.Duration) error {

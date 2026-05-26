@@ -126,7 +126,7 @@ Commands:
   snare scan                   check canary integrity on disk
   snare repair                 safely re-sync token registrations + test health
   snare sync                   alias for snare repair
-  snare prove [flags]          guided precision proof with optional report output
+  snare prove [flags]          guided proof flow for precision and MCP canaries
   snare events                 fetch recent alert events from snare.sh
   snare test                   fire a test alert to verify your webhook
   snare doctor [--test]        confidence screen: config, API, canaries, ownership, callbacks
@@ -149,7 +149,8 @@ Flags (arm):
   --dry-run                    show what would be planted without writing
 
 Flags (prove):
-  --type <type>                precision canary type: awsproc, ssh, or k8s
+  --pack <pack>                proof pack: precision, mcp, or all (default: precision)
+  --type <type>                proof canary type: awsproc, ssh, k8s, or mcp
   --run                        execute safe trigger commands and verify callbacks
   --report                     print a first-success proof report
   --format text|json           output format for proof reports (json implies --report)

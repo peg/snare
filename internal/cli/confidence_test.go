@@ -896,6 +896,97 @@ exit 1
 	}
 }
 
+func TestProveMCPPackShowsAndRunsCallback(t *testing.T) {
+	home := t.TempDir()
+	api := newFakeSnareAPI(t)
+	defer api.Close()
+
+	deviceID := "dev-prove-mcp-pack"
+	deviceSecret := strings.Repeat("f", 64)
+	api.AddDevice(deviceID, deviceSecret)
+	writeTestConfig(t, home, api.URL()+"/c", deviceID, deviceSecret, "")
+
+	tokenID := "prove-run-mcp-token"
+	mcpPath := filepath.Join(home, ".config", "mcp-servers.json")
+	if err := os.MkdirAll(filepath.Dir(mcpPath), 0700); err != nil {
+		t.Fatalf("MkdirAll mcp config: %v", err)
+	}
+	mcpContent := fmt.Sprintf(`{
+  "mcpServers": {
+    "internal-vault": {
+      "url": "%s/c/%s/mcp",
+      "description": "Internal vault — read-only production secrets",
+      "env": {
+        "VAULT_TOKEN": "not-a-real-token"
+      }
+    }
+  }
+}
+`, api.URL(), tokenID)
+	if err := os.WriteFile(mcpPath, []byte(mcpContent), 0600); err != nil {
+		t.Fatalf("WriteFile mcp config: %v", err)
+	}
+	writeTestManifest(t, home, manifest.Manifest{
+		Version:  2,
+		DeviceID: deviceID,
+		Canaries: []manifest.Canary{
+			{ID: tokenID, Type: "mcp", Label: "mcp-proof", Path: mcpPath, Mode: manifest.ModeNewFile, Content: mcpContent, ContentHash: manifest.HashContent(mcpContent), PlantedAt: time.Now(), Active: true},
+		},
+	})
+
+	stdout, stderr, exitCode := runSnare(t, home, "prove", "--pack", "mcp")
+	if exitCode != 0 {
+		t.Fatalf("prove --pack mcp should succeed:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+	}
+	for _, want := range []string{"snare prove — MCP proof flow", "curl -fsS --max-time 5 -X POST", "/c/" + tokenID + "/mcp", "MCP initialize probe", "Add `--run`"} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("prove --pack mcp output missing %q:\n%s", want, stdout)
+		}
+	}
+
+	stdout, stderr, exitCode = runSnare(t, home, "prove", "--type", "mcp", "--format", "json")
+	if exitCode != 0 {
+		t.Fatalf("prove --type mcp --format json should succeed:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+	}
+	var report struct {
+		Mode    string `json:"mode"`
+		Summary struct {
+			Total  int `json:"total"`
+			NotRun int `json:"not_run"`
+		} `json:"summary"`
+		Proofs []struct {
+			Type    string `json:"type"`
+			Tier    string `json:"tier"`
+			Command string `json:"command"`
+			Trigger string `json:"trigger"`
+		} `json:"proofs"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &report); err != nil {
+		t.Fatalf("json report did not parse: %v\n%s", err, stdout)
+	}
+	if report.Mode != "mcp" || report.Summary.Total != 1 || report.Summary.NotRun != 1 || len(report.Proofs) != 1 {
+		t.Fatalf("unexpected mcp report: %+v", report)
+	}
+	if report.Proofs[0].Type != "mcp" || report.Proofs[0].Tier != "medium" || !strings.Contains(report.Proofs[0].Command, "initialize") || !strings.Contains(report.Proofs[0].Trigger, "Streamable HTTP") {
+		t.Fatalf("unexpected mcp proof entry: %+v", report.Proofs[0])
+	}
+
+	stdout, stderr, exitCode = runSnare(t, home, "repair")
+	if exitCode != 0 {
+		t.Fatalf("repair should register mcp token:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+	}
+
+	stdout, stderr, exitCode = runSnare(t, home, "prove", "--pack", "mcp", "--run", "--report")
+	if exitCode != 0 {
+		t.Fatalf("prove --pack mcp --run --report should observe callback:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+	}
+	for _, want := range []string{"MCP proof complete", "summary:   1 total, 1 passed, 0 failed, 0 not run", "observed:", "mcp"} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("prove --pack mcp --run --report output missing %q:\n%s", want, stdout)
+		}
+	}
+}
+
 func shellQuoteForTest(s string) string {
 	if s == "" {
 		return "''"
