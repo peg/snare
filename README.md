@@ -96,10 +96,11 @@ By default, `snare arm` uses **precision mode**: only `awsproc`, `ssh`, and `k8s
     snare doctor   confidence screen: config, API, ownership, and test health
     snare repair   re-sync registrations safely if doctor finds drift
     snare prove --run --report   safely trigger precision canaries and print a proof report
+    snare prove --format json --redact --output proof.json   write a share-safe proof artifact
     snare events   view real hits when one arrives
 ```
 
-Immediately after arming, `snare status` will usually show `never fired`. That is expected: it means Snare has not recorded a real callback for that canary yet. Use `snare scan` for local file integrity, `snare doctor` for setup health, and `snare prove --run --report` when you want to safely trigger the precision canaries and produce a first-success report.
+Immediately after arming, `snare status` will usually show `never fired`. That is expected: it means Snare has not recorded a real callback for that canary yet. Use `snare scan` for local file integrity, `snare doctor` for setup health, and `snare prove --run --report` when you want to safely trigger the precision canaries and produce a first-success report. Add `--redact --output proof.json --format json` when you need a share-safe artifact for a teammate or issue.
 
 To arm all canary types (including dotenv-based ones like OpenAI, Anthropic, etc.):
 
@@ -125,6 +126,7 @@ snare sync                   # alias for snare repair
 snare prove [--type <t>]     # guided precision trigger commands (awsproc/ssh/k8s)
 snare prove --run --report   # execute safe triggers and print a proof report
 snare prove --format json    # machine-readable proof report output
+snare prove --redact --output proof.json --format json  # share-safe proof artifact
 snare events                 # fetch recent alert history from snare.sh
 snare events --summary       # ASN/UA distribution across all canaries
 snare scan                   # check canary integrity on disk
@@ -162,7 +164,8 @@ After `snare arm`, the expected healthy loop is:
 - `snare events` shows real hit history; empty output on fresh installs is expected.
 - `snare repair` (or `snare sync`) safely re-registers active tokens and re-tests callback/event readability when drift is detected.
 - `snare prove` prints safe precision trigger commands so you can intentionally prove alerts fire for `awsproc`, `ssh`, and `k8s`.
-- `snare prove --run --report` executes those triggers, confirms callbacks through the events API, and prints a compact proof report with cleanup commands.
+- `snare prove --run --report` executes those triggers, confirms callbacks through the events API, and prints a compact proof report with cleanup commands, event visibility, observed latency, and explicit proof/limitation notes.
+- `snare prove --format json --redact --output proof.json` writes a machine-readable artifact with device IDs, token IDs, labels, cleanup tokens, and absolute local paths redacted.
 
 Important state distinction:
 
