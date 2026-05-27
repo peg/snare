@@ -9,6 +9,8 @@ Versioning: [Semantic Versioning](https://semver.org/)
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-05-27
+
 ### Added
 - `snare prove --output <path>` for writing proof reports as shareable artifacts.
 - `snare prove --redact` for share-safe proof reports that remove device IDs, token IDs, labels, cleanup tokens, and absolute local paths.
