@@ -324,6 +324,7 @@ Quick standalone server:
 
 ```sh
 SNARE_DASHBOARD_TOKEN="$(openssl rand -hex 32)" \
+SNARE_ENROLLMENT_TOKEN="$(openssl rand -hex 32)" \
   snare serve --port 8080 --db /var/lib/snare/snare.db
 ```
 
@@ -332,6 +333,7 @@ Quick Docker Compose path:
 ```sh
 {
   echo "SNARE_DASHBOARD_TOKEN=$(openssl rand -hex 32)"
+  echo "SNARE_ENROLLMENT_TOKEN=$(openssl rand -hex 32)"
   echo "SNARE_PORT=8080"
 } > .env
 docker compose up -d

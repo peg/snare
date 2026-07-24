@@ -174,14 +174,8 @@ export default {
 
     // Canary callback: /c/{token} or /c/{token}/anything (for OpenAI /v1 suffix etc.)
     // NO AUTH — SDKs/tools must hit this unknowingly
-    // Rate limited: 10 alerts per token per minute (prevents alert flooding)
     const match = url.pathname.match(/^\/c\/([a-zA-Z0-9_-]{8,80})(\/.*)?$/);
     if (match) {
-      // Rate limit per token (prevent alert spam if token ID leaks)
-      const tokenRateLimited = await checkRateLimit(env, `cb:${match[1]}`, 10, 60);
-      if (tokenRateLimited) {
-        return gif(); // Still return valid response, just don't process
-      }
       // ═══════════════════════════════════════════════════════════════════
       // PRIVACY CRITICAL PATH
       //
@@ -333,18 +327,19 @@ async function processAlert(token, metadata, env) {
   // Ignore link preview bots
   if (PREVIEW_BOTS.some(b => ua.includes(b))) return;
 
-  // Deduplicate: same token+IP within 60 seconds fires only once
-  if (await isDuplicate(env, token, metadata.ip)) return;
-
-  // Resolve webhook + canary metadata (single KV fetch for both filtering and delivery)
+  // Resolve registration before any stateful operation. Token prefixes are
+  // attacker-controlled and cannot grant access to rate-limit state, event
+  // storage, or webhook delivery.
   const { webhooks, meta, registered } = await resolveWebhooks(token, env);
-
-  // Unregistered tokens must never fire webhooks — prevents false alerts from
-  // probe traffic hitting random/partial token URLs (e.g. snare.sh/c/agent-01-).
-  if (!registered && !token.startsWith("snare-test-")) {
+  if (!registered) {
     console.log("UNREGISTERED_TOKEN", "token=***", "ip=***");
     return;
   }
+
+  // Rate limit and deduplicate only registered tokens, preventing random token
+  // probes from consuming KV writes.
+  if (await checkRateLimit(env, `cb:${token}`, 10, 60)) return;
+  if (await isDuplicate(env, token, metadata.ip)) return;
 
   // Per-type false-positive filtering: drop scanner orgs and requests
   // that lack expected SDK signatures for high-confidence canary types.

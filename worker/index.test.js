@@ -358,3 +358,72 @@ describe("resolveWebhooks", () => {
     expect(result.webhooks).toEqual([]);
   });
 });
+
+describe("callback registration boundary", () => {
+  it("does not create state or deliver webhooks for an unregistered test token", async () => {
+    const writes = [];
+    let pending;
+    const env = {
+      SNARE_KV: {
+        get: async () => null,
+        put: async (...args) => writes.push(args),
+      },
+      WEBHOOK_URLS: "https://hooks.slack.com/services/a/b/c",
+    };
+    const request = new Request("https://snare.sh/c/snare-test-unregistered123", {
+      headers: {
+        "cf-connecting-ip": "198.51.100.2",
+        "user-agent": "TestAgent/1.0",
+      },
+    });
+
+    const response = await worker.fetch(request, env, {
+      waitUntil(promise) {
+        pending = promise;
+      },
+    });
+    await pending;
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("image/gif");
+    expect(writes).toEqual([]);
+  });
+
+  it("continues processing a registered test token", async () => {
+    const writes = [];
+    let pending;
+    const token = "snare-test-registered123";
+    const env = {
+      SNARE_KV: {
+        get: async (key) => key === `webhook:${token}`
+          ? JSON.stringify({
+              webhook_url: "use-global",
+              canary_type: "test",
+              label: "test",
+              device_id: "dev-test",
+            })
+          : null,
+        put: async (...args) => writes.push(args),
+      },
+    };
+
+    const response = await worker.fetch(
+      new Request(`https://snare.sh/c/${token}`, {
+        headers: {
+          "cf-connecting-ip": "198.51.100.3",
+          "user-agent": "TestAgent/1.0",
+        },
+      }),
+      env,
+      {
+        waitUntil(promise) {
+          pending = promise;
+        },
+      },
+    );
+    await pending;
+
+    expect(response.status).toBe(200);
+    expect(writes.some(([key]) => key.startsWith(`event:${token}:`))).toBe(true);
+  });
+});

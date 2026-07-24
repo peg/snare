@@ -13,7 +13,7 @@ RUN CGO_ENABLED=0 go build -ldflags="-s -w -X main.version=docker" \
     -o /snare ./cmd/snare
 
 # ── Runtime stage ─────────────────────────────────────────────────────────────
-FROM alpine:3.20
+FROM alpine:3.24
 
 RUN apk add --no-cache ca-certificates wget && \
     mkdir -p /data && chmod 700 /data

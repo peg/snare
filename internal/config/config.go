@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -94,7 +95,10 @@ func Init(callbackBase, webhookURL string, force bool) (*Config, error) {
 	}
 
 	if callbackBase == "" {
-		callbackBase = "https://snare.sh/c"
+		callbackBase = strings.TrimSpace(os.Getenv("SNARE_CALLBACK_BASE"))
+		if callbackBase == "" {
+			callbackBase = "https://snare.sh/c"
+		}
 	}
 
 	deviceSecret, err := newDeviceSecret()
@@ -102,15 +106,18 @@ func Init(callbackBase, webhookURL string, force bool) (*Config, error) {
 		return nil, err
 	}
 
-	// Try to get a server-assigned device ID (prevents squatting).
-	// Falls back to local random ID if server is unreachable.
+	// Try to get a server-assigned device ID (prevents squatting). Managed
+	// snare.sh retains the legacy offline fallback; custom servers fail closed.
 	deviceID := ""
 	apiBase := callbackBase
 	if len(apiBase) > 2 && apiBase[len(apiBase)-2:] == "/c" {
 		apiBase = apiBase[:len(apiBase)-2]
 	}
-	deviceID = registerDeviceWithServer(apiBase, deviceSecret)
+	deviceID, registerErr := registerDeviceWithServer(apiBase, deviceSecret)
 	if deviceID == "" {
+		if callbackBase != "https://snare.sh/c" {
+			return nil, fmt.Errorf("registering device with self-hosted server: %w", registerErr)
+		}
 		// Server unreachable — generate local ID as fallback
 		deviceID, err = newDeviceID()
 		if err != nil {
@@ -182,25 +189,37 @@ func (c *Config) APIBase() string {
 }
 
 // registerDeviceWithServer calls POST /api/devices to get a server-minted device ID.
-// Returns empty string on any failure — caller falls back to local ID generation.
-func registerDeviceWithServer(apiBase, deviceSecret string) string {
+// SNARE_ENROLLMENT_TOKEN is sent only for this request and is never persisted.
+func registerDeviceWithServer(apiBase, deviceSecret string) (string, error) {
 	payload, _ := json.Marshal(map[string]string{"device_secret": deviceSecret})
-	resp, err := httpClient.Post(apiBase+"/api/devices", "application/json", bytes.NewReader(payload)) //nolint:noctx
+	req, err := http.NewRequest(http.MethodPost, apiBase+"/api/devices", bytes.NewReader(payload))
 	if err != nil {
-		return ""
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if enrollmentToken := strings.TrimSpace(os.Getenv("SNARE_ENROLLMENT_TOKEN")); enrollmentToken != "" {
+		req.Header.Set("Authorization", "Bearer "+enrollmentToken)
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return "", err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		return ""
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return "", fmt.Errorf("device enrollment returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
 	}
 	var result struct {
 		DeviceID string `json:"device_id"`
 	}
 	data, _ := io.ReadAll(resp.Body)
 	if err := json.Unmarshal(data, &result); err != nil {
-		return ""
+		return "", fmt.Errorf("decoding device enrollment response: %w", err)
 	}
-	return result.DeviceID
+	if result.DeviceID == "" {
+		return "", fmt.Errorf("device enrollment response omitted device_id")
+	}
+	return result.DeviceID, nil
 }
 
 func newDeviceID() (string, error) {

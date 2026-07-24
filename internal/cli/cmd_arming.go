@@ -436,9 +436,8 @@ Naming tip:
 		testToken := "snare-test-" + shortID
 		if err := registerToken(cfg, testToken, "test", "test"); err != nil {
 			fmt.Fprintf(os.Stderr, "  ⚠  test webhook registration failed: %v\n", err)
-		}
-		callbackURL := cfg.CallbackURL(testToken)
-		if err := httpGet(callbackURL); err != nil {
+			fmt.Fprintln(os.Stderr, "     Test callback skipped because the token is not registered.")
+		} else if err := httpGet(cfg.CallbackURL(testToken)); err != nil {
 			fmt.Fprintf(os.Stderr, "  ⚠  webhook test failed: %v\n", err)
 		} else {
 			fmt.Println("  ✓ webhook test fired")

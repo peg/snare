@@ -12,6 +12,7 @@ Use self-hosting when you need a custom callback domain, network-layer control, 
 ```sh
 {
   echo "SNARE_DASHBOARD_TOKEN=$(openssl rand -hex 32)"
+  echo "SNARE_ENROLLMENT_TOKEN=$(openssl rand -hex 32)"
   echo "SNARE_PORT=8080"
   echo "SNARE_WEBHOOK_URL="
   echo "SNARE_TLS_DOMAIN="
@@ -28,6 +29,7 @@ Important settings:
 | Setting | Purpose |
 |---|---|
 | `SNARE_DASHBOARD_TOKEN` | Required. Protects the dashboard and dashboard API. Generate with `openssl rand -hex 32`. |
+| `SNARE_ENROLLMENT_TOKEN` | Required. Separately authorizes creation of new devices. Generate with `openssl rand -hex 32` and provide it only during enrollment. |
 | `SNARE_PORT` | Host port mapped to container port 8080. |
 | `SNARE_DB` / `--db` | SQLite database path. In Compose this is `/data/snare.db`. |
 | `SNARE_WEBHOOK_URL` / `--webhook-url` | Global fallback alert destination. Per-token webhooks still take priority. |
@@ -40,6 +42,7 @@ Important settings:
 
 ```sh
 SNARE_DASHBOARD_TOKEN="$(openssl rand -hex 32)" \
+SNARE_ENROLLMENT_TOKEN="$(openssl rand -hex 32)" \
   snare serve \
     --port 8080 \
     --db /var/lib/snare/snare.db \
@@ -50,6 +53,7 @@ For a reverse-proxy deployment, bind Snare on an internal port and expose only t
 
 ```sh
 SNARE_DASHBOARD_TOKEN="$(openssl rand -hex 32)" \
+SNARE_ENROLLMENT_TOKEN="$(openssl rand -hex 32)" \
   snare serve \
     --port 8080 \
     --db /var/lib/snare/snare.db \
@@ -72,26 +76,22 @@ If the proxy terminates TLS and forwards traffic to Snare over HTTP, set `--trus
 
 ## Pointing clients at the self-hosted callback base
 
-Initialize Snare, then edit `~/.snare/config.json` so `callback_base` points to your deployment's `/c` path:
-
-```json
-{
-  "callback_base": "https://snare.example.com/c"
-}
-```
-
-Then arm fresh canaries so registrations and planted callback URLs use the self-hosted server:
+Enroll and arm each new client by providing the callback base and enrollment token as environment variables. The enrollment token is sent only to `POST /api/devices`; it is not saved in `~/.snare/config.json`.
 
 ```sh
-snare arm --webhook https://example.com/snare-webhook
+SNARE_CALLBACK_BASE=https://snare.example.com/c \
+SNARE_ENROLLMENT_TOKEN="$SNARE_ENROLLMENT_TOKEN" \
+  snare arm --webhook https://example.com/snare-webhook
 snare doctor --test
 ```
 
-If you already planted canaries against another callback base, disarm and re-arm during a maintenance window so on-disk bait is regenerated with the new URL:
+Existing enrolled clients do not need the enrollment token for ordinary registration, event retrieval, rotation, or callback traffic. If you already planted canaries against another callback base, disarm and re-arm during a maintenance window:
 
 ```sh
 snare disarm
-snare arm --webhook https://example.com/snare-webhook
+SNARE_CALLBACK_BASE=https://snare.example.com/c \
+SNARE_ENROLLMENT_TOKEN="$SNARE_ENROLLMENT_TOKEN" \
+  snare arm --webhook https://example.com/snare-webhook
 snare doctor --test
 ```
 
@@ -130,6 +130,19 @@ snare doctor --test
 snare prove --run --report --redact --format json --output proof.json
 ```
 
+### Security upgrade from v0.4.0 or earlier
+
+Device creation was not enrollment-protected in these releases. If `/api/devices` was reachable from an untrusted network, a database row alone does not prove that an existing device was approved.
+
+Before exposing the upgraded service:
+
+1. Back up the current SQLite database and keep that copy offline if historical events must be retained.
+2. Configure distinct dashboard and enrollment tokens.
+3. Start the upgraded service with a fresh active database.
+4. Disarm and re-enroll approved clients during a maintenance window using `SNARE_CALLBACK_BASE` and `SNARE_ENROLLMENT_TOKEN`.
+
+If the device API was never reachable outside a trusted administrative network, known existing clients can continue using their current device secrets.
+
 ## Cloudflare Worker self-hosting
 
 The Worker source lives in `worker/`.
@@ -150,9 +163,11 @@ Adjust `worker/wrangler.toml` routes from `snare.sh` to your domain before deplo
 ## Security checklist
 
 - [ ] Dashboard token is at least 32 random hex bytes and stored outside source control.
+- [ ] Enrollment token is distinct from the dashboard token, stored outside source control, and shared only with administrators enrolling devices.
 - [ ] Dashboard is behind TLS and an access-controlled reverse proxy if exposed beyond localhost.
 - [ ] `--trusted-proxy` is limited to actual reverse proxy addresses.
 - [ ] SQLite database backups are encrypted or stored in a restricted backup system.
 - [ ] Webhook URLs and signing secrets are treated as credentials.
+- [ ] Webhook destinations use public HTTPS endpoints; Snare refuses private/reserved destinations and redirects.
 - [ ] Client `callback_base` points to the intended `/c` path and was verified with `snare doctor --test`.
 - [ ] `snare disarm --purge` cleanup is tested on a pilot host.

@@ -1340,7 +1340,9 @@ func runProofCommand(command string, timeout time.Duration) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "sh", "-lc", command+" >/dev/null 2>&1 || true")
+	// Do not start a login shell: login profiles can replace PATH, causing the
+	// binary checked by LookPath above to differ from the one actually run.
+	cmd := exec.CommandContext(ctx, "sh", "-c", command+" >/dev/null 2>&1 || true")
 	if err := cmd.Run(); err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			return fmt.Errorf("timed out after %s", timeout.Round(time.Second))

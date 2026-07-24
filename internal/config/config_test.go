@@ -107,6 +107,7 @@ func TestLoad(t *testing.T) {
 func TestInit(t *testing.T) {
 	t.Run("uses server-assigned device ID", func(t *testing.T) {
 		home := setupHome(t)
+		t.Setenv("SNARE_ENROLLMENT_TOKEN", "enrollment-secret")
 		var gotSecret string
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodPost {
@@ -114,6 +115,9 @@ func TestInit(t *testing.T) {
 			}
 			if r.URL.Path != "/api/devices" {
 				t.Fatalf("path = %s, want /api/devices", r.URL.Path)
+			}
+			if got := r.Header.Get("Authorization"); got != "Bearer enrollment-secret" {
+				t.Fatalf("Authorization = %q, want enrollment bearer token", got)
 			}
 
 			var body struct {
@@ -152,21 +156,11 @@ func TestInit(t *testing.T) {
 		}
 	})
 
-	t.Run("falls back to local device ID when server unavailable", func(t *testing.T) {
+	t.Run("fails closed when custom server enrollment fails", func(t *testing.T) {
 		setupHome(t)
 
-		cfg, err := Init("://bad/c", "", false)
-		if err != nil {
-			t.Fatalf("Init: %v", err)
-		}
-		if !strings.HasPrefix(cfg.DeviceID, "dev-") {
-			t.Fatalf("DeviceID = %q, want dev-* fallback", cfg.DeviceID)
-		}
-		if len(cfg.DeviceID) != 36 {
-			t.Fatalf("DeviceID len = %d, want 36", len(cfg.DeviceID))
-		}
-		if cfg.CallbackBase != "://bad/c" {
-			t.Fatalf("CallbackBase = %q, want custom value preserved", cfg.CallbackBase)
+		if _, err := Init("://bad/c", "", false); err == nil {
+			t.Fatal("Init() error = nil, want custom enrollment failure")
 		}
 	})
 
@@ -182,13 +176,30 @@ func TestInit(t *testing.T) {
 		}
 	})
 
+	t.Run("uses callback base from environment", func(t *testing.T) {
+		setupHome(t)
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(`{"device_id":"dev-from-env"}`))
+		}))
+		defer srv.Close()
+		t.Setenv("SNARE_CALLBACK_BASE", srv.URL+"/c")
+
+		cfg, err := Init("", "", false)
+		if err != nil {
+			t.Fatalf("Init: %v", err)
+		}
+		if cfg.CallbackBase != srv.URL+"/c" {
+			t.Fatalf("CallbackBase = %q, want environment value", cfg.CallbackBase)
+		}
+	})
+
 	t.Run("refuses overwrite without force", func(t *testing.T) {
 		setupHome(t)
 
-		if _, err := Init("://bad/c", "", false); err != nil {
+		if _, err := Init("", "", false); err != nil {
 			t.Fatalf("first Init: %v", err)
 		}
-		if _, err := Init("://bad/c", "", false); err == nil {
+		if _, err := Init("", "", false); err == nil {
 			t.Fatal("second Init() error = nil, want already initialized error")
 		}
 	})
@@ -196,11 +207,11 @@ func TestInit(t *testing.T) {
 	t.Run("force overwrites existing config", func(t *testing.T) {
 		setupHome(t)
 
-		first, err := Init("://bad/c", "https://hooks.example.test/one", false)
+		first, err := Init("", "https://hooks.example.test/one", false)
 		if err != nil {
 			t.Fatalf("first Init: %v", err)
 		}
-		second, err := Init("://bad/c", "https://hooks.example.test/two", true)
+		second, err := Init("", "https://hooks.example.test/two", true)
 		if err != nil {
 			t.Fatalf("forced Init: %v", err)
 		}
@@ -225,7 +236,8 @@ func TestRegisterDeviceWithServerTimeout(t *testing.T) {
 	defer srv.Close()
 
 	start := time.Now()
-	if got := registerDeviceWithServer(srv.URL, strings.Repeat("a", 64)); got != "" {
+	got, err := registerDeviceWithServer(srv.URL, strings.Repeat("a", 64))
+	if got != "" || err == nil {
 		t.Fatalf("device ID = %q, want fallback", got)
 	}
 	if time.Since(start) > time.Second {
@@ -373,8 +385,15 @@ func TestRegisterDeviceWithServer(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			if got := registerDeviceWithServer(srv.URL, strings.Repeat("a", 64)); got != tt.wantID {
+			got, err := registerDeviceWithServer(srv.URL, strings.Repeat("a", 64))
+			if got != tt.wantID {
 				t.Fatalf("registerDeviceWithServer() = %q, want %q", got, tt.wantID)
+			}
+			if tt.wantID == "" && err == nil {
+				t.Fatal("registerDeviceWithServer() error = nil, want failure")
+			}
+			if tt.wantID != "" && err != nil {
+				t.Fatalf("registerDeviceWithServer() error = %v", err)
 			}
 		})
 	}

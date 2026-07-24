@@ -43,7 +43,7 @@ For a team/security review checklist covering data flow, files touched, proof ar
 
 | Version | Supported |
 |---------|-----------|
-| latest (main) | ✅ |
+| latest release | ✅ |
 | older releases | ❌ |
 
 We maintain only the latest release. Please update before reporting issues.

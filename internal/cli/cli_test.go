@@ -143,6 +143,9 @@ func TestCmdServeHelp(t *testing.T) {
 	if !strings.Contains(stdout, "--dashboard-token") {
 		t.Errorf("serve --help: expected '--dashboard-token' in output, got:\n%s", stdout)
 	}
+	if !strings.Contains(stdout, "--enrollment-token") {
+		t.Errorf("serve --help: expected '--enrollment-token' in output, got:\n%s", stdout)
+	}
 	if !strings.Contains(stdout, "--trusted-proxy") {
 		t.Errorf("serve --help: expected '--trusted-proxy' in output, got:\n%s", stdout)
 	}
