@@ -1,6 +1,18 @@
-import { describe, it, expect } from "vitest";
+import { afterEach, describe, it, expect, vi } from "vitest";
 import { readFileSync } from "node:fs";
-import worker, { CANARY_TYPES, shouldFilter, resolveWebhooks, SCANNER_ORGS, validateAuth } from "./index.js";
+import worker, {
+  CANARY_TYPES,
+  SCANNER_ORGS,
+  forwardAlert,
+  isAllowedWebhookURL,
+  resolveWebhooks,
+  shouldFilter,
+  validateAuth,
+} from "./index.js";
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 // ─── Log hygiene ────────────────────────────────────────────────────────────
 
@@ -198,6 +210,83 @@ describe("CANARY_TYPES completeness", () => {
   });
 });
 
+// ─── Webhook destination policy ──────────────────────────────────────────────
+
+describe("webhook destination policy", () => {
+  it("accepts approved HTTPS webhook hosts", () => {
+    expect(isAllowedWebhookURL("https://discord.com/api/webhooks/1/2")).toBe(true);
+    expect(isAllowedWebhookURL("https://hooks.slack.com/services/a/b/c")).toBe(true);
+    expect(isAllowedWebhookURL("https://api.telegram.org/bot123/sendMessage")).toBe(true);
+  });
+
+  it("accepts exact operator-configured domains and their subdomains", () => {
+    const env = { WEBHOOK_ALLOWED_DOMAINS: "alerts.example.com" };
+    expect(isAllowedWebhookURL("https://alerts.example.com/hook", env)).toBe(true);
+    expect(isAllowedWebhookURL("https://tenant.alerts.example.com/hook", env)).toBe(true);
+  });
+
+  it("rejects lookalike hosts, credentials, non-HTTPS URLs, and malformed URLs", () => {
+    const rejected = [
+      "https://hooks.slack.com.attacker.example/services/a/b/c",
+      "https://tenant.hooks.slack.com/services/a/b/c",
+      "https://hooks.slack.com@attacker.example/services/a/b/c",
+      "https://attacker.example/?next=hooks.slack.com",
+      "http://hooks.slack.com/services/a/b/c",
+      "not-a-url",
+    ];
+    for (const url of rejected) {
+      expect(isAllowedWebhookURL(url)).toBe(false);
+    }
+  });
+
+  it("revalidates and canonicalizes immediately before fetch without redirects", async () => {
+    const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await forwardAlert(
+      "https://hooks.slack.com/services/a/b/c",
+      {
+        token: "token-123",
+        is_test: false,
+        timestamp: "2026-07-25T00:00:00Z",
+        ip: "192.0.2.1",
+        method: "GET",
+      },
+    );
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    const [url, options] = fetchMock.mock.calls[0];
+    expect(url).toBe("https://hooks.slack.com/services/a/b/c");
+    expect(options.redirect).toBe("manual");
+    expect(JSON.parse(options.body)).toHaveProperty("attachments");
+  });
+
+  it("rejects an unapproved destination before fetch", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(forwardAlert(
+      "https://attacker.example/?next=hooks.slack.com",
+      { timestamp: "2026-07-25T00:00:00Z" },
+    )).rejects.toThrow("webhook destination is not allowed");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("does not follow or accept webhook redirects", async () => {
+    const fetchMock = vi.fn(async () => new Response(null, {
+      status: 302,
+      headers: { location: "https://attacker.example/collect" },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(forwardAlert(
+      "https://hooks.slack.com/services/a/b/c",
+      { timestamp: "2026-07-25T00:00:00Z" },
+    )).rejects.toThrow("webhook returned 302");
+    expect(fetchMock.mock.calls[0][1].redirect).toBe("manual");
+  });
+});
+
 // ─── resolveWebhooks ─────────────────────────────────────────────────────────
 
 describe("validateAuth", () => {
@@ -373,6 +462,27 @@ describe("resolveWebhooks", () => {
       "https://hooks.slack.com/services/a/b/c",
       "https://discord.com/api/webhooks/1/2",
     ]);
+  });
+
+  it("rejects an invalid legacy per-token URL and uses valid global URLs", async () => {
+    const mockKV = {
+      get: async () => JSON.stringify({
+        webhook_url: "https://hooks.slack.com.attacker.example/services/a/b/c",
+        canary_type: "github",
+        device_id: "dev-x",
+      }),
+    };
+
+    const result = await resolveWebhooks("some-token-456", {
+      SNARE_KV: mockKV,
+      WEBHOOK_URLS: [
+        "https://hooks.slack.com/services/a/b/c",
+        "https://attacker.example/?next=discord.com/api/webhooks",
+      ].join(","),
+    });
+
+    expect(result.registered).toBe(true);
+    expect(result.webhooks).toEqual(["https://hooks.slack.com/services/a/b/c"]);
   });
 
   it("returns empty webhooks when no KV is configured", async () => {
