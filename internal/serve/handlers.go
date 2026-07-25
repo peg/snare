@@ -51,9 +51,9 @@ func (s *Server) handleCanary(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(pixel)
 
 	// Process asynchronously — response is already sent.
-	go func() {
+	s.runAsync(func() {
 		s.processAlert(token, ip, ua, method, path, now, isTest)
-	}()
+	})
 }
 
 func (s *Server) processAlert(token, ip, ua, method, path, timestamp string, isTest bool) {
