@@ -93,8 +93,16 @@ jobs:
         run: |
           set -euo pipefail
           response="$(curl --fail --silent --show-error --retry 5 --retry-all-errors https://snare.sh/health)"
-          jq -e '.status == "ok"' <<<"$response" >/dev/null
-          echo "Production health check passed."
+          jq -e '
+            .status == "ok"
+            and (.version.id | type == "string" and length > 0)
+            and (.version.timestamp | type == "string" and length > 0)
+          ' <<<"$response" >/dev/null
+          version_id="$(jq -r '.version.id' <<<"$response")"
+          {
+            echo "Production health check passed."
+            printf -- '- Active Worker version: `%s`\n' "$version_id"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Record deployed version and rollback command
         if: inputs.operation == 'deploy'

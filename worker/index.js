@@ -138,7 +138,16 @@ export default {
     const url = new URL(request.url);
 
     if (url.pathname === "/health") {
-      return json({ status: "ok", ts: new Date().toISOString() });
+      const version = env.CF_VERSION_METADATA;
+      return json({
+        status: "ok",
+        version: {
+          id: version.id,
+          tag: version.tag,
+          timestamp: version.timestamp,
+        },
+        ts: new Date().toISOString(),
+      });
     }
 
     // Rate limit all /api/* endpoints: 30 requests per minute per IP
@@ -905,7 +914,11 @@ function gif() {
 function json(body, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { "content-type": "application/json" },
+    headers: {
+      "content-type": "application/json",
+      "cache-control": "no-store, max-age=0",
+      "x-content-type-options": "nosniff",
+    },
   });
 }
 

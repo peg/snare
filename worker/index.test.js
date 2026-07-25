@@ -16,6 +16,29 @@ describe("log hygiene", () => {
   });
 });
 
+describe("health", () => {
+  it("reports the active Cloudflare Worker version", async () => {
+    const version = {
+      id: "11111111-2222-3333-4444-555555555555",
+      tag: "security-release",
+      timestamp: "2026-07-25T00:00:00.000Z",
+    };
+
+    const response = await worker.fetch(
+      new Request("https://snare.sh/health"),
+      { CF_VERSION_METADATA: version },
+      { waitUntil() {} },
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("no-store, max-age=0");
+    expect(await response.json()).toMatchObject({
+      status: "ok",
+      version,
+    });
+  });
+});
+
 // ─── Token pattern validation ────────────────────────────────────────────────
 // The worker uses this regex for canary callback matching:
 //   /^\/c\/([a-zA-Z0-9_-]{8,80})(\/.*)?$/
