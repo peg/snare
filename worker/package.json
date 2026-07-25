@@ -3,9 +3,12 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "vitest run"
+    "test": "vitest run",
+    "cf:check": "wrangler deploy --dry-run",
+    "cf:deploy": "wrangler deploy --keep-vars --strict"
   },
   "devDependencies": {
-    "vitest": "^4.1.7"
+    "vitest": "4.1.10",
+    "wrangler": "4.114.0"
   }
 }

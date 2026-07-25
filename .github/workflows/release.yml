@@ -42,6 +42,7 @@ jobs:
         run: |
           npm ci
           npm test
+          npm run cf:check
 
       - name: Install cosign
         uses: sigstore/cosign-installer@v3

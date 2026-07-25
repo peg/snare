@@ -149,16 +149,17 @@ The Worker source lives in `worker/`.
 
 ```sh
 cd worker
-npm install
+npm ci
 npx wrangler kv namespace create SNARE_KV
-# Update worker/wrangler.toml with your account, route, and KV namespace.
+# Update worker/wrangler.jsonc with your routes and KV namespace ID.
 npx wrangler secret put WEBHOOK_URLS
 npx wrangler secret put WEBHOOK_SIGNING_SECRET
-npx wrangler deploy
+npm run cf:check
+npm run cf:deploy
 curl -fsS https://snare.example.com/health
 ```
 
-Adjust `worker/wrangler.toml` routes from `snare.sh` to your domain before deploying. `WEBHOOK_URLS` is a comma-separated fallback list. `WEBHOOK_SIGNING_SECRET` enables `X-Snare-Signature` on outbound webhook posts.
+Adjust `worker/wrangler.jsonc` routes from `snare.sh` to your domain before deploying. `WEBHOOK_URLS` is a comma-separated fallback list. `WEBHOOK_SIGNING_SECRET` enables `X-Snare-Signature` on outbound webhook posts.
 
 ## Security checklist
 
