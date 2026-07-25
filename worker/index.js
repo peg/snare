@@ -228,26 +228,49 @@ const WEBHOOK_DOMAIN_ALLOWLIST = [
   "discordapp.com",
 ];
 
-function isAllowedWebhookURL(url, env) {
+function hostnameMatches(hostname, domain) {
+  return hostname === domain || hostname.endsWith("." + domain);
+}
+
+function configuredWebhookDomains(env = {}) {
+  return (env.WEBHOOK_ALLOWED_DOMAINS || "")
+    .split(",")
+    .map(domain => domain.trim().toLowerCase().replace(/\.$/, ""))
+    .filter(domain => /^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/.test(domain));
+}
+
+function parseAllowedWebhookURL(url, env = {}) {
   try {
     const parsed = new URL(url);
     if (parsed.protocol !== "https:") return false;
+    if (parsed.username || parsed.password) return false;
 
-    // Check built-in allowlist
-    if (WEBHOOK_DOMAIN_ALLOWLIST.some(d => parsed.hostname === d || parsed.hostname.endsWith("." + d))) {
-      return true;
+    const hostname = parsed.hostname.toLowerCase().replace(/\.$/, "");
+    const builtInAllowed = WEBHOOK_DOMAIN_ALLOWLIST.includes(hostname);
+    const operatorAllowed = configuredWebhookDomains(env)
+      .some(domain => hostnameMatches(hostname, domain));
+    if (!builtInAllowed && !operatorAllowed) {
+      return false;
     }
-
-    // Check operator-configured domains (comma-separated env var)
-    const extra = (env.WEBHOOK_ALLOWED_DOMAINS || "").split(",").filter(Boolean);
-    if (extra.some(d => parsed.hostname === d.trim() || parsed.hostname.endsWith("." + d.trim()))) {
-      return true;
-    }
-
-    return false;
+    return parsed;
   } catch {
     return false;
   }
+}
+
+function isAllowedWebhookURL(url, env = {}) {
+  return Boolean(parseAllowedWebhookURL(url, env));
+}
+
+function classifyWebhookURL(parsed) {
+  const hostname = parsed.hostname.toLowerCase().replace(/\.$/, "");
+  if ((hostname === "discord.com" || hostname === "discordapp.com") &&
+      parsed.pathname.startsWith("/api/webhooks/")) {
+    return "discord";
+  }
+  if (hostname === "hooks.slack.com") return "slack";
+  if (hostname === "api.telegram.org") return "telegram";
+  return "generic";
 }
 
 // ─── Auth ────────────────────────────────────────────────────────────────────
@@ -634,11 +657,9 @@ async function resolveWebhooks(token, env) {
         const reg = JSON.parse(raw);
         registered = true;
         meta = { canaryType: reg.canary_type, label: reg.label, deviceId: reg.device_id };
-        // Use per-token webhook if it's a valid https URL
-        // (fixed: proper parentheses for operator precedence)
-        if (reg.webhook_url &&
-            reg.webhook_url.startsWith("https://") &&
-            !reg.webhook_url.includes("use-global")) {
+        // Revalidate stored records so legacy or manually edited KV entries
+        // cannot bypass the current outbound destination policy.
+        if (reg.webhook_url && isAllowedWebhookURL(reg.webhook_url, env)) {
           perTokenWebhook = reg.webhook_url;
         }
       } catch { /* fall through */ }
@@ -646,9 +667,11 @@ async function resolveWebhooks(token, env) {
   }
 
   // Per-token webhook takes priority; otherwise fall back to global
-  const webhooks = perTokenWebhook
+  const webhooks = (perTokenWebhook
     ? [perTokenWebhook]
-    : (env.WEBHOOK_URLS || "").split(",").filter(Boolean);
+    : (env.WEBHOOK_URLS || "").split(","))
+    .map(url => url.trim())
+    .filter(url => isAllowedWebhookURL(url, env));
 
   return { webhooks, meta, registered };
 }
@@ -656,9 +679,13 @@ async function resolveWebhooks(token, env) {
 // ─── Alert formatting ────────────────────────────────────────────────────────
 
 async function forwardAlert(webhookURL, event, meta = {}, env = {}) {
-  const isDiscord  = webhookURL.includes("discord.com/api/webhooks");
-  const isSlack    = webhookURL.includes("hooks.slack.com");
-  const isTelegram = webhookURL.includes("api.telegram.org");
+  // Validate again at the network boundary. Resolution may have happened
+  // earlier, and callers or legacy records must not be able to bypass policy.
+  const parsedWebhookURL = parseAllowedWebhookURL(webhookURL, env);
+  if (!parsedWebhookURL) {
+    throw new Error("webhook destination is not allowed");
+  }
+  const provider = classifyWebhookURL(parsedWebhookURL);
 
   const type     = CANARY_TYPES[meta.canaryType] || DEFAULT_TYPE;
   const asnLower = (event.asnOrg || "").toLowerCase();
@@ -666,11 +693,11 @@ async function forwardAlert(webhookURL, event, meta = {}, env = {}) {
 
   let body;
 
-  if (isDiscord) {
+  if (provider === "discord") {
     body = JSON.stringify(buildDiscordPayload(event, meta, type, fromCloud));
-  } else if (isSlack) {
+  } else if (provider === "slack") {
     body = JSON.stringify(buildSlackPayload(event, meta, type, fromCloud));
-  } else if (isTelegram) {
+  } else if (provider === "telegram") {
     body = JSON.stringify(buildTelegramPayload(event, meta, type, fromCloud));
   } else {
     body = JSON.stringify(buildGenericPayload(event, meta, type, fromCloud));
@@ -701,7 +728,18 @@ async function forwardAlert(webhookURL, event, meta = {}, env = {}) {
     }
   }
 
-  return fetch(webhookURL, { method: "POST", headers, body });
+  // Do not follow redirects: a trusted webhook endpoint must not be able to
+  // redirect the Worker to an unapproved destination.
+  const response = await fetch(parsedWebhookURL.href, {
+    method: "POST",
+    headers,
+    body,
+    redirect: "manual",
+  });
+  if (response.status < 200 || response.status >= 300) {
+    throw new Error(`webhook returned ${response.status}`);
+  }
+  return response;
 }
 
 function buildDiscordPayload(event, meta, type, fromCloud) {
@@ -923,4 +961,12 @@ function json(body, status = 200) {
 }
 
 // Named exports for unit testing — not used by the worker runtime
-export { CANARY_TYPES, shouldFilter, resolveWebhooks, SCANNER_ORGS, validateAuth };
+export {
+  CANARY_TYPES,
+  SCANNER_ORGS,
+  forwardAlert,
+  isAllowedWebhookURL,
+  resolveWebhooks,
+  shouldFilter,
+  validateAuth,
+};
