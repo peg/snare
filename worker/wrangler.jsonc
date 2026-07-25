@@ -1,0 +1,29 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "snare-callback",
+  "main": "index.js",
+  "compatibility_date": "2026-07-24",
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [
+    {
+      "pattern": "snare.sh/c/*",
+      "zone_name": "snare.sh"
+    },
+    {
+      "pattern": "snare.sh/api/*",
+      "zone_name": "snare.sh"
+    },
+    {
+      "pattern": "snare.sh/health",
+      "zone_name": "snare.sh"
+    }
+  ],
+  "kv_namespaces": [
+    {
+      "binding": "SNARE_KV",
+      "id": "a8acd39e2d1b4545b8d3afc0e17d3432"
+    }
+  ]
+  // WEBHOOK_URLS remains a remote Worker secret and is never committed.
+}

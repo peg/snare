@@ -1,0 +1,113 @@
+name: Deploy Cloudflare Worker
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Validate access or deploy the selected ref
+        required: true
+        type: choice
+        default: validate
+        options:
+          - validate
+          - deploy
+
+permissions:
+  contents: read
+
+concurrency:
+  group: snare-worker-production
+  cancel-in-progress: false
+
+jobs:
+  worker:
+    name: ${{ inputs.operation == 'deploy' && 'Deploy' || 'Validate' }} Worker
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: snare-worker-production
+      url: https://snare.sh/health
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_WORKER_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: worker/package-lock.json
+
+      - name: Install Worker dependencies
+        working-directory: worker
+        run: npm ci
+
+      - name: Test Worker
+        working-directory: worker
+        run: npm test
+
+      - name: Validate deployment bundle
+        working-directory: worker
+        run: npm run cf:check
+
+      - name: Verify Cloudflare access and production secret
+        working-directory: worker
+        shell: bash
+        run: |
+          set -euo pipefail
+          secrets="$(npx wrangler secret list --format json)"
+          jq -e 'any(.[]; .name == "WEBHOOK_URLS")' <<<"$secrets" >/dev/null
+          echo "Cloudflare access and WEBHOOK_URLS configuration verified."
+
+      - name: Record current deployment
+        working-directory: worker
+        env:
+          DEPLOY_OPERATION: ${{ inputs.operation }}
+          DEPLOY_REF: ${{ github.ref_name }}
+          DEPLOY_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## Deployment input"
+            echo
+            printf -- '- Operation: `%s`\n' "$DEPLOY_OPERATION"
+            printf -- '- Ref: `%s`\n' "$DEPLOY_REF"
+            printf -- '- Commit: `%s`\n' "$DEPLOY_SHA"
+            echo
+            echo "## Deployment before this run"
+            echo
+            echo '```text'
+            npx wrangler deployments list
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Deploy Worker
+        if: inputs.operation == 'deploy'
+        working-directory: worker
+        run: npm run cf:deploy -- --message "GitHub Actions deploy of ${{ github.sha }}"
+
+      - name: Verify production health
+        if: inputs.operation == 'deploy'
+        run: |
+          set -euo pipefail
+          response="$(curl --fail --silent --show-error --retry 5 --retry-all-errors https://snare.sh/health)"
+          jq -e '.status == "ok"' <<<"$response" >/dev/null
+          echo "Production health check passed."
+
+      - name: Record deployed version and rollback command
+        if: inputs.operation == 'deploy'
+        working-directory: worker
+        run: |
+          set -euo pipefail
+          {
+            echo
+            echo "## Deployment after this run"
+            echo
+            echo '```text'
+            npx wrangler deployments list
+            echo '```'
+            echo
+            echo "Rollback with \`cd worker && npx wrangler rollback\`."
+          } >> "$GITHUB_STEP_SUMMARY"

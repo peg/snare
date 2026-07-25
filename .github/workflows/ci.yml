@@ -44,6 +44,10 @@ jobs:
         working-directory: worker
         run: npm test
 
+      - name: Validate Worker deployment bundle
+        working-directory: worker
+        run: npm run cf:check
+
       - name: Docker Compose smoke test
         run: |
           export SNARE_DASHBOARD_TOKEN=0123456789abcdef0123456789abcdef
