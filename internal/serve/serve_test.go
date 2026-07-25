@@ -29,6 +29,7 @@ func testServer(t *testing.T) *Server {
 		t.Fatalf("New: %v", err)
 	}
 	t.Cleanup(func() { s.db.close() })
+	s.runAsync = func(fn func()) { fn() }
 	return s
 }
 
@@ -586,6 +587,7 @@ func TestHandleCanary_unregisteredTokenNoWebhook(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	t.Cleanup(func() { s.db.close() })
+	s.runAsync = func(fn func()) { fn() }
 	s.cfg.WebhookURL = whServer.URL
 	s.webhookClient = whServer.Client()
 
@@ -600,10 +602,6 @@ func TestHandleCanary_unregisteredTokenNoWebhook(t *testing.T) {
 	if ct := rr.Header().Get("Content-Type"); ct != "image/gif" {
 		t.Errorf("Content-Type = %q, want image/gif", ct)
 	}
-
-	// handleCanary fires processAlert in a goroutine; call it synchronously
-	// to deterministically verify webhook behaviour.
-	s.processAlert("some-unregistered-token-abc123", "1.2.3.4", "TestAgent/1.0", "GET", "/c/some-unregistered-token-abc123", "2024-01-01T00:00:00Z", false)
 
 	if called {
 		t.Error("webhook was called for an unregistered token — expected no webhook")

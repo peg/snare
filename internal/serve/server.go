@@ -51,6 +51,7 @@ type Server struct {
 	sessionSecret    []byte // random secret generated at startup for HMAC session cookies
 	trustedProxyNets []*net.IPNet
 	webhookClient    *http.Client
+	runAsync         func(func())
 }
 
 // tokenPattern validates token IDs in URL paths.
@@ -96,6 +97,9 @@ func New(cfg Config) (*Server, error) {
 		sessionSecret:    secret,
 		trustedProxyNets: trustedProxyNets,
 		webhookClient:    newWebhookClient(net.DefaultResolver.LookupIPAddr),
+		runAsync: func(fn func()) {
+			go fn()
+		},
 	}
 	s.routes()
 	return s, nil
