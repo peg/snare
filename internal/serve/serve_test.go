@@ -2,8 +2,10 @@ package serve
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -18,8 +20,9 @@ func testServer(t *testing.T) *Server {
 	t.Helper()
 	dir := t.TempDir()
 	cfg := Config{
-		Port:   0,
-		DBPath: filepath.Join(dir, "test.db"),
+		Port:            0,
+		DBPath:          filepath.Join(dir, "test.db"),
+		EnrollmentToken: testEnrollmentToken,
 	}
 	s, err := New(cfg)
 	if err != nil {
@@ -28,6 +31,8 @@ func testServer(t *testing.T) *Server {
 	t.Cleanup(func() { s.db.close() })
 	return s
 }
+
+const testEnrollmentToken = "test-enrollment-token-0123456789abcdef"
 
 func captureLogs(t *testing.T, fn func()) string {
 	t.Helper()
@@ -188,6 +193,38 @@ func TestHandleCanary_unregisteredTokenDoesNotStoreEvent(t *testing.T) {
 	}
 }
 
+func TestHandleCanary_unregisteredTestTokenDoesNotStoreOrWebhook(t *testing.T) {
+	called := false
+	whServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer whServer.Close()
+
+	dir := t.TempDir()
+	s, err := New(Config{Port: 0, DBPath: filepath.Join(dir, "test.db")})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { s.db.close() })
+	s.cfg.WebhookURL = whServer.URL
+	s.webhookClient = whServer.Client()
+
+	const tokenID = "snare-test-unregistered123"
+	s.processAlert(tokenID, "1.2.3.4", "TestAgent/1.0", "GET", "/c/"+tokenID, "2024-01-01T00:00:00Z", true)
+
+	events, err := s.db.getEvents(tokenID)
+	if err != nil {
+		t.Fatalf("getEvents: %v", err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("unregistered test token stored %d event(s), want 0", len(events))
+	}
+	if called {
+		t.Fatal("webhook was called for an unregistered test token")
+	}
+}
+
 // ─── Auth middleware ──────────────────────────────────────────────────────────
 
 func TestValidateDevice_success(t *testing.T) {
@@ -302,6 +339,7 @@ func TestJSONBodyLimit(t *testing.T) {
 	s := testServer(t)
 	body := `{"device_secret":"` + strings.Repeat("a", int(maxRequestBodyBytes)) + `"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/devices", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+testEnrollmentToken)
 	rr := httptest.NewRecorder()
 
 	s.handleCreateDevice(rr, req)
@@ -320,6 +358,7 @@ func TestHandleCreateDevice(t *testing.T) {
 	})
 	req := httptest.NewRequest(http.MethodPost, "/api/devices", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+testEnrollmentToken)
 	rr := httptest.NewRecorder()
 
 	s.handleCreateDevice(rr, req)
@@ -345,11 +384,30 @@ func TestHandleCreateDevice_shortSecret(t *testing.T) {
 
 	body, _ := json.Marshal(map[string]string{"device_secret": "short"})
 	req := httptest.NewRequest(http.MethodPost, "/api/devices", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+testEnrollmentToken)
 	rr := httptest.NewRecorder()
 	s.handleCreateDevice(rr, req)
 
 	if rr.Code != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d", rr.Code)
+	}
+}
+
+func TestHandleCreateDevice_requiresEnrollmentToken(t *testing.T) {
+	s := testServer(t)
+	body, _ := json.Marshal(map[string]string{
+		"device_secret": "averylongsecretpassword000000001",
+	})
+
+	for _, authorization := range []string{"", "Bearer wrong-enrollment-token"} {
+		req := httptest.NewRequest(http.MethodPost, "/api/devices", bytes.NewReader(body))
+		req.Header.Set("Authorization", authorization)
+		rr := httptest.NewRecorder()
+		s.handleCreateDevice(rr, req)
+
+		if rr.Code != http.StatusUnauthorized {
+			t.Fatalf("Authorization %q status = %d, want 401", authorization, rr.Code)
+		}
 	}
 }
 
@@ -430,6 +488,83 @@ func TestHandleHealth(t *testing.T) {
 	}
 }
 
+func TestValidateWebhookURLRejectsNonPublicDestinations(t *testing.T) {
+	for _, raw := range []string{
+		"http://hooks.example.com/alert",
+		"https://127.0.0.1/alert",
+		"https://169.254.169.254/latest/meta-data",
+		"https://10.0.0.1/alert",
+		"https://[::1]/alert",
+		"https://user:pass@hooks.example.com/alert",
+		"https://hooks.example.com/alert#fragment",
+	} {
+		if err := validateWebhookURL(raw); err == nil {
+			t.Errorf("validateWebhookURL(%q) error = nil, want rejection", raw)
+		}
+	}
+
+	if err := validateWebhookURL("https://hooks.slack.com/services/a/b/c"); err != nil {
+		t.Fatalf("public HTTPS webhook rejected: %v", err)
+	}
+}
+
+func TestWebhookDialRejectsPrivateDNSResolution(t *testing.T) {
+	client := newWebhookClient(func(_ context.Context, host string) ([]net.IPAddr, error) {
+		if host != "hooks.example.com" {
+			t.Fatalf("lookup host = %q", host)
+		}
+		return []net.IPAddr{
+			{IP: net.ParseIP("93.184.216.34")},
+			{IP: net.ParseIP("127.0.0.1")},
+		}, nil
+	})
+	transport := client.Transport.(*http.Transport)
+
+	conn, err := transport.DialContext(context.Background(), "tcp", "hooks.example.com:443")
+	if conn != nil {
+		_ = conn.Close()
+		t.Fatal("private DNS result unexpectedly produced a connection")
+	}
+	if err == nil || !strings.Contains(err.Error(), "non-public") {
+		t.Fatalf("DialContext error = %v, want non-public rejection", err)
+	}
+}
+
+func TestWebhookClientRefusesRedirects(t *testing.T) {
+	client := newWebhookClient(net.DefaultResolver.LookupIPAddr)
+	req := httptest.NewRequest(http.MethodGet, "https://hooks.example.com/redirected", nil)
+	if err := client.CheckRedirect(req, nil); err != http.ErrUseLastResponse {
+		t.Fatalf("CheckRedirect error = %v, want ErrUseLastResponse", err)
+	}
+}
+
+func TestHandleRegisterRejectsPrivateWebhook(t *testing.T) {
+	s := testServer(t)
+	const (
+		deviceID     = "dev-private-webhook"
+		deviceSecret = "secret0000000000000000000000001"
+	)
+	if err := s.db.createDevice(deviceID, deviceSecret); err != nil {
+		t.Fatalf("createDevice: %v", err)
+	}
+
+	body, _ := json.Marshal(map[string]string{
+		"token_id":    "private-webhook-token",
+		"webhook_url": "https://127.0.0.1/internal",
+		"device_id":   deviceID,
+		"canary_type": "generic",
+		"label":       "private",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/register", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+deviceSecret)
+	rr := httptest.NewRecorder()
+	s.handleRegister(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %s", rr.Code, rr.Body.String())
+	}
+}
+
 // ─── Webhook gating on token registration ────────────────────────────────────
 
 func TestHandleCanary_unregisteredTokenNoWebhook(t *testing.T) {
@@ -443,15 +578,16 @@ func TestHandleCanary_unregisteredTokenNoWebhook(t *testing.T) {
 
 	dir := t.TempDir()
 	cfg := Config{
-		Port:       0,
-		DBPath:     filepath.Join(dir, "test.db"),
-		WebhookURL: whServer.URL, // global webhook configured
+		Port:   0,
+		DBPath: filepath.Join(dir, "test.db"),
 	}
 	s, err := New(cfg)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	t.Cleanup(func() { s.db.close() })
+	s.cfg.WebhookURL = whServer.URL
+	s.webhookClient = whServer.Client()
 
 	// Fire a canary hit via the HTTP handler — token is valid format but NOT registered.
 	req := httptest.NewRequest(http.MethodGet, "/c/some-unregistered-token-abc123", nil)
@@ -484,15 +620,16 @@ func TestHandleCanary_registeredTokenFiresWebhook(t *testing.T) {
 
 	dir := t.TempDir()
 	cfg := Config{
-		Port:       0,
-		DBPath:     filepath.Join(dir, "test.db"),
-		WebhookURL: whServer.URL,
+		Port:   0,
+		DBPath: filepath.Join(dir, "test.db"),
 	}
 	s, err := New(cfg)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	t.Cleanup(func() { s.db.close() })
+	s.cfg.WebhookURL = whServer.URL
+	s.webhookClient = whServer.Client()
 
 	// Register the token so processAlert finds it in the DB.
 	if err := s.db.createDevice("dev-wh-test", "secret0000000000000000000000001"); err != nil {

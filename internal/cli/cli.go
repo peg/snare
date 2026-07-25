@@ -175,6 +175,8 @@ Flags (serve):
   --webhook-url <url>          global fallback webhook URL for alerts
   --dashboard-token <token>    required: token to protect the dashboard (min 16 chars)
                                also: SNARE_DASHBOARD_TOKEN env var
+  --enrollment-token <token>   required: separate token for new device enrollment (min 32 chars)
+                               also: SNARE_ENROLLMENT_TOKEN env var
   --trusted-proxy <cidr,...>   trust X-Forwarded-For / X-Real-IP only from these proxy CIDRs
 `
 

@@ -325,6 +325,9 @@ func guidedInit(force bool) {
 		shortID = shortID[len(shortID)-8:]
 	}
 	testToken := "snare-test-" + shortID
+	if err := registerToken(cfg, testToken, "test", "test"); err != nil {
+		fatal(fmt.Errorf("registering test alert: %w", err))
+	}
 	callbackURL := cfg.CallbackURL(testToken)
 
 	if err := httpGet(callbackURL); err != nil {
@@ -533,8 +536,9 @@ func cmdTest(args []string) {
 
 	// Register the test token so the worker routes alerts to this device's webhook.
 	if err := registerToken(cfg, testTokenID, "test", "test"); err != nil {
-		fmt.Fprintf(os.Stderr, "  ⚠  webhook registration failed: %v\n", err)
-		fmt.Fprintf(os.Stderr, "  The callback will still fire but your webhook may not receive the alert.\n\n")
+		fmt.Fprintf(os.Stderr, "  error: webhook registration failed: %v\n", err)
+		fmt.Fprintln(os.Stderr, "  No callback was fired because the test token is not registered.")
+		os.Exit(1)
 	}
 
 	callbackURL := cfg.CallbackURL(testTokenID)

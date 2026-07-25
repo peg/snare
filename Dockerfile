@@ -1,5 +1,5 @@
 # ── Build stage ──────────────────────────────────────────────────────────────
-FROM golang:1.25.10-alpine AS builder
+FROM golang:1.25.12-alpine AS builder
 
 WORKDIR /src
 
@@ -13,7 +13,7 @@ RUN CGO_ENABLED=0 go build -ldflags="-s -w -X main.version=docker" \
     -o /snare ./cmd/snare
 
 # ── Runtime stage ─────────────────────────────────────────────────────────────
-FROM alpine:3.20
+FROM alpine:3.24
 
 RUN apk add --no-cache ca-certificates wget && \
     mkdir -p /data && chmod 700 /data

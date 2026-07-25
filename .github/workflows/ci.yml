@@ -47,6 +47,7 @@ jobs:
       - name: Docker Compose smoke test
         run: |
           export SNARE_DASHBOARD_TOKEN=0123456789abcdef0123456789abcdef
+          export SNARE_ENROLLMENT_TOKEN=abcdef0123456789abcdef0123456789
           export SNARE_PORT=18080
           docker compose config --quiet
           docker compose -p snare-ci-smoke up -d --build

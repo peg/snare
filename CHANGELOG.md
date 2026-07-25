@@ -9,6 +9,26 @@ Versioning: [Semantic Versioning](https://semver.org/)
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-07-24
+
+### Security
+- Require every callback token, including `snare-test-*`, to have a valid registration before rate limiting, deduplication, event storage, or webhook delivery.
+- Require a separate operator-controlled enrollment token for self-hosted `POST /api/devices`.
+- Restrict self-hosted webhook delivery to public HTTPS destinations, reject private and reserved IP literals, revalidate DNS results on every connection, bypass environment proxies, and refuse redirects.
+- Update `golang.org/x/text` to `v0.39.0`, which contains the fix for GO-2026-5970 / CVE-2026-56852.
+- Move the runtime container from out-of-support Alpine 3.20 to the supported Alpine 3.24 release line.
+
+### Changed
+- Self-hosted clients can use `SNARE_CALLBACK_BASE` and the one-time `SNARE_ENROLLMENT_TOKEN` environment variable during initialization. Failed custom-server enrollment now fails closed instead of saving an unusable local device ID.
+- CLI test commands no longer fire callbacks after test-token registration fails.
+
+### Fixed
+- Proof commands preserve the validated `PATH` instead of starting a login shell that could execute a different binary and make Kubernetes proof tests unreliable.
+
+### Upgrade notes
+- Self-hosted operators must configure a new `SNARE_ENROLLMENT_TOKEN` distinct from `SNARE_DASHBOARD_TOKEN` before starting the upgraded server.
+- Known existing devices continue using their device secrets. If `/api/devices` was reachable from an untrusted network before this upgrade, treat the existing device inventory as untrusted and re-enroll approved clients against a fresh active database.
+
 ## [0.4.0] - 2026-05-27
 
 ### Added

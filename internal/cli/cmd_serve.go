@@ -18,11 +18,13 @@ func cmdServe(args []string) {
 		fmt.Print(`snare serve — run a self-hosted callback server
 
 Usage:
-  snare serve [--port <port>] [--db <path>] [--dashboard-token <token>] [--webhook-url <url>] [--tls-domain <domain>] [--trusted-proxy <cidr,...>]
+  snare serve [--port <port>] [--db <path>] [--dashboard-token <token>] [--enrollment-token <token>] [--webhook-url <url>] [--tls-domain <domain>] [--trusted-proxy <cidr,...>]
 
 Required:
   --dashboard-token <token>   token for dashboard and dashboard API auth
                               also accepted via SNARE_DASHBOARD_TOKEN
+  --enrollment-token <token>  separate token authorizing new device enrollment
+                              also accepted via SNARE_ENROLLMENT_TOKEN
 
 Flags:
   --port <port>               listen port (default: 8080)
@@ -33,8 +35,8 @@ Flags:
   --help                      show this help
 
 Examples:
-  SNARE_DASHBOARD_TOKEN="$(openssl rand -hex 32)" snare serve
-  snare serve --port 8080 --db /data/snare.db --dashboard-token "$SNARE_DASHBOARD_TOKEN"
+  SNARE_DASHBOARD_TOKEN="$(openssl rand -hex 32)" \
+  SNARE_ENROLLMENT_TOKEN="$(openssl rand -hex 32)" snare serve
 `)
 		return
 	}
@@ -44,11 +46,15 @@ Examples:
 	tlsDomain := flagValue(args, "--tls-domain")
 	webhookURL := flagValue(args, "--webhook-url")
 	dashToken := flagValue(args, "--dashboard-token")
+	enrollmentToken := flagValue(args, "--enrollment-token")
 	trustedProxy := flagValue(args, "--trusted-proxy")
 
 	// Also accept token from env var
 	if dashToken == "" {
 		dashToken = os.Getenv("SNARE_DASHBOARD_TOKEN")
+	}
+	if enrollmentToken == "" {
+		enrollmentToken = os.Getenv("SNARE_ENROLLMENT_TOKEN")
 	}
 
 	if dashToken == "" {
@@ -63,9 +69,21 @@ Examples:
 		fmt.Fprintln(os.Stderr, "error: --dashboard-token must be at least 16 characters")
 		os.Exit(1)
 	}
+	if enrollmentToken == "" {
+		fmt.Fprintln(os.Stderr, "error: --enrollment-token is required for snare serve")
+		fmt.Fprintln(os.Stderr, "  This separate token authorizes creation of new devices.")
+		fmt.Fprintln(os.Stderr, "  Set it with --enrollment-token <token> or SNARE_ENROLLMENT_TOKEN.")
+		fmt.Fprintln(os.Stderr, "  Generate one with: openssl rand -hex 32")
+		os.Exit(1)
+	}
+	if len(enrollmentToken) < 32 {
+		fmt.Fprintln(os.Stderr, "error: --enrollment-token must be at least 32 characters")
+		os.Exit(1)
+	}
 
 	cfg := serve.DefaultConfig()
 	cfg.DashboardToken = dashToken
+	cfg.EnrollmentToken = enrollmentToken
 
 	if portStr != "" {
 		p, err := strconv.Atoi(portStr)

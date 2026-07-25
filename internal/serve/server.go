@@ -30,6 +30,7 @@ type Config struct {
 	TLSDomain         string   // if set, enable Let's Encrypt TLS
 	WebhookURL        string   // global fallback webhook URL
 	DashboardToken    string   // bearer token for dashboard + dashboard API auth (required)
+	EnrollmentToken   string   // bearer token for creating devices (required)
 	TrustedProxyCIDRs []string // trusted reverse proxies allowed to supply X-Forwarded-For / X-Real-IP
 }
 
@@ -49,6 +50,7 @@ type Server struct {
 	mux              *http.ServeMux
 	sessionSecret    []byte // random secret generated at startup for HMAC session cookies
 	trustedProxyNets []*net.IPNet
+	webhookClient    *http.Client
 }
 
 // tokenPattern validates token IDs in URL paths.
@@ -80,7 +82,21 @@ func New(cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("parsing trusted proxy CIDRs: %w", err)
 	}
 
-	s := &Server{cfg: cfg, db: db, mux: http.NewServeMux(), sessionSecret: secret, trustedProxyNets: trustedProxyNets}
+	if cfg.WebhookURL != "" {
+		if err := validateWebhookURL(cfg.WebhookURL); err != nil {
+			_ = db.close()
+			return nil, fmt.Errorf("invalid global webhook URL: %w", err)
+		}
+	}
+
+	s := &Server{
+		cfg:              cfg,
+		db:               db,
+		mux:              http.NewServeMux(),
+		sessionSecret:    secret,
+		trustedProxyNets: trustedProxyNets,
+		webhookClient:    newWebhookClient(net.DefaultResolver.LookupIPAddr),
+	}
 	s.routes()
 	return s, nil
 }
@@ -91,7 +107,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/c/", s.handleCanary)
 	s.mux.HandleFunc("/health", s.handleHealth)
 
-	// Device API: authenticated by device secret (per-device bearer token)
+	// Device enrollment uses an operator token. Remaining device API calls use
+	// the per-device bearer secret.
 	s.mux.HandleFunc("/api/devices", s.handleCreateDevice)
 	s.mux.HandleFunc("/api/register", s.handleRegister)
 	s.mux.HandleFunc("/api/revoke", s.handleRevoke)

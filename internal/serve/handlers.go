@@ -63,10 +63,10 @@ func (s *Server) processAlert(token, ip, ua, method, path, timestamp string, isT
 	if err != nil {
 		log.Printf("get token error: %v", err)
 	}
-	// Unregistered real tokens are usually scanners or typo/probe traffic. Match
-	// the managed Worker path: do not persist them and never relay webhooks.
-	// Test tokens remain allowed so local pipeline checks still produce events.
-	if reg == nil && !isTest {
+	// Every callback, including a test callback, must belong to a registered
+	// token. Token prefixes are attacker-controlled and cannot grant access to
+	// event storage or webhook delivery.
+	if reg == nil {
 		log.Printf("UNREGISTERED token=*** ip=*** — skipping event and webhook")
 		return
 	}
@@ -103,7 +103,7 @@ func (s *Server) processAlert(token, ip, ua, method, path, timestamp string, isT
 	}
 
 	if webhookURL != "" {
-		deliverWebhook(webhookURL, e, reg)
+		deliverWebhook(s.webhookClient, webhookURL, e, reg)
 	}
 }
 
@@ -112,6 +112,15 @@ func (s *Server) processAlert(token, ip, ua, method, path, timestamp string, isT
 func (s *Server) handleCreateDevice(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		jsonResp(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	if s.cfg.EnrollmentToken == "" {
+		jsonResp(w, http.StatusServiceUnavailable, map[string]string{"error": "device enrollment is not configured"})
+		return
+	}
+	if !secureCompare(bearerToken(r), s.cfg.EnrollmentToken) {
+		w.Header().Set("WWW-Authenticate", `Bearer realm="snare enrollment"`)
+		jsonResp(w, http.StatusUnauthorized, map[string]string{"error": "invalid enrollment token"})
 		return
 	}
 
@@ -177,9 +186,11 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		jsonResp(w, http.StatusBadRequest, map[string]string{"error": "missing webhook_url"})
 		return
 	}
-	if body.WebhookURL != "use-global" && !strings.HasPrefix(body.WebhookURL, "https://") {
-		jsonResp(w, http.StatusBadRequest, map[string]string{"error": "webhook_url must be https:// or 'use-global'"})
-		return
+	if body.WebhookURL != "use-global" {
+		if err := validateWebhookURL(body.WebhookURL); err != nil {
+			jsonResp(w, http.StatusBadRequest, map[string]string{"error": "invalid webhook_url: " + err.Error()})
+			return
+		}
 	}
 
 	// Auth: validate Bearer device_secret
