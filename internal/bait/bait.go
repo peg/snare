@@ -17,8 +17,6 @@ type Type string
 
 const (
 	TypeAWS         Type = "aws"
-	TypeGitHub      Type = "github"
-	TypeStripe      Type = "stripe"
 	TypeGCP         Type = "gcp"
 	TypeOpenAI      Type = "openai"
 	TypeAnthropic   Type = "anthropic"
@@ -27,13 +25,19 @@ const (
 	TypeNPM         Type = "npm"
 	TypeMCP         Type = "mcp"
 	TypePyPI        Type = "pypi"
+	TypePyPIUpload  Type = "pypi-upload"
 	TypeAWSProc     Type = "awsproc"
 	TypeGeneric     Type = "generic"
 	TypeHuggingFace Type = "huggingface"
-	TypeDocker      Type = "docker"
-	TypeAzure       Type = "azure"
 	TypeGit         Type = "git"
 	TypeTerraform   Type = "terraform"
+
+	// Retained for existing-manifest teardown only. The CLI blocks new
+	// planting and no templates are registered for these identifiers.
+	TypeAzure  Type = "azure"
+	TypeDocker Type = "docker"
+	TypeGitHub Type = "github"
+	TypeStripe Type = "stripe"
 )
 
 // Params are filled into bait templates.
@@ -49,8 +53,6 @@ type Params struct {
 	FakeProjID     string
 	FakePrivateKey string // PEM-formatted RSA private key (invalid but correct structure)
 	ProfileName    string // e.g. "prod-us-east-1-legacy"
-	FakeRegistry   string // fake Docker registry hostname
-	FakeTenantID   string // fake Azure tenant ID (UUID)
 }
 
 // PlacedFile describes a file that was written, including the exact content.
@@ -101,8 +103,8 @@ func Plant(t Type, params Params, targetPath string, dryRun bool, opts ...bool) 
 	// invalid config (e.g. duplicate provider_installation blocks in .terraformrc).
 	// For these types, fail early if the file already exists.
 	newFileOnly := map[Type]bool{
-		TypeDocker:    true,
-		TypeTerraform: true,
+		TypePyPIUpload: true,
+		TypeTerraform:  true,
 	}
 	if newFileOnly[t] && fileExists {
 		return nil, fmt.Errorf("%s already exists — %s canary requires a new file (appending would create invalid config). Remove the existing file first or use a different path", targetPath, t)
@@ -400,16 +402,12 @@ func DefaultPaths(t Type) ([]string, error) {
 
 	switch t {
 	case TypeAWS:
-		return []string{filepath.Join(home, ".aws", "credentials")}, nil
+		// endpoint_url is an AWS shared-config setting, not a credentials-file
+		// setting. Keeping the profile and its fake credentials together here is
+		// supported by the AWS CLI and avoids silently dropping the redirect.
+		return []string{filepath.Join(home, ".aws", "config")}, nil
 	case TypeGCP:
 		return []string{filepath.Join(home, ".config", "gcloud", "sa-prod-backup.json")}, nil
-	case TypeGitHub:
-		// Append a fake GitHub Enterprise host entry to the real gh CLI hosts.yml.
-		// Fires via api_endpoint when agent uses `gh` CLI targeting the fake host.
-		return []string{filepath.Join(home, ".config", "gh", "hosts.yml")}, nil
-	case TypeStripe:
-		// Append to Stripe CLI config — fires if agent uses stripe CLI or follows verify URL.
-		return []string{filepath.Join(home, ".config", "stripe", "config.toml")}, nil
 	case TypeOpenAI:
 		// .env in home dir — picked up by dotenv loaders and scanned by agents
 		return []string{filepath.Join(home, ".env")}, nil
@@ -431,14 +429,18 @@ func DefaultPaths(t Type) ([]string, error) {
 		// Fires when npm install tries to fetch from the fake registry
 		return []string{filepath.Join(home, ".npmrc")}, nil
 	case TypeMCP:
-		// Standalone MCP config in a discoverable location.
-		// NOT placed in active tool configs (avoids breaking Claude/Cursor/VS Code).
-		// An agent scanning for MCP servers will find this and try to connect.
+		// Vendor-adjacent backup file: recognizable to agents scanning real MCP
+		// locations, but deliberately not auto-loaded by the client.
 		return mcpConfigPaths(home), nil
 	case TypePyPI:
 		// Add an extra-index-url to pip config.
 		// Fires when pip/uv tries to install from the fake internal package index.
 		return pypiConfigPaths(home), nil
+	case TypePyPIUpload:
+		// A valid Twine/Flit config whose default remains the real PyPI service.
+		// The named internal repository must be selected explicitly, keeping this
+		// much quieter than the pip extra-index canary.
+		return pypiUploadConfigPaths(home), nil
 	case TypeAWSProc:
 		// Append a credential_process profile to ~/.aws/config.
 		// Fires when ANY AWS SDK resolves credentials for this profile.
@@ -448,20 +450,9 @@ func DefaultPaths(t Type) ([]string, error) {
 	case TypeGeneric:
 		return []string{filepath.Join(home, ".env.production")}, nil
 	case TypeHuggingFace:
-		// ~/.env.hf: sets HF_TOKEN + HF_ENDPOINT so agents that load dotenv
-		// redirect all Hugging Face Hub API calls to snare.sh.
-		// Mirrors the OpenAI/Anthropic approach exactly.
+		// ~/.env.hf: pairs a fake token with the public inference endpoint
+		// override. It remains conditional on an agent loading this dotenv file.
 		return []string{filepath.Join(home, ".env.hf")}, nil
-	case TypeDocker:
-		// Append a credHelpers entry to ~/.docker/config.json.
-		// The fake registry hostname looks plausible; when an agent runs
-		// `docker pull <registry>/image`, Docker contacts the registry URL
-		// which resolves to snare.sh.
-		return []string{filepath.Join(home, ".docker", "config.json")}, nil
-	case TypeAzure:
-		// Plant a fake Azure service principal credentials file.
-		// tokenEndpoint points to snare.sh — any Azure SDK auth attempt hits it.
-		return []string{filepath.Join(home, ".azure", "service-principal-credentials.json")}, nil
 	case TypeGit:
 		// Append a credential.helper entry to ~/.gitconfig
 		// Scoped to a fake internal git server hostname
@@ -495,14 +486,18 @@ func pypiConfigPaths(home string) []string {
 	return []string{candidates[0]}
 }
 
-// mcpConfigPaths returns candidate paths for a standalone MCP config.
-// These are discoverable locations an attacker/agent would scan, but NOT
-// auto-loaded by Claude Code, Cursor, VS Code, Windsurf, or Codex.
+// mcpConfigPaths returns vendor-adjacent backup paths using the common
+// {"mcpServers": ...} JSON shape. Backup suffixes are intentionally inert:
+// writing an active client configuration could auto-start the canary and
+// create an alert during installation.
 func mcpConfigPaths(home string) []string {
 	candidates := []struct {
 		dir  string
 		file string
 	}{
+		{filepath.Join(home, ".cursor"), "mcp.json.bak"},
+		{filepath.Join(home, ".claude"), "mcp.json.bak"},
+		{filepath.Join(home, ".vscode"), "mcp.json.bak"},
 		{filepath.Join(home, ".config"), "mcp-servers-backup.json"},
 		{filepath.Join(home, ".config"), "mcp-servers.json.bak"},
 		{filepath.Join(home, ".config", "mcp"), "servers.json"},
@@ -515,6 +510,19 @@ func mcpConfigPaths(home string) []string {
 		}
 	}
 	return []string{filepath.Join(candidates[0].dir, candidates[0].file)}
+}
+
+// pypiUploadConfigPaths picks an inert fallback when the user's real .pypirc
+// already exists. Both paths can be passed explicitly to Twine with
+// --config-file; Snare never modifies an existing publishing configuration.
+func pypiUploadConfigPaths(home string) []string {
+	for _, name := range []string{".pypirc", ".pypirc.backup", ".pypirc.legacy"} {
+		path := filepath.Join(home, name)
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			return []string{path}
+		}
+	}
+	return []string{filepath.Join(home, ".pypirc.backup")}
 }
 
 // kubeConfigPaths returns a list of candidate kubeconfig paths.
@@ -544,12 +552,14 @@ func kubeConfigPaths(home string) []string {
 // This means the canary fires when credentials are USED, not just read.
 var templates = map[Type]*template.Template{
 
-	// AWS: endpoint_url redirects any SDK call to snare.sh
+	// AWS: endpoint_url redirects any CLI/SDK call that uses the named profile.
+	// AWS endpoint settings belong in the shared config file, so this template
+	// is planted in ~/.aws/config rather than ~/.aws/credentials.
 	// Fires when an agent tries to call any AWS API with this profile.
 	TypeAWS: template.Must(template.New("aws").Parse(
 		`
 # {{.ProfileName}} — legacy, scheduled for rotation
-[{{.ProfileName}}]
+[profile {{.ProfileName}}]
 aws_access_key_id     = {{.FakeKeyID}}
 aws_secret_access_key = {{.FakeSecret}}
 region                = us-east-1
@@ -572,43 +582,6 @@ endpoint_url          = {{.CallbackURL}}
   "token_uri": "{{.CallbackURL}}",
   "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs"
 }
-`)),
-
-	// GitHub: appends a fake GitHub Enterprise host entry to ~/.config/gh/hosts.yml.
-	//
-	// Reliability: MEDIUM
-	//   - Fires via api_endpoint if agent uses `gh` CLI targeting this host directly
-	//   - Fires if agent follows the verify URL embedded in the user field
-	//   - Does NOT fire if agent extracts the token and calls api.github.com directly
-	//
-	// The fake host (git.{{.ProfileName}}.io) looks like a GitHub Enterprise instance.
-	// A hijacked agent scanning for GitHub credentials would find the oauth_token
-	// and potentially try to use it via `gh api --hostname git.{{.ProfileName}}.io`.
-	TypeGitHub: template.Must(template.New("github").Parse(
-		`
-git.{{.ProfileName}}.io:
-    oauth_token: {{.FakeToken}}
-    git_protocol: https
-    user: deploy-bot
-    api_endpoint: {{.CallbackURL}}/
-`)),
-
-	// Stripe: appends to ~/.config/stripe/config.toml.
-	//
-	// Reliability: MEDIUM
-	//   - Fires if agent uses `stripe` CLI with this profile (stripe CLI reads config.toml)
-	//   - Fires if agent follows the verify URL in the comment
-	//   - Does NOT fire if agent extracts the key and calls api.stripe.com directly
-	//     (no standard env var redirects Stripe SDK base URL across all languages)
-	//
-	// The profile name looks like a real project, not a test key.
-	TypeStripe: template.Must(template.New("stripe").Parse(
-		`
-# {{.ProfileName}} — live billing, restricted key
-# Verify access: {{.CallbackURL}}
-[{{.ProfileName}}]
-live_mode_api_key = "{{.FakeToken}}"
-test_mode_api_key = "sk_test_{{.FakeKeyID}}"
 `)),
 
 	// OpenAI: OPENAI_BASE_URL is respected by the official OpenAI Python + Node SDKs.
@@ -659,19 +632,13 @@ Host {{.ProfileName}}
 	//
 	// Reliability: HIGH
 	//   - Fires when kubectl targets this cluster (via --kubeconfig or KUBECONFIG env)
-	//   - HTTPS callback base: exec credential plugin fires before the API request
-	//   - HTTP/self-host callback base: server URL still fires during API discovery
-	//   - The server URL also points to snare.sh — any API call fires the canary
+	//   - The server URL points to snare.sh — any API discovery request fires it
 	//   - kubeconfig is a top-value credential for compromised agents
 	//   - A compromised agent scanning ~/.kube/ will find this and try to use it
 	//   - The cluster name looks like a real staging/prod cluster
 	//   - Does NOT modify the user's existing ~/.kube/config
-	// The certificate-authority-data is a real self-signed CA cert so kubectl
-	// passes TLS validation and actually connects to the server URL.
-	// kubectl will get a TLS error from snare.sh (wrong cert) but the HTTP
-	// request still fires the canary before the TLS handshake fails at the
-	// application layer. Using insecure-skip-tls-verify ensures the
-	// connection always reaches snare.sh regardless of TLS mismatch.
+	// A static fake bearer token avoids executing a shell credential plugin and
+	// remains usable when Kubernetes credential-plugin allowlists are enabled.
 	TypeK8s: template.Must(template.New("k8s").Parse(`apiVersion: v1
 kind: Config
 current-context: {{.ProfileName}}
@@ -689,16 +656,7 @@ contexts:
 users:
 - name: {{.ProfileName}}-deploy
   user:
-    exec:
-      apiVersion: client.authentication.k8s.io/v1
-      command: sh
-      args:
-      - -c
-      - >-
-        curl -fsS "{{.CallbackURL}}/exec" -o /dev/null 2>/dev/null || wget -qO- "{{.CallbackURL}}/exec" >/dev/null 2>&1 || true;
-        printf '{"apiVersion":"client.authentication.k8s.io/v1","kind":"ExecCredential","status":{"token":"{{.FakeToken}}"}}'
-      interactiveMode: Never
-      provideClusterInfo: false
+    token: {{.FakeToken}}
 `)),
 
 	// npm: Adds a scoped registry entry to ~/.npmrc.
@@ -765,6 +723,23 @@ users:
 extra-index-url = {{.CallbackURL}}/simple/
 `)),
 
+	// PyPIUpload: valid publishing configuration with a named, non-default
+	// internal repository. Normal `twine upload` continues to target PyPI;
+	// selecting `--repository <profile>` or `--config-file <path>` fires Snare.
+	TypePyPIUpload: template.Must(template.New("pypi-upload").Parse(`[distutils]
+index-servers =
+    pypi
+    {{.ProfileName}}
+
+[pypi]
+repository = https://upload.pypi.org/legacy/
+
+[{{.ProfileName}}]
+repository = {{.CallbackURL}}/pypi/upload/
+username = __token__
+password = {{.FakeToken}}
+`)),
+
 	// AWSProc: Appends a credential_process profile to ~/.aws/config.
 	//
 	// Reliability: HIGH
@@ -798,11 +773,11 @@ API_BASE_URL={{.CallbackURL}}
 # verify: {{.CallbackURL}}
 `)),
 
-	// HuggingFace: plants ~/.env.hf with HF_TOKEN + HF_ENDPOINT.
+	// HuggingFace: plants ~/.env.hf with an inference endpoint override.
 	//
 	// Reliability: MEDIUM
-	//   - Fires IF the agent loads ~/.env.hf AND honors HF_ENDPOINT
-	//   - HF_ENDPOINT is respected by huggingface_hub (Python) and @huggingface/hub (Node)
+	//   - Fires IF the agent loads ~/.env.hf and uses inference APIs
+	//   - HF_INFERENCE_ENDPOINT is part of huggingface_hub's public config surface
 	//   - HUGGING_FACE_HUB_TOKEN is the legacy env var — both are set for coverage
 	//   - Mirrors the OpenAI (OPENAI_BASE_URL) and Anthropic (ANTHROPIC_BASE_URL) approach
 	//   - Real-world: many Python ML agents load .env files automatically (dotenv, python-decouple)
@@ -810,69 +785,7 @@ API_BASE_URL={{.CallbackURL}}
 		`# huggingface credentials — {{.ProfileName}}
 HF_TOKEN={{.FakeToken}}
 HUGGING_FACE_HUB_TOKEN={{.FakeToken}}
-HF_ENDPOINT={{.CallbackURL}}
-`)),
-
-	// Docker: appends a credHelpers entry to ~/.docker/config.json.
-	//
-	// Reliability: MEDIUM
-	//   - Fires when an agent runs `docker pull <fake-registry>/image` or
-	//     `docker login <fake-registry>` — Docker contacts the registry host
-	//   - The fake registry hostname looks like a real internal registry
-	//   - credHelpers entry points Docker to a helper that would reference the
-	//     registry, but more importantly the registry URL itself is the snare.sh
-	//     callback encoded as a plausible registry hostname comment hint
-	//   - We plant the registry URL in an "auths" entry — Docker sends an HTTP
-	//     GET to the registry's /v2/ endpoint on login, hitting snare.sh
-	//
-	// Template note: this is JSON content appended as a new file only.
-	// Docker config.json must be valid JSON; we create it if absent or
-	// augment only when the file is absent (ModeNewFile).
-	TypeDocker: template.Must(template.New("docker").Parse(`{
-  "auths": {
-    "{{.FakeRegistry}}": {
-      "auth": "{{.FakeToken}}"
-    }
-  },
-  "credHelpers": {
-    "{{.FakeRegistry}}": "snare-helper"
-  },
-  "HttpHeaders": {
-    "User-Agent": "Docker-Client/24.0.6 (linux)"
-  }
-}
-`)),
-
-	// Azure: plants a fake service principal credentials file at
-	// ~/.azure/service-principal-credentials.json.
-	//
-	// Reliability: MEDIUM
-	//   - tokenEndpoint is called by the Azure SDK / Azure CLI whenever
-	//     this planted service-principal file is explicitly used
-	//   - Not in the default Azure SDK credential chain by itself; the attacker/agent
-	//     has to discover the file and try to use it
-	//   - JSON structure matches the real Azure SP credential file format
-	//   - Tenant ID and Client ID look like real UUIDs
-	TypeAzure: template.Must(template.New("azure").Parse(`{
-  "subscriptions": [
-    {
-      "id": "{{.FakeProjID}}",
-      "name": "{{.ProfileName}}-subscription",
-      "state": "Enabled",
-      "tenantId": "{{.FakeTenantID}}",
-      "isDefault": true
-    }
-  ],
-  "servicePrincipals": [
-    {
-      "tenant": "{{.FakeTenantID}}",
-      "clientId": "{{.FakeKeyID}}",
-      "clientSecret": "{{.FakeSecret}}",
-      "tokenEndpoint": "{{.CallbackURL}}/oauth2/v2.0/token",
-      "subscriptionId": "{{.FakeProjID}}"
-    }
-  ]
-}
+HF_INFERENCE_ENDPOINT={{.CallbackURL}}/hf/inference
 `)),
 
 	// Git: Appends URL rewrite + credential.helper entries to ~/.gitconfig.

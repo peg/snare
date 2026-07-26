@@ -527,13 +527,15 @@ func TestRegisterTokenErrorBody(t *testing.T) {
 }
 
 // TestDefaultPrecisionMode verifies that the default arm behavior selects only
-// awsproc, ssh, k8s (precision mode). The full set is opt-in via --all.
+// awsproc, ssh, k8s, git, npm (precision mode). The full set is opt-in via --all.
 func TestDefaultPrecisionMode(t *testing.T) {
 	// Expected default (precision) types
 	wantTypes := map[bait.Type]bool{
 		bait.TypeAWSProc: true,
 		bait.TypeSSH:     true,
 		bait.TypeK8s:     true,
+		bait.TypeGit:     true,
+		bait.TypeNPM:     true,
 	}
 
 	// Types present in --all but not in default
@@ -554,20 +556,20 @@ func TestDefaultPrecisionMode(t *testing.T) {
 		t.Error("default precision mode should exclude at least some types from the full set")
 	}
 
-	// Default set should have exactly 3 types
-	if len(wantTypes) != 3 {
-		t.Errorf("default precision mode: expected 3 types, got %d", len(wantTypes))
+	// Default set should have exactly 5 types
+	if len(wantTypes) != 5 {
+		t.Errorf("default precision mode: expected 5 types, got %d", len(wantTypes))
 	}
 
-	// Verify the right 3 types are included
-	for _, bt := range []bait.Type{bait.TypeAWSProc, bait.TypeSSH, bait.TypeK8s} {
+	// Verify the client-proven, narrowly scoped types are included.
+	for _, bt := range []bait.Type{bait.TypeAWSProc, bait.TypeSSH, bait.TypeK8s, bait.TypeGit, bait.TypeNPM} {
 		if !wantTypes[bt] {
 			t.Errorf("default precision mode: expected %s to be included", bt)
 		}
 	}
 
 	// Verify lower-signal types are excluded by default
-	for _, bt := range []bait.Type{bait.TypeAWS, bait.TypeGCP, bait.TypeOpenAI, bait.TypeNPM} {
+	for _, bt := range []bait.Type{bait.TypeAWS, bait.TypeGCP, bait.TypeOpenAI, bait.TypeMCP} {
 		if wantTypes[bt] {
 			t.Errorf("default precision mode: expected %s to be excluded", bt)
 		}
@@ -658,19 +660,16 @@ func TestAllFlagOutput(t *testing.T) {
 		bait.TypeAWSProc,
 		bait.TypeSSH,
 		bait.TypeK8s,
+		bait.TypeGit,
+		bait.TypeNPM,
 		bait.TypeAWS,
 		bait.TypeGCP,
-		bait.TypeNPM,
-		bait.TypeGit,
+		bait.TypePyPIUpload,
 		bait.TypePyPI,
-		bait.TypeAzure,
 		bait.TypeOpenAI,
 		bait.TypeAnthropic,
 		bait.TypeMCP,
-		bait.TypeGitHub,
-		bait.TypeStripe,
 		bait.TypeHuggingFace,
-		bait.TypeDocker,
 		bait.TypeTerraform,
 		bait.TypeGeneric,
 	}
@@ -678,6 +677,36 @@ func TestAllFlagOutput(t *testing.T) {
 		needle := fmt.Sprintf("%s →", bt)
 		if !strings.Contains(stdout, needle) {
 			t.Errorf("arm --all --dry-run missing %s; output:\n%s", bt, stdout)
+		}
+	}
+}
+
+func TestRetiredCanaryCannotBePlanted(t *testing.T) {
+	home := t.TempDir()
+	snareDir := filepath.Join(home, ".snare")
+	if err := os.MkdirAll(snareDir, 0700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	cfg := map[string]string{
+		"device_id":     "dev-retired-test",
+		"device_secret": "deadbeefdeadbeefdeadbeefdeadbeef",
+		"callback_base": "https://snare.sh/c",
+	}
+	data, _ := json.MarshalIndent(cfg, "", "  ")
+	if err := os.WriteFile(filepath.Join(snareDir, "config.json"), data, 0600); err != nil {
+		t.Fatalf("WriteFile config: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(snareDir, "manifest.json"), []byte(`{"canaries":[]}`), 0600); err != nil {
+		t.Fatalf("WriteFile manifest: %v", err)
+	}
+
+	for _, bt := range []bait.Type{bait.TypeAzure, bait.TypeDocker, bait.TypeGitHub, bait.TypeStripe} {
+		_, stderr, exitCode := runSnare(t, home, "plant", "--type", string(bt), "--dry-run")
+		if exitCode == 0 {
+			t.Errorf("plant --type %s unexpectedly succeeded", bt)
+		}
+		if !strings.Contains(stderr, "has been retired") {
+			t.Errorf("plant --type %s did not explain retirement: %s", bt, stderr)
 		}
 	}
 }

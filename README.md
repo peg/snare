@@ -12,7 +12,7 @@ No daemon. No proxy. No policy changes.
 
 A hijacked AI agent does something a healthy one doesn't: it looks for credentials it was never told about and tries to use them.
 
-Snare exploits this. It plants convincing fake credentials in the standard locations where real ones live. The precision canaries fire via SDK and OS plumbing — before any API call leaves the machine.
+Snare exploits this. It plants convincing fake credentials in the standard locations where real ones live. Precision canaries fire when a planted target is actively used; `awsproc` fires before any AWS API call leaves the machine.
 
 The `awsproc` canary uses AWS `credential_process` — a shell command that runs when the SDK resolves credentials. When a compromised agent runs `aws s3 ls --profile prod-admin`, the alert lands at T+0.01s. CloudTrail never sees it.
 
@@ -70,25 +70,27 @@ snare arm --webhook https://discord.com/api/webhooks/YOUR/WEBHOOK
 
 That's it. Snare initializes, plants the highest-signal canaries, fires a test alert to confirm the webhook works, and tells you what's armed.
 
-By default, `snare arm` uses **precision mode**: only `awsproc`, `ssh`, and `k8s` canaries are planted. These fire via existing SDK and OS plumbing with near-zero false positive risk.
+By default, `snare arm` uses **precision mode**: `awsproc`, `ssh`, `k8s`, `git`, and `npm` canaries are planted. Each is scoped to a planted fake target and has an automated real-client contract test.
 
-**Running AI agents on this machine?** Precision mode stays quiet during normal work unless the planted fake AWS profile, SSH host, or kube context is actively used. Use `--select` for an interactive picker, or `--all` to arm every canary type.
+**Running AI agents on this machine?** Precision mode stays quiet during normal work unless a planted fake profile, host, cluster, repository, or package scope is actively used. Use `--select` for an interactive picker, or `--all` to arm every supported canary type.
 
 ```
   ✓ initialized (device: dev-2146102a5849a7b3)
 
   Planting canaries...
-  Precision mode: planting active-use canaries only (awsproc, ssh, k8s)
+  Precision mode: planting active-use canaries only (awsproc, ssh, k8s, git, npm)
     ✓ awsproc      ~/.aws/config
     ✓ ssh          ~/.ssh/config
     ✓ k8s          ~/.kube/staging-deploy.yaml
+    ✓ git          ~/.gitconfig
+    ✓ npm          ~/.npmrc
 
   ✓ webhook test fired
 
-  🪤 3 canaries armed. This machine is protected.
+  🪤 5 canaries armed. This machine is protected.
 
   Precision mode is safe for first run: alerts require active use of the fake
-  AWS profile, SSH host, or kube context. Passive file reads do not fire them.
+  planted fake target. Passive file reads do not fire them.
 
   Next checks:
     snare status   show event state; `never fired` is normal at first
@@ -118,15 +120,15 @@ Evaluating Snare for a team or lab? Start with the [enterprise evaluation guide]
 ## Commands
 
 ```sh
-snare arm [--webhook <url>]  # precision mode: plant awsproc, ssh, k8s + test
+snare arm [--webhook <url>]  # precision mode: plant awsproc, ssh, k8s, git, npm + test
 snare arm --select           # interactive picker: choose which canaries to arm
-snare arm --all              # plant all 18 canary types
+snare arm --all              # plant all 15 supported canary types
 snare disarm                 # remove all canaries (keep config)
 snare disarm --purge         # remove canaries + ~/.snare/ config
 snare status                 # show active canaries + event state
 snare repair                 # re-register active tokens + run a live test check
 snare sync                   # alias for snare repair
-snare prove [--type <t>]     # guided precision trigger commands (awsproc/ssh/k8s)
+snare prove [--type <t>]     # guided precision triggers (awsproc/ssh/k8s/git/npm)
 snare prove --pack mcp       # guided MCP initialize proof for planted MCP canaries
 snare prove --run --report   # execute safe triggers and print a proof report
 snare prove --pack all --run --report  # prove precision + MCP canaries together
@@ -168,7 +170,7 @@ After `snare arm`, the expected healthy loop is:
 - `snare test` sends a synthetic callback test only; check your webhook destination for the routed alert.
 - `snare events` shows real hit history; empty output on fresh installs is expected.
 - `snare repair` (or `snare sync`) safely re-registers active tokens and re-tests callback/event readability when drift is detected.
-- `snare prove` prints safe precision trigger commands so you can intentionally prove alerts fire for `awsproc`, `ssh`, and `k8s`.
+- `snare prove` prints safe precision trigger commands so you can intentionally prove alerts fire for `awsproc`, `ssh`, `k8s`, `git`, and `npm`.
 - `snare prove --pack mcp` prints a safe MCP Streamable HTTP initialize probe for planted `mcp` canaries without modifying active MCP client configs.
 - `snare prove --run --report` executes the selected proof triggers, confirms callbacks through the events API, and prints a compact proof report with cleanup commands, event visibility, observed latency, and explicit proof/limitation notes.
 - `snare prove --format json --redact --output proof.json` writes a machine-readable artifact with device IDs, token IDs, labels, cleanup tokens, and absolute local paths redacted.
@@ -186,20 +188,17 @@ Important state distinction:
 |------|----------|---------|------|
 | `awsproc` | `~/.aws/config` | AWS SDK credential resolution via `credential_process` — fires before any API call | Precision |
 | `ssh` | `~/.ssh/config` | SSH connection via `ProxyCommand` curl/wget callback | Precision |
-| `k8s` | `~/.kube/<name>.yaml` | `kubectl` exec credential callback, plus fake API server URL | Precision |
-| `aws` | `~/.aws/credentials` | Any AWS SDK/CLI call via `endpoint_url` | High |
+| `k8s` | `~/.kube/<name>.yaml` | `kubectl` contacts a fake API server using a static fake bearer token | Precision |
+| `git` | `~/.gitconfig` | Explicit fake-host access is rewritten to the callback | Precision |
+| `npm` | `~/.npmrc` | Explicit access to a package under the fake scope | Precision |
+| `aws` | `~/.aws/config` | Any AWS CLI/SDK call using the named endpoint-redirected profile | High |
 | `gcp` | `~/.config/gcloud/sa-*.json` | GCP auth attempt via `token_uri` redirect | High |
-| `npm` | `~/.npmrc` | `npm install` of scoped package from fake registry | High |
-| `git` | `~/.gitconfig` | Fake Git host URL rewrite plus credential-helper fallback | High |
+| `pypi-upload` | `~/.pypirc` or inert backup | Explicit upload to a named internal repository | High |
 | `pypi` | `~/.config/pip/pip.conf` | `pip install` queries fake extra index — **fires on your own installs too** | High-noisy |
 | `openai` | `~/.env` | Any OpenAI SDK call via `OPENAI_BASE_URL` | Medium |
 | `anthropic` | `~/.env.local` | Any Anthropic SDK call via `ANTHROPIC_BASE_URL` | Medium |
-| `azure` | `~/.azure/service-principal-credentials.json` | Azure SDK token fetch via `tokenEndpoint` | Medium |
-| `mcp` | `~/.config/mcp-servers*.json` | MCP client connects to fake HTTP server | Medium |
-| `github` | `~/.config/gh/hosts.yml` | `gh` CLI targeting fake Enterprise host | Medium |
-| `stripe` | `~/.config/stripe/config.toml` | Stripe CLI or agent following verify URL | Medium |
-| `huggingface` | `~/.env.hf` | Any HF Hub SDK call via `HF_ENDPOINT` | Medium |
-| `docker` | `~/.docker/config.json` (new file only) | `docker pull`/`login` to fake registry | Medium |
+| `mcp` | `~/.cursor/mcp.json.bak` or another inert vendor-adjacent backup | MCP client connects to fake HTTP server | Medium |
+| `huggingface` | `~/.env.hf` | Inference call via `HF_INFERENCE_ENDPOINT` after the dotenv file is loaded | Medium |
 | `terraform` | `~/.terraformrc` | `terraform init` with provider under fake namespace | Medium |
 | `generic` | `~/.env.production` | Any SDK reading `API_BASE_URL` | Medium |
 
@@ -210,6 +209,10 @@ Important state distinction:
 **High-noisy** canaries fire readily, but may also trigger during normal developer workflows. `pypi` is useful for aggressive monitoring, not the quiet default.
 
 **Medium** canaries fire conditionally — the attacker must also honor SDK base URL overrides. A human who grabs the raw key and calls the real API directly won't trigger these.
+
+The support and proof status for every type is documented in [Detection contracts](docs/detection-contracts.md). `azure`, `docker`, `github`, and `stripe` were retired because their previous designs relied on unsupported client behavior. Existing planted instances remain visible and removable.
+
+Snare detects active use, not arbitrary file reads. `snare scan` verifies integrity but a simple file open does not generate an alert; passive read telemetry requires a resident OS-level sensor.
 
 ### awsproc
 
@@ -302,9 +305,9 @@ Fake credential content lives locally in `~/.snare/manifest.json` (0600) and is 
 
 | | Canarytokens | Snare |
 |---|---|---|
-| Setup | Manual, one token at a time | `snare arm` covers 18 credential types |
+| Setup | Manual, one token at a time | `snare arm` covers 15 supported credential and tool-use types |
 | AWS detection | CloudTrail (minutes lag) | Direct SDK callback (sub-second) |
-| Credential types | AWS + a few others | 18 types: AWS, GCP, SSH, k8s, git, terraform, OpenAI, Anthropic, npm, PyPI, MCP, and more |
+| Credential types | AWS + a few others | AWS, GCP, SSH, k8s, git, terraform, OpenAI, Anthropic, npm, PyPI, MCP, and more |
 | AI agent context | None | Cloud ASN detection, SDK user-agent parsing, `credential_process` timing |
 | Fires on | Read or use (varies) | Use only |
 

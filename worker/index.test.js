@@ -189,7 +189,7 @@ describe("shouldFilter", () => {
 describe("CANARY_TYPES completeness", () => {
   const EXPECTED_TYPES = [
     "aws", "awsproc", "gcp", "github", "stripe", "openai", "anthropic",
-    "ssh", "k8s", "npm", "mcp", "pypi", "docker", "generic",
+    "ssh", "k8s", "npm", "mcp", "pypi", "pypi-upload", "docker", "generic",
     "huggingface", "azure", "git", "terraform",
   ];
 

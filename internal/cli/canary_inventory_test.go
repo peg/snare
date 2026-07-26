@@ -11,19 +11,16 @@ func TestAllCanaryTypesMatchesImplementedInventory(t *testing.T) {
 		bait.TypeAWSProc,
 		bait.TypeSSH,
 		bait.TypeK8s,
+		bait.TypeGit,
+		bait.TypeNPM,
 		bait.TypeAWS,
 		bait.TypeGCP,
-		bait.TypeNPM,
-		bait.TypeGit,
+		bait.TypePyPIUpload,
 		bait.TypePyPI,
-		bait.TypeAzure,
 		bait.TypeOpenAI,
 		bait.TypeAnthropic,
 		bait.TypeMCP,
-		bait.TypeGitHub,
-		bait.TypeStripe,
 		bait.TypeHuggingFace,
-		bait.TypeDocker,
 		bait.TypeTerraform,
 		bait.TypeGeneric,
 	}
@@ -47,11 +44,14 @@ func TestAllCanaryTypesMatchesImplementedInventory(t *testing.T) {
 			t.Fatalf("duplicate canary type in allCanaryTypes: %s", bt)
 		}
 		seen[bt] = true
+		if detectionProof[bt] == "" {
+			t.Fatalf("supported canary %s has no proof classification", bt)
+		}
 	}
 }
 
 func TestReliabilityDetailsForPrecisionTypes(t *testing.T) {
-	for _, bt := range []bait.Type{bait.TypeAWSProc, bait.TypeSSH, bait.TypeK8s} {
+	for _, bt := range []bait.Type{bait.TypeAWSProc, bait.TypeSSH, bait.TypeK8s, bait.TypeGit, bait.TypeNPM} {
 		details := reliabilityDetailsFor(string(bt))
 		if details.tier != "precision" {
 			t.Fatalf("%s tier = %s, want precision", bt, details.tier)
@@ -61,6 +61,32 @@ func TestReliabilityDetailsForPrecisionTypes(t *testing.T) {
 		}
 		if details.description == "" {
 			t.Fatalf("%s description is empty", bt)
+		}
+	}
+}
+
+func TestRetiredCanariesRemainKnownButUnsupported(t *testing.T) {
+	for _, bt := range []bait.Type{bait.TypeAzure, bait.TypeDocker, bait.TypeGitHub, bait.TypeStripe} {
+		if !isKnownCanaryType(string(bt)) {
+			t.Errorf("retired type %s must remain recognizable for status and teardown", bt)
+		}
+		if isSupportedCanaryType(bt) {
+			t.Errorf("retired type %s must not be plantable", bt)
+		}
+		if retiredCanaryTypes[bt] == "" {
+			t.Errorf("retired type %s is missing an explanation", bt)
+		}
+	}
+}
+
+func TestNormalizeAutoLabel(t *testing.T) {
+	for input, want := range map[string]string{
+		"Agent_01.local": "agent-01-local",
+		"--BUILD HOST--": "build-host",
+		"":               "snare",
+	} {
+		if got := normalizeAutoLabel(input); got != want {
+			t.Errorf("normalizeAutoLabel(%q) = %q, want %q", input, got, want)
 		}
 	}
 }

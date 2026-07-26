@@ -9,6 +9,23 @@ Versioning: [Semantic Versioning](https://semver.org/)
 
 ## [Unreleased]
 
+### Security
+- Validate labels against a cross-format-safe character set before interpolating them into callback paths and credential configuration templates.
+- Replace the Kubernetes shell-based exec credential plugin with a static fake bearer token and callback API server, preserving detection without executing planted shell commands.
+- Move the AWS endpoint canary from `~/.aws/credentials` to the supported `~/.aws/config` endpoint configuration path.
+- Retire new planting of the Azure, Docker, GitHub CLI, and Stripe canaries because their prior designs relied on unsupported client behavior. Existing instances remain visible and removable.
+
+### Added
+- Add a low-noise `pypi-upload` canary using a named, non-default `.pypirc` repository.
+- Add explicit proof classifications for every supported detection: real client, manual probe, or template only.
+- Run the real-client canary lab in strict CI mode so missing client dependencies fail instead of silently skipping coverage.
+
+### Changed
+- Expand default precision mode to `awsproc`, `ssh`, `k8s`, `git`, and `npm` after adding real-client proof coverage for all five.
+- Place inert MCP backup configurations beside recognizable vendor locations without modifying active MCP client configuration.
+- Use the public `HF_INFERENCE_ENDPOINT` setting for the conditional Hugging Face canary.
+- Document that Snare detects active fake-target use, not passive file reads.
+
 ## [0.4.1] - 2026-07-24
 
 ### Security

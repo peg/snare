@@ -95,19 +95,16 @@ Outbound webhook requests include `X-Snare-Signature: sha256=<hmac>` when the Cl
 | `awsproc` | `~/.aws/config` | `credential_process` shell command | AWS SDK credential resolution | Precision |
 | `ssh` | `~/.ssh/config` | `ProxyCommand curl` callback | SSH connection attempt | Precision |
 | `k8s` | `~/.kube/<name>.yaml` | kubeconfig `server` URL | Any `kubectl` call | Precision |
-| `aws` | `~/.aws/credentials` | `endpoint_url` redirect | Any AWS SDK/CLI call | High |
+| `git` | `~/.gitconfig` | scoped URL rewrite | Fake-host clone or remote lookup | Precision |
+| `npm` | `~/.npmrc` | scoped registry URL | Fake-scope package lookup | Precision |
+| `aws` | `~/.aws/config` | `endpoint_url` redirect | Named-profile AWS SDK/CLI call | High |
 | `gcp` | `~/.config/gcloud/sa-*.json` | `token_uri` redirect | GCP OAuth token refresh | High |
-| `npm` | `~/.npmrc` | scoped registry URL | `npm install @scope/*` | High |
-| `git` | `~/.gitconfig` | scoped credential helper | `git credential fill` for fake host | High |
-| `pypi` | `~/.config/pip/pip.conf` | `extra-index-url` | `pip install` (queries all indexes) | High |
-| `azure` | `~/.azure/service-principal-credentials.json` | `tokenEndpoint` redirect | Explicit service-principal credential use | Medium |
+| `pypi-upload` | `~/.pypirc` or inert backup | named upload repository | Explicit internal-repository upload | High |
+| `pypi` | `~/.config/pip/pip.conf` | `extra-index-url` | `pip install` (queries all indexes) | High-noisy |
 | `openai` | `~/.env` | `OPENAI_BASE_URL` redirect | Agent reads dotenv AND honors base URL | Medium |
 | `anthropic` | `~/.env.local` | `ANTHROPIC_BASE_URL` redirect | Agent reads dotenv AND honors base URL | Medium |
-| `mcp` | `~/.config/mcp-servers*.json` | Streamable HTTP transport URL | MCP client `initialize` request | Medium |
-| `github` | `~/.config/gh/hosts.yml` | `api_endpoint` field | `gh` CLI call to fake host | Medium |
-| `stripe` | `~/.config/stripe/config.toml` | verify URL in config | Stripe CLI or agent following URL | Medium |
-| `huggingface` | `~/.env.hf` | `HF_ENDPOINT` redirect | Agent reads dotenv AND honors endpoint | Medium |
-| `docker` | `~/.docker/config.json` | registry auth entry | Docker client targets fake registry | Medium |
+| `mcp` | vendor-adjacent inert JSON backup | Streamable HTTP transport URL | Explicit MCP client `initialize` request | Medium |
+| `huggingface` | `~/.env.hf` | `HF_INFERENCE_ENDPOINT` redirect | Agent loads dotenv and uses inference | Medium |
 | `terraform` | `~/.terraformrc` | provider network mirror | `terraform init` for fake namespace | Medium |
 | `generic` | `~/.env.production` | `API_BASE_URL` | Custom SDK clients | Medium |
 
@@ -146,15 +143,17 @@ The alert arrives **before the attacker's first API call lands on AWS**. CloudTr
 
 **Network-restricted behavior:** If the callback URL is unreachable (firewall, airgap), curl fails silently and the shell command still outputs the fake credential JSON. The agent receives apparently-valid credentials and continues unaware. The canary remains deceptive on restricted networks.
 
-**Precision mode** — `snare arm` defaults to precision mode, planting only the three canaries with near-zero false positive risk:
+**Precision mode** — `snare arm` defaults to five narrowly scoped, real-client-tested canaries:
 
 | Type | Fires when | False positive risk |
 |------|------------|---------------------|
 | `awsproc` | AWS credential resolution | Essentially zero |
 | `ssh` | SSH connection attempt via ProxyCommand | Near zero |
 | `k8s` | kubectl/SDK call to fake cluster | Near zero |
+| `git` | Git operation against the planted fake host | Near zero |
+| `npm` | npm lookup under the planted fake scope | Near zero |
 
-These three share a property: they require **active attempted use** of the credential, not just file reads or environment scanning.
+These five share a property: they require **active attempted use** of a planted fake target, not just file reads or environment scanning.
 
 ---
 

@@ -6,7 +6,6 @@ import (
 	"testing"
 )
 
-
 func TestNewID(t *testing.T) {
 	t.Run("format with label", func(t *testing.T) {
 		id, err := NewID("myhost")
@@ -66,6 +65,25 @@ func TestNewID(t *testing.T) {
 			t.Errorf("ID length %d is below MinTokenLen %d", len(id), MinTokenLen)
 		}
 	})
+}
+
+func TestNewIDRejectsUnsafeLabels(t *testing.T) {
+	for _, label := range []string{
+		"UPPERCASE",
+		"has spaces",
+		"../escape",
+		"line\nbreak",
+		"section]name",
+		"-leading",
+		"trailing-",
+		strings.Repeat("a", maxLabelLen+1),
+	} {
+		t.Run(label, func(t *testing.T) {
+			if _, err := NewID(label); err == nil {
+				t.Fatalf("NewID(%q) unexpectedly accepted an unsafe label", label)
+			}
+		})
+	}
 }
 
 func TestNewAWSKeyID(t *testing.T) {
@@ -311,14 +329,14 @@ func TestNewGCPPrivateKeyID(t *testing.T) {
 func TestNoGiveawayStringsInAnyToken(t *testing.T) {
 	// Generate many tokens and ensure no giveaway strings leak through
 	generators := map[string]func() (string, error){
-		"AWSKeyID":   NewAWSKeyID,
-		"AWSSecret":  NewAWSSecretKey,
-		"GitHub":     NewGitHubToken,
-		"Stripe":     NewStripeKey,
-		"OpenAI":     NewOpenAIKey,
-		"Anthropic":  NewAnthropicKey,
-		"K8s":        NewK8sToken,
-		"NPM":        NewNPMToken,
+		"AWSKeyID":  NewAWSKeyID,
+		"AWSSecret": NewAWSSecretKey,
+		"GitHub":    NewGitHubToken,
+		"Stripe":    NewStripeKey,
+		"OpenAI":    NewOpenAIKey,
+		"Anthropic": NewAnthropicKey,
+		"K8s":       NewK8sToken,
+		"NPM":       NewNPMToken,
 	}
 	for name, gen := range generators {
 		for i := 0; i < 50; i++ {

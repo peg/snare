@@ -367,7 +367,7 @@ func TestConfidenceSmokeFlow(t *testing.T) {
 	if !strings.Contains(stdout, "webhook test fired") {
 		t.Fatalf("arm output should include webhook test, got:\n%s", stdout)
 	}
-	if api.TokenCount() < 4 { // 3 precision tokens + 1 test token
+	if api.TokenCount() < 4 { // precision tokens plus the callback-test token
 		t.Fatalf("expected at least 4 registered tokens after arm, got %d", api.TokenCount())
 	}
 
@@ -535,7 +535,9 @@ func TestProveShowsGuidedPrecisionCommands(t *testing.T) {
 	awsPath := filepath.Join(home, ".aws", "config")
 	sshPath := filepath.Join(home, ".ssh", "config")
 	kubePath := filepath.Join(home, ".kube", "proof.yaml")
-	for _, p := range []string{awsPath, sshPath, kubePath} {
+	gitPath := filepath.Join(home, ".gitconfig")
+	npmPath := filepath.Join(home, ".npmrc")
+	for _, p := range []string{awsPath, sshPath, kubePath, gitPath, npmPath} {
 		if err := os.MkdirAll(filepath.Dir(p), 0700); err != nil {
 			t.Fatalf("MkdirAll(%s): %v", p, err)
 		}
@@ -555,6 +557,10 @@ Host proof-bastion
     ProxyCommand curl -sf https://snare.sh/c/sshproof -o /dev/null && nc %h %p
 `
 	k8sContent := "apiVersion: v1\nkind: Config\n"
+	gitContent := `[url "https://snare.sh/c/gitproof/git/"]
+    insteadOf = https://git.proof-internal.io/
+`
+	npmContent := "@proof-internal:registry=https://snare.sh/c/npmproof/\n"
 	if err := os.WriteFile(awsPath, []byte(awsContent), 0600); err != nil {
 		t.Fatalf("WriteFile aws: %v", err)
 	}
@@ -563,6 +569,12 @@ Host proof-bastion
 	}
 	if err := os.WriteFile(kubePath, []byte(k8sContent), 0600); err != nil {
 		t.Fatalf("WriteFile kube: %v", err)
+	}
+	if err := os.WriteFile(gitPath, []byte(gitContent), 0600); err != nil {
+		t.Fatalf("WriteFile git: %v", err)
+	}
+	if err := os.WriteFile(npmPath, []byte(npmContent), 0600); err != nil {
+		t.Fatalf("WriteFile npm: %v", err)
 	}
 
 	writeTestManifest(t, home, manifest.Manifest{
@@ -599,6 +611,26 @@ Host proof-bastion
 				PlantedAt:   time.Now(),
 				Active:      true,
 			},
+			{
+				ID:          "prove-git-token1234567",
+				Type:        "git",
+				Path:        gitPath,
+				Mode:        manifest.ModeAppend,
+				Content:     gitContent,
+				ContentHash: manifest.HashContent(gitContent),
+				PlantedAt:   time.Now(),
+				Active:      true,
+			},
+			{
+				ID:          "prove-npm-token1234567",
+				Type:        "npm",
+				Path:        npmPath,
+				Mode:        manifest.ModeAppend,
+				Content:     npmContent,
+				ContentHash: manifest.HashContent(npmContent),
+				PlantedAt:   time.Now(),
+				Active:      true,
+			},
 		},
 	})
 
@@ -611,6 +643,10 @@ Host proof-bastion
 		"aws sts get-caller-identity --profile",
 		"ssh -F " + shellQuoteForTest(sshPath),
 		"kubectl --kubeconfig",
+		"GIT_CONFIG_GLOBAL=" + shellQuoteForTest(gitPath),
+		"git ls-remote",
+		"npm view",
+		"--userconfig " + shellQuoteForTest(npmPath),
 		"Add `--run`",
 	} {
 		if !strings.Contains(stdout, want) {
@@ -651,11 +687,11 @@ Host proof-bastion
 	if report.Version != 1 || report.DeviceID != deviceID || report.Mode != "precision" || report.RanProofs {
 		t.Fatalf("unexpected report header: %+v", report)
 	}
-	if report.Summary.Total != 3 || report.Summary.NotRun != 3 || report.Summary.Passed != 0 || report.Summary.Failed != 0 {
+	if report.Summary.Total != 5 || report.Summary.NotRun != 5 || report.Summary.Passed != 0 || report.Summary.Failed != 0 {
 		t.Fatalf("unexpected report summary: %+v", report.Summary)
 	}
-	if len(report.Proofs) != 3 {
-		t.Fatalf("expected 3 proof entries, got %d", len(report.Proofs))
+	if len(report.Proofs) != 5 {
+		t.Fatalf("expected 5 proof entries, got %d", len(report.Proofs))
 	}
 	for _, proof := range report.Proofs {
 		if proof.Tier != "precision" || proof.Status != "not-run" || proof.Command == "" || proof.Trigger == "" || !strings.HasPrefix(proof.NextCommand, "snare teardown --token ") {
