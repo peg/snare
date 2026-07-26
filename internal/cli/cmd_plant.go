@@ -3,7 +3,6 @@ package cli
 import (
 	"fmt"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/peg/snare/internal/bait"
@@ -20,21 +19,29 @@ var allCanaryTypes = []bait.Type{
 	bait.TypeAWSProc,
 	bait.TypeSSH,
 	bait.TypeK8s,
+	bait.TypeGit,
+	bait.TypeNPM,
 	bait.TypeAWS,
 	bait.TypeGCP,
-	bait.TypeNPM,
-	bait.TypeGit,
+	bait.TypePyPIUpload,
 	bait.TypePyPI,
-	bait.TypeAzure,
 	bait.TypeOpenAI,
 	bait.TypeAnthropic,
 	bait.TypeMCP,
-	bait.TypeGitHub,
-	bait.TypeStripe,
 	bait.TypeHuggingFace,
-	bait.TypeDocker,
 	bait.TypeTerraform,
 	bait.TypeGeneric,
+}
+
+// retiredCanaryTypes remain recognizable so existing manifests can be
+// inspected and torn down, but new instances cannot be planted. Each relied on
+// a client behavior that is not part of the client's supported configuration
+// contract, so continuing to advertise it would create false confidence.
+var retiredCanaryTypes = map[bait.Type]string{
+	bait.TypeAzure:  "the planted JSON file is not consumed by Azure CLI or the default Azure SDK credential chain",
+	bait.TypeDocker: "Docker registry configuration cannot preserve a token-specific callback path without dedicated DNS",
+	bait.TypeGitHub: "GitHub CLI does not support the planted api_endpoint override",
+	bait.TypeStripe: "Stripe CLI does not provide a supported per-profile API endpoint override",
 }
 
 // cmdPlant deploys canary credentials to this machine.
@@ -47,7 +54,7 @@ func cmdPlant(args []string) {
 	// Default label to hostname
 	if label == "" {
 		if h, err := os.Hostname(); err == nil {
-			label = strings.ToLower(strings.ReplaceAll(h, ".", "-"))
+			label = normalizeAutoLabel(h)
 		} else {
 			label = "snare"
 		}
@@ -80,6 +87,13 @@ func cmdPlant(args []string) {
 }
 
 func plantOne(bt bait.Type, label string, cfg *config.Config, m *manifest.Manifest, dryRun bool) {
+	if reason, retired := retiredCanaryTypes[bt]; retired {
+		fatal(fmt.Errorf("canary type %q has been retired: %s", bt, reason))
+	}
+	if !isSupportedCanaryType(bt) {
+		fatal(fmt.Errorf("unknown canary type %q", bt))
+	}
+
 	params, err := buildParams(bt, label, cfg)
 	if err != nil {
 		fatal(err)

@@ -32,7 +32,7 @@ func TestCanaryLabProofsPrecisionAndHigh(t *testing.T) {
 		Canaries: []manifest.Canary{},
 	})
 
-	for _, canaryType := range []string{"awsproc", "k8s", "git", "gcp", "npm"} {
+	for _, canaryType := range []string{"awsproc", "ssh", "k8s", "git", "aws", "gcp", "npm"} {
 		stdout, stderr, exitCode := runSnare(t, home, "plant", "--type", canaryType, "--label", "canary-lab")
 		if exitCode != 0 {
 			t.Fatalf("plant --type %s failed:\nstdout:\n%s\nstderr:\n%s", canaryType, stdout, stderr)
@@ -73,11 +73,35 @@ func TestCanaryLabProofsPrecisionAndHigh(t *testing.T) {
 		}
 	})
 
+	t.Run("ssh", func(t *testing.T) {
+		requireBinary(t, "ssh")
+		c := mustLatestActiveCanaryByType(t, m, "ssh")
+		assertPathUnderHome(t, c.Path, home)
+		host := extractSSHHostFromContent(c.Content)
+		if host == "" {
+			t.Fatalf("could not extract SSH host from planted content:\n%s", c.Content)
+		}
+
+		baseline := realEventCount(api, c.ID)
+		stdout, stderr, _ := runCommandAllowFailure(t, 20*time.Second, localOnlyEnv(home), "ssh",
+			"-F", c.Path,
+			"-o", "BatchMode=yes",
+			"-o", "ConnectTimeout=3",
+			host,
+		)
+		event, ok := waitForRealEvent(api, c.ID, baseline, 8*time.Second)
+		if !ok {
+			t.Fatalf("ssh callback not observed for token %s (host %s, config %s)\nstdout:\n%s\nstderr:\n%s", c.ID, host, c.Path, stdout, stderr)
+		}
+		if !strings.Contains(event.Path, "/ssh") {
+			t.Fatalf("ssh callback path %q does not prove ProxyCommand fired", event.Path)
+		}
+	})
+
 	t.Run("k8s", func(t *testing.T) {
 		requireBinary(t, "kubectl")
 		c := mustLatestActiveCanaryByType(t, m, "k8s")
 		assertPathUnderHome(t, c.Path, home)
-		forceKubeServerHTTPSDeadEndpoint(t, c.Path, api.URL()+"/c/"+c.ID)
 
 		baseline := realEventCount(api, c.ID)
 		stdout, stderr, _ := runCommandAllowFailure(t, 20*time.Second, localOnlyEnv(home), "kubectl",
@@ -88,13 +112,13 @@ func TestCanaryLabProofsPrecisionAndHigh(t *testing.T) {
 
 		event, ok := waitForRealEvent(api, c.ID, baseline, 8*time.Second)
 		if !ok {
-			t.Fatalf("k8s exec callback not observed for token %s (kubeconfig %s)\nstdout:\n%s\nstderr:\n%s", c.ID, c.Path, stdout, stderr)
+			t.Fatalf("k8s API-server callback not observed for token %s (kubeconfig %s)\nstdout:\n%s\nstderr:\n%s", c.ID, c.Path, stdout, stderr)
 		}
 		if !strings.HasPrefix(event.Path, "/c/"+c.ID) {
 			t.Fatalf("k8s callback path %q does not match token %s", event.Path, c.ID)
 		}
-		if !strings.Contains(event.Path, "/exec") {
-			t.Fatalf("k8s callback path %q does not prove exec credential plugin fired", event.Path)
+		if !strings.Contains(event.Path, "/api") {
+			t.Fatalf("k8s callback path %q does not prove API discovery fired", event.Path)
 		}
 	})
 
@@ -128,6 +152,35 @@ func TestCanaryLabProofsPrecisionAndHigh(t *testing.T) {
 		}
 		if !strings.Contains(event.Path, "/git/") {
 			t.Fatalf("git callback path %q does not include git rewrite segment", event.Path)
+		}
+	})
+
+	t.Run("aws", func(t *testing.T) {
+		requireBinary(t, "aws")
+		c := mustLatestActiveCanaryByType(t, m, "aws")
+		assertPathUnderHome(t, c.Path, home)
+		profile := extractAWSProfileFromContent(c.Content)
+		if profile == "" {
+			t.Fatalf("could not extract AWS profile from planted content:\n%s", c.Content)
+		}
+
+		baseline := realEventCount(api, c.ID)
+		env := localOnlyEnv(home)
+		env["AWS_EC2_METADATA_DISABLED"] = "true"
+		env["AWS_CONFIG_FILE"] = c.Path
+		env["AWS_SHARED_CREDENTIALS_FILE"] = "/dev/null"
+		env["AWS_DEFAULT_REGION"] = "us-east-1"
+		stdout, stderr, _ := runCommandAllowFailure(t, 20*time.Second, env, "aws", "sts", "get-caller-identity",
+			"--profile", profile,
+			"--region", "us-east-1",
+			"--no-cli-pager",
+		)
+		event, ok := waitForRealEvent(api, c.ID, baseline, 8*time.Second)
+		if !ok {
+			t.Fatalf("aws endpoint callback not observed for token %s (profile %s, config %s)\nstdout:\n%s\nstderr:\n%s", c.ID, profile, c.Path, stdout, stderr)
+		}
+		if !strings.HasPrefix(event.Path, "/c/"+c.ID) {
+			t.Fatalf("aws callback path %q does not match token %s", event.Path, c.ID)
 		}
 	})
 
@@ -197,23 +250,6 @@ creds.refresh(Request())
 	})
 }
 
-func forceKubeServerHTTPSDeadEndpoint(t *testing.T, kubeconfigPath, plantedCallbackURL string) {
-	t.Helper()
-	data, err := os.ReadFile(kubeconfigPath)
-	if err != nil {
-		t.Fatalf("ReadFile kubeconfig: %v", err)
-	}
-	content := string(data)
-	needle := "server: " + plantedCallbackURL
-	if !strings.Contains(content, needle) {
-		t.Fatalf("kubeconfig does not contain expected planted server URL %q", plantedCallbackURL)
-	}
-	content = strings.Replace(content, needle, "server: https://127.0.0.1:9", 1)
-	if err := os.WriteFile(kubeconfigPath, []byte(content), 0600); err != nil {
-		t.Fatalf("WriteFile kubeconfig: %v", err)
-	}
-}
-
 func localOnlyEnv(home string) map[string]string {
 	return map[string]string{
 		"HOME":        home,
@@ -275,6 +311,9 @@ func assertPathUnderHome(t *testing.T, path, home string) {
 func requireBinary(t *testing.T, binary string) {
 	t.Helper()
 	if _, err := exec.LookPath(binary); err != nil {
+		if os.Getenv("SNARE_CANARY_LAB_STRICT") == "1" {
+			t.Fatalf("canary lab requires binary %q: %v", binary, err)
+		}
 		t.Skipf("canary lab proof skipped: required binary %q not found: %v", binary, err)
 	}
 }
@@ -282,12 +321,18 @@ func requireBinary(t *testing.T, binary string) {
 func requirePythonGoogleAuth(t *testing.T, home string) {
 	t.Helper()
 	if _, err := exec.LookPath("python3"); err != nil {
+		if os.Getenv("SNARE_CANARY_LAB_STRICT") == "1" {
+			t.Fatalf("canary lab gcp proof requires python3: %v", err)
+		}
 		t.Skipf("canary lab gcp proof skipped: python3 not found: %v", err)
 	}
 	cmd := exec.Command("python3", "-c", "import google.oauth2.service_account, google.auth.transport.requests")
 	cmd.Env = mergeEnv(os.Environ(), localOnlyEnv(home))
 	out, err := cmd.CombinedOutput()
 	if err != nil {
+		if os.Getenv("SNARE_CANARY_LAB_STRICT") == "1" {
+			t.Fatalf("canary lab gcp proof requires python google-auth: %v (%s)", err, strings.TrimSpace(string(out)))
+		}
 		t.Skipf("canary lab gcp proof skipped: python google-auth unavailable: %v (%s)", err, strings.TrimSpace(string(out)))
 	}
 }
@@ -386,6 +431,26 @@ func extractAWSProcProfileFromContent(content string) string {
 			continue
 		}
 		return profile
+	}
+	return ""
+}
+
+func extractAWSProfileFromContent(content string) string {
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "[profile ") && strings.HasSuffix(trimmed, "]") {
+			return strings.TrimSuffix(strings.TrimPrefix(trimmed, "[profile "), "]")
+		}
+	}
+	return ""
+}
+
+func extractSSHHostFromContent(content string) string {
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "Host ") {
+			return strings.TrimSpace(strings.TrimPrefix(trimmed, "Host "))
+		}
 	}
 	return ""
 }

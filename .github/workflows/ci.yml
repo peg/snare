@@ -47,7 +47,25 @@ jobs:
       - name: govulncheck
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
 
+      - name: Install GCP canary contract dependencies
+        run: |
+          python3 -m venv /tmp/snare-canary-lab
+          /tmp/snare-canary-lab/bin/python -m pip install \
+            google-auth==2.56.2 \
+            requests==2.34.2
+          echo "/tmp/snare-canary-lab/bin" >> "$GITHUB_PATH"
+
+      - name: Verify real-client canary dependencies
+        run: |
+          command -v aws
+          command -v git
+          command -v kubectl
+          command -v npm
+          command -v ssh
+
       - name: Test
+        env:
+          SNARE_CANARY_LAB_STRICT: "1"
         run: go test ./... -v -race -count=1
 
       - name: Test worker

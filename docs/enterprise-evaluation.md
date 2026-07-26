@@ -10,7 +10,7 @@ Snare is useful when you want to know whether an agent, scanner, script, or huma
 
 ## Recommended safe pilot
 
-Start with the default precision canaries (`awsproc`, `ssh`, `k8s`). They are designed to stay quiet during normal work and fire only when the planted fake profile, host, or context is actively used.
+Start with the default precision canaries (`awsproc`, `ssh`, `k8s`, `git`, `npm`). They are designed to stay quiet during normal work and fire only when a planted fake target is actively used.
 
 ```sh
 # 1. Preview local file changes without writing canaries.
@@ -41,14 +41,14 @@ A fresh canary showing `never fired` can be healthy. Use `snare scan`, `snare do
 
 ## What files Snare touches
 
-`snare arm` defaults to precision mode and only plants `awsproc`, `ssh`, and `k8s` canaries. `snare arm --all` expands to every canary type.
+`snare arm` defaults to precision mode and plants `awsproc`, `ssh`, `k8s`, `git`, and `npm`. `snare arm --all` expands to every supported canary type.
 
 | Scope | Examples | Notes |
 |---|---|---|
 | Local Snare state | `~/.snare/config.json`, `~/.snare/manifest.json` | Created with restrictive permissions. Manifest records exact bytes written for safe teardown. |
-| Precision canaries | `~/.aws/config`, `~/.ssh/config`, `~/.kube/<name>.yaml` | Default mode. Designed to fire on active use, not passive reads. |
-| Package/tool canaries | `~/.npmrc`, `~/.config/pip/pip.conf`, `~/.gitconfig`, `~/.terraformrc`, `~/.docker/config.json` | Use selectively. Some package-manager canaries may fire during normal developer workflows. |
-| SDK/app canaries | dotenv files and vendor config files for OpenAI, Anthropic, GCP, Azure, GitHub, Stripe, Hugging Face, MCP, and generic endpoints | These depend on how the target agent or tool consumes local config. |
+| Precision canaries | `~/.aws/config`, `~/.ssh/config`, `~/.kube/<name>.yaml`, `~/.gitconfig`, `~/.npmrc` | Default mode. Designed to fire on active use, not passive reads. |
+| Package/tool canaries | `~/.config/pip/pip.conf`, `~/.pypirc`, `~/.terraformrc` | Use selectively. The pip extra-index canary may fire during normal developer workflows. |
+| SDK/app canaries | dotenv files and vendor-adjacent configs for OpenAI, Anthropic, GCP, Hugging Face, MCP, and generic endpoints | These depend on how the target agent or tool consumes local config. |
 
 Teardown is content-matched: Snare removes the exact bytes it wrote and does not rewrite unrelated credentials in the same file. Use `snare teardown --dry-run`, `snare disarm`, or `snare disarm --purge` during evaluation cleanup.
 

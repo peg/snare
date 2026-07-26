@@ -20,10 +20,8 @@ var precisionTypes = []bait.Type{
 	bait.TypeAWSProc, // fires at credential resolution — before any API call
 	bait.TypeSSH,     // fires on SSH connection attempt via ProxyCommand
 	bait.TypeK8s,     // fires on any kubectl/SDK call to fake cluster
-	// TypeGit excluded from precision: url.insteadOf now makes fake-host use
-	// reliably callback, but it still requires attacker/tool use of that fake host.
-	// TypeAzure excluded: service-principal-credentials.json not in standard
-	// Azure SDK credential chain — requires agent to explicitly hunt the file.
+	bait.TypeGit,     // fires on fake-host clone/ls-remote via URL rewrite
+	bait.TypeNPM,     // fires only for packages under the planted fake scope
 }
 
 // selectEntry describes one row in the --select TUI.
@@ -35,26 +33,23 @@ type selectEntry struct {
 
 // allSelectEntries is the canonical ordered list for --select mode.
 var allSelectEntries = []selectEntry{
-	// Precision: fire via SDK/OS hooks, no DNS dependency, near-zero false positives
+	// Precision: real-client tested, narrowly scoped, near-zero false positives.
 	{bait.TypeAWSProc, "precision", "~/.aws/config (credential_process)"},
 	{bait.TypeSSH, "precision", "~/.ssh/config (ProxyCommand)"},
-	{bait.TypeK8s, "precision", "~/.kube/<name>.yaml (server URL)"},
+	{bait.TypeK8s, "precision", "~/.kube/<name>.yaml (API server URL)"},
+	{bait.TypeGit, "precision", "~/.gitconfig (scoped URL rewrite)"},
+	{bait.TypeNPM, "precision", "~/.npmrc (scoped registry)"},
 	// High: fires on active use, agent must find+use the credential
-	{bait.TypeAWS, "high", "~/.aws/credentials (endpoint_url)"},
+	{bait.TypeAWS, "high", "~/.aws/config (endpoint_url)"},
 	{bait.TypeGCP, "high", "~/.config/gcloud/sa-*.json (token_uri)"},
-	{bait.TypeNPM, "high", "~/.npmrc (scoped registry)"},
-	{bait.TypeGit, "high", "~/.gitconfig (url.insteadOf + credential.helper)"},
+	{bait.TypePyPIUpload, "high", "~/.pypirc (named upload repository)"},
 	// High-noisy: strong trigger, but global package config may fire during normal work
 	{bait.TypePyPI, "high-noisy", "~/.config/pip/pip.conf (extra-index-url) ⚠ side effect"},
 	// Medium: dotenv-dependent, DNS-dependent, or needs explicit credential scanning
-	{bait.TypeAzure, "medium", "~/.azure/service-principal-credentials.json"},
 	{bait.TypeOpenAI, "medium", "~/.env (OPENAI_BASE_URL)"},
 	{bait.TypeAnthropic, "medium", "~/.env.local (ANTHROPIC_BASE_URL)"},
-	{bait.TypeMCP, "medium", "~/.config/mcp-servers*.json"},
-	{bait.TypeGitHub, "medium", "~/.config/gh/hosts.yml"},
-	{bait.TypeStripe, "medium", "~/.config/stripe/config.toml"},
-	{bait.TypeHuggingFace, "medium", "~/.env.hf (HF_ENDPOINT)"},
-	{bait.TypeDocker, "medium", "~/.docker/config.json"},
+	{bait.TypeMCP, "medium", "~/.cursor/mcp.json.bak (inert config)"},
+	{bait.TypeHuggingFace, "medium", "~/.env.hf (HF_INFERENCE_ENDPOINT)"},
 	{bait.TypeTerraform, "medium", "~/.terraformrc (network_mirror)"},
 	{bait.TypeGeneric, "medium", "~/.env.production (API_BASE_URL)"},
 }
@@ -209,10 +204,10 @@ func cmdArm(args []string) {
 Usage:
   snare arm [flags]
 
-By default, snare arm plants only the highest-signal canaries (awsproc, ssh, k8s).
+By default, snare arm plants only the highest-signal canaries (awsproc, ssh, k8s, git, npm).
 These fire only on active credential use — near-zero false-positive risk.
 Running AI agents on this machine? Precision mode stays quiet during normal work
-unless the planted fake AWS profile, SSH host, or kube context is actively used.
+unless a planted fake profile, host, cluster, repository, or package scope is actively used.
 Use --all to arm every canary type, or --select to pick interactively.
 
 Flags:
@@ -245,7 +240,7 @@ Naming tip:
 
 	if label == "" {
 		if h, err := os.Hostname(); err == nil {
-			label = strings.ToLower(strings.ReplaceAll(h, ".", "-"))
+			label = normalizeAutoLabel(h)
 		} else {
 			label = "snare"
 		}
@@ -328,10 +323,10 @@ Naming tip:
 	case armAll:
 		armTypes = allCanaryTypes
 		armMode = "full"
-		fmt.Println("  Full mode: planting all 18 canary types (including dotenv-based)")
+		fmt.Printf("  Full mode: planting all %d supported canary types (including dotenv-based)\n", len(allCanaryTypes))
 	default:
-		fmt.Println("  Precision mode: planting active-use canaries only (awsproc, ssh, k8s)")
-		fmt.Println("  These stay quiet unless the fake AWS profile, SSH host, or kube context is used.")
+		fmt.Println("  Precision mode: planting active-use canaries only (awsproc, ssh, k8s, git, npm)")
+		fmt.Println("  These stay quiet unless a planted fake target is explicitly used.")
 	}
 
 	planted := 0
@@ -459,7 +454,7 @@ Naming tip:
 	fmt.Println()
 	if armMode == "precision" {
 		fmt.Println("  Precision mode is safe for first run: alerts require active use of the fake")
-		fmt.Println("  AWS profile, SSH host, or kube context. Passive file reads do not fire them.")
+		fmt.Println("  profile, host, cluster, repository, or package scope. Passive reads do not fire them.")
 	} else {
 		fmt.Println("  Canaries are now waiting for a real hit. No event is recorded until bait is used.")
 	}

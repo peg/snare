@@ -422,7 +422,7 @@ func cmdProve(args []string) {
 		fmt.Print(`snare prove — guided canary proof commands
 
 Usage:
-  snare prove [--pack precision|mcp|all] [--type awsproc|ssh|k8s|mcp] [--run] [--report] [--format text|json] [--output <path>] [--redact]
+  snare prove [--pack precision|mcp|all] [--type awsproc|ssh|k8s|git|npm|mcp] [--run] [--report] [--format text|json] [--output <path>] [--redact]
 
 Default behavior:
   Prints exact safe trigger commands for active precision canaries.
@@ -475,7 +475,7 @@ With --redact:
 	}
 
 	if typeFilter != "" && !isProofCanaryType(typeFilter) {
-		fatal(fmt.Errorf("unsupported --type %q (expected awsproc, ssh, k8s, or mcp)", typeFilter))
+		fatal(fmt.Errorf("unsupported --type %q (expected awsproc, ssh, k8s, git, npm, or mcp)", typeFilter))
 	}
 
 	packFilter := packFilterRaw
@@ -953,7 +953,11 @@ func proofTriggerDescription(t string) string {
 	case "ssh":
 		return "SSH ProxyCommand executes before the fake host connection is established"
 	case "k8s":
-		return "kubeconfig server/exec credential path is contacted by kubectl or a Kubernetes SDK"
+		return "kubeconfig API server is contacted by kubectl or a Kubernetes SDK using a static fake token"
+	case "git":
+		return "Git URL rewriting directs explicit use of the planted fake host to the callback"
+	case "npm":
+		return "npm scoped-registry resolution directs the planted fake package scope to the callback"
 	case "mcp":
 		return "MCP client sends a Streamable HTTP initialize request to the planted fake server URL"
 	default:
@@ -1150,7 +1154,7 @@ func shortTokenID(tokenID string) string {
 
 func isPrecisionCanaryType(t string) bool {
 	switch t {
-	case "awsproc", "ssh", "k8s":
+	case "awsproc", "ssh", "k8s", "git", "npm":
 		return true
 	default:
 		return false
@@ -1185,9 +1189,9 @@ func proofTypeOrder(pack string) []string {
 	case "mcp":
 		return []string{"mcp"}
 	case "all":
-		return []string{"awsproc", "ssh", "k8s", "mcp"}
+		return []string{"awsproc", "ssh", "k8s", "git", "npm", "mcp"}
 	default:
-		return []string{"awsproc", "ssh", "k8s"}
+		return []string{"awsproc", "ssh", "k8s", "git", "npm"}
 	}
 }
 
@@ -1286,7 +1290,31 @@ func buildPrecisionProofRecipe(c manifest.Canary) (proofRecipe, error) {
 			Tier:     "precision",
 			Binary:   "kubectl",
 			Command:  "kubectl --kubeconfig " + shellQuote(c.Path) + " get namespaces --request-timeout=5s",
-			Expected: "kubectl request should fail/timeout, but exec credential/server callback should fire",
+			Expected: "kubectl request should fail, but the API-server callback should fire without executing a credential plugin",
+		}, nil
+	case "git":
+		host := extractGitHost(c.Content)
+		if host == "" {
+			return proofRecipe{}, fmt.Errorf("could not parse Git host from canary content")
+		}
+		return proofRecipe{
+			Canary:   c,
+			Tier:     "precision",
+			Binary:   "git",
+			Command:  "GIT_CONFIG_GLOBAL=" + shellQuote(c.Path) + " GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0 git ls-remote " + shellQuote("https://"+host+"/snare-proof/repo"),
+			Expected: "Git request should fail, but the scoped URL rewrite callback should fire",
+		}, nil
+	case "npm":
+		scope := extractNPMScope(c.Content)
+		if scope == "" {
+			return proofRecipe{}, fmt.Errorf("could not parse npm scope from canary content")
+		}
+		return proofRecipe{
+			Canary:   c,
+			Tier:     "precision",
+			Binary:   "npm",
+			Command:  "npm view " + shellQuote("@"+scope+"/snare-proof-does-not-exist") + " version --userconfig " + shellQuote(c.Path) + " --loglevel=silent --fetch-retries=0",
+			Expected: "npm lookup should fail, but the scoped-registry callback should fire",
 		}, nil
 	default:
 		return proofRecipe{}, fmt.Errorf("unsupported precision type %q", c.Type)
@@ -1378,6 +1406,34 @@ func extractSSHHost(content string) string {
 		fields := strings.Fields(trimmed)
 		if len(fields) >= 2 {
 			return fields[1]
+		}
+	}
+	return ""
+}
+
+func extractGitHost(content string) string {
+	const prefix = "insteadOf = https://"
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, prefix) {
+			continue
+		}
+		hostAndPath := strings.TrimPrefix(trimmed, prefix)
+		if host, _, ok := strings.Cut(hostAndPath, "/"); ok {
+			return host
+		}
+	}
+	return ""
+}
+
+func extractNPMScope(content string) string {
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "@") {
+			continue
+		}
+		if scope, _, ok := strings.Cut(strings.TrimPrefix(trimmed, "@"), ":registry="); ok {
+			return scope
 		}
 	}
 	return ""

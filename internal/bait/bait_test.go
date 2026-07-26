@@ -1,7 +1,6 @@
 package bait_test
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -38,12 +37,6 @@ func testParams(t *testing.T, bt bait.Type) bait.Params {
 		p.FakeKeyID, e = token.NewGCPPrivateKeyID()
 		p.FakeSecret = token.NewGCPClientID()
 		p.FakePrivateKey, _ = token.NewFakeRSAPrivateKey()
-	case bait.TypeGitHub:
-		p.FakeToken, e = token.NewGitHubToken()
-		p.ProfileName = "test-internal"
-	case bait.TypeStripe:
-		p.FakeToken, e = token.NewStripeKey()
-		p.FakeKeyID = "abc123def456789012345678"
 	case bait.TypeGeneric:
 		p.FakeToken, e = token.NewGitHubToken()
 	case bait.TypeAWSProc:
@@ -56,11 +49,8 @@ func testParams(t *testing.T, bt bait.Type) bait.Params {
 		p.FakeToken, e = token.NewGitHubToken()
 	case bait.TypeGit:
 		// Git template only needs ProfileName and CallbackURL
-	case bait.TypeDocker:
-		p.FakeRegistry, e = token.NewDockerRegistryName()
-		if e == nil {
-			p.FakeToken, e = token.NewNPMToken()
-		}
+	case bait.TypePyPIUpload:
+		p.FakeToken, e = token.NewNPMToken()
 	}
 	if e != nil {
 		t.Fatalf("generating params for %s: %v", bt, e)
@@ -72,7 +62,7 @@ func testParams(t *testing.T, bt bait.Type) bait.Params {
 func TestPlantNewFile(t *testing.T) {
 	dir := t.TempDir()
 
-	for _, bt := range []bait.Type{bait.TypeGCP, bait.TypeStripe, bait.TypeGeneric} {
+	for _, bt := range []bait.Type{bait.TypeGCP, bait.TypeGeneric} {
 		t.Run(string(bt), func(t *testing.T) {
 			path := filepath.Join(dir, string(bt)+"-creds.json")
 			params := testParams(t, bt)
@@ -118,7 +108,7 @@ func TestPlantNewFile(t *testing.T) {
 func TestPlantAppend(t *testing.T) {
 	dir := t.TempDir()
 
-	for _, bt := range []bait.Type{bait.TypeAWS, bait.TypeGitHub} {
+	for _, bt := range []bait.Type{bait.TypeAWS} {
 		t.Run(string(bt), func(t *testing.T) {
 			path := filepath.Join(dir, string(bt)+"-existing")
 			existing := "[real-profile]\naws_access_key_id = AKIAREALKEY\naws_secret_access_key = realSecret\n"
@@ -154,68 +144,6 @@ func TestPlantAppend(t *testing.T) {
 				t.Error("canary TokenID not found after append")
 			}
 		})
-	}
-}
-
-func TestPlantDockerCreatesValidJSON(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.json")
-	params := testParams(t, bait.TypeDocker)
-
-	placed, err := bait.Plant(bait.TypeDocker, params, path, false)
-	if err != nil {
-		t.Fatalf("Plant: %v", err)
-	}
-	if placed.Mode != manifest.ModeNewFile {
-		t.Fatalf("mode = %s, want %s", placed.Mode, manifest.ModeNewFile)
-	}
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("ReadFile: %v", err)
-	}
-	var cfg struct {
-		Auths       map[string]map[string]string `json:"auths"`
-		CredHelpers map[string]string            `json:"credHelpers"`
-	}
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		t.Fatalf("docker config is invalid JSON: %v", err)
-	}
-	if cfg.Auths[params.FakeRegistry]["auth"] != params.FakeToken {
-		t.Fatal("docker auth entry missing")
-	}
-	if cfg.CredHelpers[params.FakeRegistry] == "" {
-		t.Fatal("docker credHelpers entry missing")
-	}
-}
-
-func TestPlantDockerRefusesExistingConfig(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.json")
-	existing := `{"auths":{"registry.example.com":{"auth":"real"}}}`
-	if err := os.WriteFile(path, []byte(existing), 0600); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
-
-	params := testParams(t, bait.TypeDocker)
-	_, err := bait.Plant(bait.TypeDocker, params, path, false)
-	if err == nil {
-		t.Fatal("Plant error = nil, want existing-file error")
-	}
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("ReadFile: %v", err)
-	}
-	if string(data) != existing {
-		t.Fatal("existing Docker config changed")
-	}
-	var cfg map[string]any
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		t.Fatalf("existing Docker config is invalid JSON: %v", err)
-	}
-	if _, err := os.Stat(bait.BackupPath(path)); !os.IsNotExist(err) {
-		t.Fatalf("backup should not exist after refused plant: %v", err)
 	}
 }
 
@@ -663,7 +591,7 @@ func TestBackupNotCreatedOnDryRun(t *testing.T) {
 func TestNoGiveawayStrings(t *testing.T) {
 	giveaways := []string{"SNARE", "snare", "FAKE", "fake", "TEST", "canary", "CANARY"}
 
-	for _, bt := range []bait.Type{bait.TypeAWS, bait.TypeGCP, bait.TypeGitHub, bait.TypeStripe} {
+	for _, bt := range []bait.Type{bait.TypeAWS, bait.TypeGCP} {
 		t.Run(string(bt), func(t *testing.T) {
 			params := testParams(t, bt)
 
@@ -858,14 +786,41 @@ func TestK8sTemplate(t *testing.T) {
 	}
 
 	// Validate basic YAML structure via key fields
-	requiredFields := []string{"apiVersion:", "kind: Config", "clusters:", "contexts:", "users:", "exec:", "client.authentication.k8s.io/v1", "interactiveMode: Never"}
+	requiredFields := []string{"apiVersion:", "kind: Config", "clusters:", "contexts:", "users:", "token:"}
 	for _, field := range requiredFields {
 		if !strings.Contains(content, field) {
 			t.Errorf("missing required YAML field %q", field)
 		}
 	}
-	if !strings.Contains(content, params.CallbackURL+"/exec") {
-		t.Error("exec credential plugin does not contain callback URL")
+	if strings.Contains(content, "exec:") || strings.Contains(content, "command: sh") {
+		t.Error("k8s canary must not execute a credential plugin")
+	}
+	if !strings.Contains(content, "server: "+params.CallbackURL) {
+		t.Error("k8s API server does not contain callback URL")
+	}
+}
+
+func TestPyPIUploadTemplateIsNamedAndNonDefault(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".pypirc")
+	params := testParams(t, bait.TypePyPIUpload)
+
+	placed, err := bait.Plant(bait.TypePyPIUpload, params, path, false)
+	if err != nil {
+		t.Fatalf("Plant: %v", err)
+	}
+	if placed.Mode != manifest.ModeNewFile {
+		t.Fatalf("mode = %s, want newfile", placed.Mode)
+	}
+	content := placed.Content
+	if !strings.Contains(content, "[pypi]\nrepository = https://upload.pypi.org/legacy/") {
+		t.Error("default publishing repository must remain the real PyPI service")
+	}
+	if !strings.Contains(content, "["+params.ProfileName+"]") || !strings.Contains(content, params.CallbackURL+"/pypi/upload/") {
+		t.Error("named publishing repository does not contain its callback")
+	}
+	if !strings.Contains(content, "password = "+params.FakeToken) {
+		t.Error("publishing canary is missing its fake token")
 	}
 }
 
@@ -912,8 +867,20 @@ func TestGitTemplate(t *testing.T) {
 // embedded in the planted file matches the token ID in the params.
 func TestTokenURLFormat(t *testing.T) {
 	types := []bait.Type{
-		bait.TypeAWSProc, bait.TypeSSH, bait.TypeK8s, bait.TypeGit,
-		bait.TypeAWS, bait.TypeGCP, bait.TypeGitHub, bait.TypeStripe,
+		bait.TypeAWSProc,
+		bait.TypeSSH,
+		bait.TypeK8s,
+		bait.TypeGit,
+		bait.TypeNPM,
+		bait.TypeAWS,
+		bait.TypeGCP,
+		bait.TypePyPIUpload,
+		bait.TypePyPI,
+		bait.TypeOpenAI,
+		bait.TypeAnthropic,
+		bait.TypeMCP,
+		bait.TypeHuggingFace,
+		bait.TypeTerraform,
 		bait.TypeGeneric,
 	}
 
@@ -942,9 +909,18 @@ func TestTokenURLFormat(t *testing.T) {
 	}
 }
 
+func TestRetiredTypesHaveNoPlantTemplate(t *testing.T) {
+	for _, bt := range []bait.Type{bait.TypeAzure, bait.TypeDocker, bait.TypeGitHub, bait.TypeStripe} {
+		_, err := bait.Plant(bt, testParams(t, bt), filepath.Join(t.TempDir(), "retired"), true, true)
+		if err == nil || !strings.Contains(err.Error(), "unknown bait type") {
+			t.Errorf("Plant(%s) error = %v, want unknown bait type", bt, err)
+		}
+	}
+}
+
 // TestPlantRemoveRoundTrip is a full integration test for each canary type.
 func TestPlantRemoveRoundTrip(t *testing.T) {
-	types := []bait.Type{bait.TypeAWS, bait.TypeGCP, bait.TypeGitHub, bait.TypeStripe, bait.TypeGeneric}
+	types := []bait.Type{bait.TypeAWS, bait.TypeGCP, bait.TypeGeneric}
 
 	for _, bt := range types {
 		t.Run(string(bt), func(t *testing.T) {

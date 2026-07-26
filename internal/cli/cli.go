@@ -23,8 +23,8 @@ var httpClient = &http.Client{Timeout: 15 * time.Second}
 //
 // Tiers:
 //
-//	precision — fires via existing SDK/OS plumbing, no agent hunting needed,
-//	            no DNS dependency, near-zero false positives
+//	precision — real-client tested and scoped to explicit use of a planted
+//	            fake target, with near-zero false positives
 //	high       — fires when credential is actively used, but requires agent to
 //	             find and use it
 //	high-noisy — fires readily, but may also fire during normal developer work
@@ -32,14 +32,13 @@ var httpClient = &http.Client{Timeout: 15 * time.Second}
 //	             override support, or agent doing explicit credential scanning
 func reliability(t string) string {
 	switch bait.Type(t) {
-	// Precision: fires via SDK/OS hooks before or during connection, no DNS needed
-	case bait.TypeAWSProc, bait.TypeSSH, bait.TypeK8s:
+	// Precision: real-client tested and narrowly scoped to a planted fake target.
+	case bait.TypeAWSProc, bait.TypeSSH, bait.TypeK8s, bait.TypeGit, bait.TypeNPM:
 		return "precision"
 	// High: fires on active credential use, requires agent to find+use the cred
 	case bait.TypeAWS, // endpoint_url fires on any AWS SDK call with that profile
-		bait.TypeGCP, // token_uri fires on GCP SDK auth (needs explicit file load)
-		bait.TypeNPM, // scoped registry fires on npm install (scoped packages only)
-		bait.TypeGit: // url.insteadOf fires on fake-host clone/ls-remote
+		bait.TypeGCP,        // token_uri fires on GCP SDK auth (needs explicit file load)
+		bait.TypePyPIUpload: // named repository fires on explicit publishing use
 		return "high"
 	// High-noisy: strong trigger, but global config can fire during normal work
 	case bait.TypePyPI: // extra-index-url fires on pip install (own installs too — see warning)
@@ -91,7 +90,43 @@ func isKnownCanaryType(t string) bool {
 			return true
 		}
 	}
+	_, retired := retiredCanaryTypes[bait.Type(t)]
+	return retired
+}
+
+func isSupportedCanaryType(t bait.Type) bool {
+	for _, bt := range allCanaryTypes {
+		if bt == t {
+			return true
+		}
+	}
 	return false
+}
+
+func normalizeAutoLabel(value string) string {
+	value = strings.ToLower(value)
+	var b strings.Builder
+	lastHyphen := false
+	for _, r := range value {
+		valid := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')
+		if valid {
+			if b.Len() >= 48 {
+				break
+			}
+			b.WriteRune(r)
+			lastHyphen = false
+			continue
+		}
+		if b.Len() > 0 && !lastHyphen && b.Len() < 48 {
+			b.WriteByte('-')
+			lastHyphen = true
+		}
+	}
+	label := strings.Trim(b.String(), "-")
+	if label == "" {
+		return "snare"
+	}
+	return label
 }
 
 func webhookSummary(webhookURL string) string {
@@ -150,14 +185,14 @@ Flags (arm):
 
 Flags (prove):
   --pack <pack>                proof pack: precision, mcp, or all (default: precision)
-  --type <type>                proof canary type: awsproc, ssh, k8s, or mcp
+  --type <type>                proof canary type: awsproc, ssh, k8s, git, npm, or mcp
   --run                        execute safe trigger commands and verify callbacks
   --report                     print a first-success proof report
   --format text|json           output format for proof reports (json implies --report)
 
 Flags (plant):
   --label <name>               name your canary (e.g. prod-admin-legacy-2024) — defaults to hostname
-  --type <type>                canary type: aws, awsproc, gcp, github, stripe, openai, anthropic, ssh, k8s, npm, mcp, pypi, huggingface, docker, azure, git, terraform, generic
+  --type <type>                canary type: aws, awsproc, gcp, openai, anthropic, ssh, k8s, npm, mcp, pypi, pypi-upload, huggingface, git, terraform, generic
   --all                        plant all canary types at once
   --dry-run                    show what would be planted without writing anything
 
@@ -275,32 +310,6 @@ func buildParams(bt bait.Type, label string, cfg *config.Config) (bait.Params, e
 			return p, err
 		}
 
-	case bait.TypeStripe:
-		p.FakeToken, err = token.NewStripeKey()
-		if err != nil {
-			return p, err
-		}
-		// test_mode_api_key needs a short alphanumeric suffix
-		keyID, err2 := token.NewGCPPrivateKeyID()
-		if err2 != nil {
-			return p, err2
-		}
-		p.FakeKeyID = keyID[:24] // 24 hex chars
-		p.ProfileName = token.NewProfileName(label)
-
-	case bait.TypeGitHub:
-		p.FakeToken, err = token.NewGitHubToken()
-		if err != nil {
-			return p, err
-		}
-		// ProfileName used as the fake GitHub Enterprise hostname component
-		// e.g. git.acme-internal.io — use label or generate a plausible corp name
-		if label != "" {
-			p.ProfileName = label + "-internal"
-		} else {
-			p.ProfileName = "corp-internal"
-		}
-
 	case bait.TypeOpenAI:
 		p.FakeToken, err = token.NewOpenAIKey()
 		if err != nil {
@@ -313,7 +322,7 @@ func buildParams(bt bait.Type, label string, cfg *config.Config) (bait.Params, e
 			return p, err
 		}
 
-	case bait.TypePyPI:
+	case bait.TypePyPI, bait.TypePyPIUpload:
 		// ProfileName is the fake package scope/org
 		scopes := []string{"internal", "corp", "platform", "infra", "data", "ml"}
 		sc := scopes[token.MustRandInt(len(scopes))]
@@ -321,6 +330,12 @@ func buildParams(bt bait.Type, label string, cfg *config.Config) (bait.Params, e
 			p.ProfileName = label + "-" + sc
 		} else {
 			p.ProfileName = sc + "-packages"
+		}
+		if bt == bait.TypePyPIUpload {
+			p.FakeToken, err = token.NewNPMToken()
+			if err != nil {
+				return p, err
+			}
 		}
 
 	case bait.TypeAWSProc:
@@ -421,51 +436,6 @@ func buildParams(bt bait.Type, label string, cfg *config.Config) (bait.Params, e
 			p.ProfileName = label + "-hf"
 		} else {
 			p.ProfileName = "ml-team"
-		}
-
-	case bait.TypeDocker:
-		p.FakeRegistry, err = token.NewDockerRegistryName()
-		if err != nil {
-			return p, err
-		}
-		// FakeToken used as a base64-encoded "auth" value (username:password)
-		// Docker stores base64(user:pass) in the auths section
-		rawToken, err2 := token.NewNPMToken() // reuse a random token format
-		if err2 != nil {
-			return p, err2
-		}
-		p.FakeToken = rawToken
-		p.ProfileName = label
-
-	case bait.TypeAzure:
-		// FakeKeyID = client ID (UUID)
-		p.FakeKeyID, err = token.NewAzureClientID()
-		if err != nil {
-			return p, err
-		}
-		// FakeTenantID = tenant ID (UUID)
-		p.FakeTenantID, err = token.NewAzureClientID()
-		if err != nil {
-			return p, err
-		}
-		// FakeSecret = client secret
-		p.FakeSecret, err = token.NewAzureClientSecret()
-		if err != nil {
-			return p, err
-		}
-		// FakeProjID = subscription ID (UUID, reusing GCPClientID format for numeric look
-		// — actually Azure subscription IDs are UUIDs, so generate one)
-		p.FakeProjID, err = token.NewAzureClientID()
-		if err != nil {
-			return p, err
-		}
-		// ProfileName is a friendly name for the subscription
-		envs := []string{"prod", "staging", "dev", "platform", "infra"}
-		e := envs[token.MustRandInt(len(envs))]
-		if label != "" {
-			p.ProfileName = label + "-" + e
-		} else {
-			p.ProfileName = e
 		}
 
 	case bait.TypeGit:

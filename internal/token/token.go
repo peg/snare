@@ -18,6 +18,7 @@ const (
 	// MinTokenLen is the minimum acceptable canary token length.
 	// Short tokens are enumerable — 32 chars gives 256 bits of entropy.
 	MinTokenLen = 32
+	maxLabelLen = 48
 )
 
 // giveawayStrings are substrings that must never appear in generated tokens.
@@ -60,6 +61,9 @@ func randString(n int, chars string) (string, error) {
 // NewID generates a cryptographically random canary token ID.
 // Format: <label>-<hex> e.g. "openclaw-aws-a3f9b2c1d4e5f6a7b8c9d0e1f2a3b4c5"
 func NewID(label string) (string, error) {
+	if err := validateLabel(label); err != nil {
+		return "", err
+	}
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
 		return "", fmt.Errorf("generating token ID: %w", err)
@@ -69,6 +73,26 @@ func NewID(label string) (string, error) {
 		return label + "-" + id, nil
 	}
 	return id, nil
+}
+
+// validateLabel keeps user-controlled labels safe in URL paths and in the
+// INI, YAML, TOML, JSON, hostname, and package-scope templates that reuse the
+// label. Restricting the common subset prevents config injection and produces
+// valid names across every supported canary format.
+func validateLabel(label string) error {
+	if label == "" {
+		return nil
+	}
+	if len(label) > maxLabelLen {
+		return fmt.Errorf("label is too long: maximum is %d characters", maxLabelLen)
+	}
+	for i, r := range label {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || (r == '-' && i > 0 && i < len(label)-1) {
+			continue
+		}
+		return fmt.Errorf("invalid label %q: use 1-%d lowercase letters, digits, or interior hyphens", label, maxLabelLen)
+	}
+	return nil
 }
 
 // NewAWSKeyID generates a realistic AWS access key ID.

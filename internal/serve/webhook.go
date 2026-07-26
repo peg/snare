@@ -32,6 +32,7 @@ var canaryTypes = map[string]canaryTypeMeta{
 	"npm":         {Emoji: "📦", Name: "npm"},
 	"mcp":         {Emoji: "🔌", Name: "MCP"},
 	"pypi":        {Emoji: "🐍", Name: "PyPI"},
+	"pypi-upload": {Emoji: "📤", Name: "PyPI Upload"},
 	"awsproc":     {Emoji: "⚙️", Name: "AWS (credential_process)"},
 	"huggingface": {Emoji: "🤗", Name: "Hugging Face"},
 	"docker":      {Emoji: "🐳", Name: "Docker"},

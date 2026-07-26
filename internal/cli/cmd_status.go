@@ -491,8 +491,12 @@ func cmdStatus(args []string) {
 			anyUnknown = true
 		}
 		rel := reliabilityDetailsFor(c.Type)
+		proof := proofLevelFor(bait.Type(c.Type))
 		fmt.Printf("  %s  %s\n", rel.marker, c.ID)
 		fmt.Printf("    type:        %s (%s reliability)\n", c.Type, rel.tier)
+		if proof != "" {
+			fmt.Printf("    proof:       %s\n", proof)
+		}
 		fmt.Printf("    label:       %s\n", label)
 		fmt.Printf("    path:        %s\n", c.Path)
 		fmt.Printf("    planted:     %s ago\n", age)
@@ -503,6 +507,7 @@ func cmdStatus(args []string) {
 	fmt.Println("  ● high reliability      — fires on credential use")
 	fmt.Println("  ▲ high-noisy reliability — strong trigger, may fire during normal work")
 	fmt.Println("  ◐ medium reliability    — conditional trigger path")
+	fmt.Println("  proof: real-client, manual-probe, template-only, or retired")
 	fmt.Println()
 	if anyNever {
 		fmt.Println("  `never fired` means no real callback has been recorded for that canary yet.")
