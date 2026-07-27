@@ -9,6 +9,8 @@ Versioning: [Semantic Versioning](https://semver.org/)
 
 ## [Unreleased]
 
+## [0.5.0-rc.1] - 2026-07-26
+
 ### Security
 - Validate labels against a cross-format-safe character set before interpolating them into callback paths and credential configuration templates.
 - Replace the Kubernetes shell-based exec credential plugin with a static fake bearer token and callback API server, preserving detection without executing planted shell commands.
