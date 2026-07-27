@@ -91,23 +91,60 @@ jobs:
 
       - name: Deploy Worker
         if: inputs.operation == 'deploy'
+        id: deploy
         working-directory: worker
-        run: npm run cf:deploy -- --message "GitHub Actions deploy of ${{ github.sha }}"
+        env:
+          WRANGLER_OUTPUT_FILE: ${{ runner.temp }}/wrangler-output.jsonl
+        run: |
+          set -euo pipefail
+          : > "$WRANGLER_OUTPUT_FILE"
+          npm run cf:deploy -- --message "GitHub Actions deploy of ${{ github.sha }}"
+
+          version_id="$(
+            jq -r 'select(.type == "deploy") | .version_id // empty' \
+              "$WRANGLER_OUTPUT_FILE" | tail -n 1
+          )"
+          if [[ -z "$version_id" ]]; then
+            echo "Wrangler did not report the deployed Worker version ID." >&2
+            cat "$WRANGLER_OUTPUT_FILE" >&2
+            exit 1
+          fi
+          echo "version_id=$version_id" >> "$GITHUB_OUTPUT"
 
       - name: Verify production health
         if: inputs.operation == 'deploy'
+        env:
+          EXPECTED_VERSION_ID: ${{ steps.deploy.outputs.version_id }}
         run: |
           set -euo pipefail
-          response="$(curl --fail --silent --show-error --retry 5 --retry-all-errors https://snare.sh/health)"
-          jq -e '
-            .status == "ok"
-            and (.version.id | type == "string" and length > 0)
-            and (.version.timestamp | type == "string" and length > 0)
-          ' <<<"$response" >/dev/null
-          version_id="$(jq -r '.version.id' <<<"$response")"
+          observed_version_id="unavailable"
+          for attempt in {1..30}; do
+            if response="$(curl --fail --silent --show-error https://snare.sh/health)"; then
+              observed_version_id="$(
+                jq -r '.version.id // "missing"' <<<"$response" 2>/dev/null \
+                  || printf 'invalid health response'
+              )"
+              if jq -e --arg expected "$EXPECTED_VERSION_ID" '
+                .status == "ok"
+                and .version.id == $expected
+                and (.version.timestamp | type == "string" and length > 0)
+              ' <<<"$response" >/dev/null; then
+                break
+              fi
+            fi
+
+            if [[ "$attempt" -eq 30 ]]; then
+              echo "Production did not activate the deployed Worker version." >&2
+              printf 'Expected: %s\nObserved: %s\n' \
+                "$EXPECTED_VERSION_ID" "$observed_version_id" >&2
+              exit 1
+            fi
+            sleep 2
+          done
+
           {
             echo "Production health check passed."
-            printf -- '- Active Worker version: `%s`\n' "$version_id"
+            printf -- '- Active Worker version: `%s`\n' "$EXPECTED_VERSION_ID"
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Record deployed version and rollback command
