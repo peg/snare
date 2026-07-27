@@ -9,24 +9,36 @@ Versioning: [Semantic Versioning](https://semver.org/)
 
 ## [Unreleased]
 
-## [0.5.0-rc.1] - 2026-07-26
+## [0.5.0] - 2026-07-27
 
 ### Security
 - Validate labels against a cross-format-safe character set before interpolating them into callback paths and credential configuration templates.
 - Replace the Kubernetes shell-based exec credential plugin with a static fake bearer token and callback API server, preserving detection without executing planted shell commands.
 - Move the AWS endpoint canary from `~/.aws/credentials` to the supported `~/.aws/config` endpoint configuration path.
 - Retire new planting of the Azure, Docker, GitHub CLI, and Stripe canaries because their prior designs relied on unsupported client behavior. Existing instances remain visible and removable.
+- Revalidate stored and global Worker webhook destinations at delivery time, reject embedded URL credentials and redirects, and require approved HTTPS destinations.
+- Pin third-party GitHub Actions to reviewed commit SHAs and reduce workflow token permissions.
 
 ### Added
 - Add a low-noise `pypi-upload` canary using a named, non-default `.pypirc` repository.
 - Add explicit proof classifications for every supported detection: real client, manual probe, or template only.
 - Run the real-client canary lab in strict CI mode so missing client dependencies fail instead of silently skipping coverage.
+- Add a protected, manually approved Cloudflare Worker deployment workflow with tests, access validation, production health verification, version evidence, and rollback guidance.
+- Report the active Cloudflare Worker version from the health endpoint.
 
 ### Changed
 - Expand default precision mode to `awsproc`, `ssh`, `k8s`, `git`, and `npm` after adding real-client proof coverage for all five.
 - Place inert MCP backup configurations beside recognizable vendor locations without modifying active MCP client configuration.
 - Use the public `HF_INFERENCE_ENDPOINT` setting for the conditional Hugging Face canary.
 - Document that Snare detects active fake-target use, not passive file reads.
+- Treat non-success webhook responses as delivery failures and classify webhook providers from parsed hostnames instead of URL substrings.
+- Move Worker configuration to `wrangler.jsonc`, disable preview and `workers.dev` URLs, and validate deployment bundles in CI.
+- Refresh the supported Go toolchain, Go dependencies, and Worker development dependencies.
+
+### Upgrade notes
+- Running `snare arm` with no selection now plants Git and npm canaries in addition to AWS credential-process, SSH, and Kubernetes canaries.
+- Existing Azure, Docker, GitHub CLI, and Stripe canaries remain tracked and removable, but Snare no longer plants new instances.
+- Self-hosted Worker operators should deploy the updated Worker before rolling out the new `pypi-upload` canary so alerts use the correct display metadata.
 
 ## [0.4.1] - 2026-07-24
 
