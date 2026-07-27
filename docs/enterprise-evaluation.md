@@ -121,9 +121,16 @@ See [Self-hosting](self-hosting.md).
 For production-like pilots, verify the release before installing broadly:
 
 ```sh
-cosign verify-blob --bundle checksums.txt.bundle checksums.txt
+snare_release_tag=v0.5.0 # replace with the exact tag under evaluation
+cosign verify-blob \
+  --bundle checksums.txt.bundle \
+  --certificate-identity "https://github.com/peg/snare/.github/workflows/release.yml@refs/tags/${snare_release_tag}" \
+  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+  checksums.txt
 sha256sum -c checksums.txt
 ```
+
+On macOS, use `shasum -a 256 -c checksums.txt` for the archive checksum step.
 
 Then smoke-test the binary in a temporary install directory before deploying to endpoints:
 
