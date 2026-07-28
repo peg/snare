@@ -63,7 +63,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          secrets="$(npx wrangler secret list --format json)"
+          secrets="$(npx wrangler secret list --env="" --format json)"
           jq -e 'any(.[]; .name == "WEBHOOK_URLS")' <<<"$secrets" >/dev/null
           echo "Cloudflare access and WEBHOOK_URLS configuration verified."
 
@@ -85,7 +85,7 @@ jobs:
             echo "## Deployment before this run"
             echo
             echo '```text'
-            npx wrangler deployments list
+            npx wrangler deployments list --env=""
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -157,8 +157,8 @@ jobs:
             echo "## Deployment after this run"
             echo
             echo '```text'
-            npx wrangler deployments list
+            npx wrangler deployments list --env=""
             echo '```'
             echo
-            echo "Rollback with \`cd worker && npx wrangler rollback\`."
+            echo "Rollback with \`cd worker && npx wrangler rollback --env=\`."
           } >> "$GITHUB_STEP_SUMMARY"

@@ -46,7 +46,29 @@ describe("health", () => {
     expect(response.headers.get("cache-control")).toBe("no-store, max-age=0");
     expect(await response.json()).toMatchObject({
       status: "ok",
+      environment: "production",
       version,
+    });
+  });
+
+  it("identifies the staging environment", async () => {
+    const response = await worker.fetch(
+      new Request("https://staging.snare.sh/health"),
+      {
+        CF_VERSION_METADATA: {
+          id: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+          tag: "staging",
+          timestamp: "2026-07-27T00:00:00.000Z",
+        },
+        SNARE_ENVIRONMENT: "staging",
+      },
+      { waitUntil() {} },
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      status: "ok",
+      environment: "staging",
     });
   });
 });

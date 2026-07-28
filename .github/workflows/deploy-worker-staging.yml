@@ -1,0 +1,133 @@
+name: Deploy Staging Cloudflare Worker
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: snare-worker-staging
+  cancel-in-progress: true
+
+jobs:
+  worker:
+    name: Deploy and smoke-test staging Worker
+    if: >-
+      (github.event_name == 'workflow_dispatch' &&
+       github.ref == 'refs/heads/main') ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment:
+      name: snare-worker-staging
+      url: https://staging.snare.sh/health
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_WORKER_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: worker/package-lock.json
+
+      - name: Install Worker dependencies
+        working-directory: worker
+        run: npm ci
+
+      - name: Audit Worker dependencies
+        working-directory: worker
+        run: npm audit --audit-level=high
+
+      - name: Test Worker
+        working-directory: worker
+        run: npm test
+
+      - name: Validate staging deployment bundle
+        working-directory: worker
+        run: npm run cf:check:staging
+
+      - name: Deploy staging Worker
+        id: deploy
+        working-directory: worker
+        env:
+          WRANGLER_OUTPUT_FILE: ${{ runner.temp }}/wrangler-output.jsonl
+        run: |
+          set -euo pipefail
+          : > "$WRANGLER_OUTPUT_FILE"
+          npx wrangler deploy \
+            --env staging \
+            --keep-vars \
+            --strict \
+            --message "GitHub Actions staging deploy of ${{ github.event.workflow_run.head_sha || github.sha }}"
+
+          version_id="$(
+            jq -r 'select(.type == "deploy") | .version_id // empty' \
+              "$WRANGLER_OUTPUT_FILE" | tail -n 1
+          )"
+          if [[ -z "$version_id" ]]; then
+            echo "Wrangler did not report the staging Worker version ID." >&2
+            cat "$WRANGLER_OUTPUT_FILE" >&2
+            exit 1
+          fi
+          echo "version_id=$version_id" >> "$GITHUB_OUTPUT"
+
+      - name: Verify exact staging version
+        env:
+          EXPECTED_VERSION_ID: ${{ steps.deploy.outputs.version_id }}
+        run: |
+          set -euo pipefail
+          observed_version_id="unavailable"
+          for attempt in {1..60}; do
+            if response="$(curl --fail --silent --show-error https://staging.snare.sh/health)"; then
+              observed_version_id="$(
+                jq -r '.version.id // "missing"' <<<"$response" 2>/dev/null \
+                  || printf 'invalid health response'
+              )"
+              if jq -e --arg expected "$EXPECTED_VERSION_ID" '
+                .status == "ok"
+                and .environment == "staging"
+                and .version.id == $expected
+                and (.version.timestamp | type == "string" and length > 0)
+              ' <<<"$response" >/dev/null; then
+                break
+              fi
+            fi
+
+            if [[ "$attempt" -eq 60 ]]; then
+              echo "Staging did not activate the deployed Worker version." >&2
+              printf 'Expected: %s\nObserved: %s\n' \
+                "$EXPECTED_VERSION_ID" "$observed_version_id" >&2
+              exit 1
+            fi
+            sleep 2
+          done
+
+      - name: Run staging lifecycle smoke test
+        run: worker/scripts/smoke-staging.sh https://staging.snare.sh
+
+      - name: Summarize staging deployment
+        env:
+          VERSION_ID: ${{ steps.deploy.outputs.version_id }}
+          DEPLOY_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+        run: |
+          {
+            echo "## Staging deployment passed"
+            echo
+            printf -- '- Commit: `%s`\n' "$DEPLOY_SHA"
+            printf -- '- Active Worker version: `%s`\n' "$VERSION_ID"
+            echo '- Lifecycle smoke test: `passed`'
+          } >> "$GITHUB_STEP_SUMMARY"

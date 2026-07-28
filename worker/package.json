@@ -4,8 +4,10 @@
   "type": "module",
   "scripts": {
     "test": "vitest run",
-    "cf:check": "wrangler deploy --dry-run",
-    "cf:deploy": "wrangler deploy --keep-vars --strict"
+    "cf:check": "wrangler deploy --dry-run --env=",
+    "cf:check:staging": "wrangler deploy --dry-run --env staging",
+    "cf:deploy": "wrangler deploy --env= --keep-vars --strict",
+    "cf:deploy:staging": "wrangler deploy --env staging --keep-vars --strict"
   },
   "devDependencies": {
     "vitest": "4.1.10",
