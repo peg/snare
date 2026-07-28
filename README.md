@@ -354,10 +354,15 @@ See the [self-hosting guide](docs/self-hosting.md) for reverse proxy, backup, up
 Release checksums are signed with [Sigstore/cosign](https://docs.sigstore.dev/) using keyless OIDC signing via GitHub Actions. To verify a downloaded release:
 
 ```sh
-cosign verify-blob --bundle checksums.txt.bundle checksums.txt
+snare_release_tag=v0.5.0 # replace with the exact tag you downloaded
+cosign verify-blob \
+  --bundle checksums.txt.bundle \
+  --certificate-identity "https://github.com/peg/snare/.github/workflows/release.yml@refs/tags/${snare_release_tag}" \
+  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+  checksums.txt
 ```
 
-This confirms the checksums file was produced by the official GitHub Actions release workflow and has not been tampered with.
+This verifies both integrity and provenance: the checksums file must be unchanged, signed by Snare's official release workflow for that exact tag, and issued through GitHub Actions OIDC. After that succeeds, verify the archive itself with `sha256sum -c checksums.txt` on Linux or `shasum -a 256 -c checksums.txt` on macOS.
 
 ---
 
