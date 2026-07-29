@@ -33,11 +33,16 @@ Create `snare-worker-staging` in repository settings with:
 - environment variable `CLOUDFLARE_ACCOUNT_ID`;
 - deployment branches restricted to `main`.
 
-Use a dedicated staging token scoped to this Cloudflare account with only
-`Workers Scripts: Edit` and `Workers KV Storage: Edit`. The latter is required
-because the smoke test deletes its synthetic KV records after verification.
-The staging custom domain is managed by the Workers Scripts permission; DNS
-Edit and broad zone permissions are not required.
+Use a dedicated staging token with:
+
+- account-scoped `Workers Scripts: Edit`;
+- account-scoped `Workers KV Storage: Edit`; and
+- zone-scoped `Workers Routes: Edit` restricted to `snare.sh`.
+
+KV write access is required because the smoke test deletes its synthetic
+records after verification. Wrangler also reconciles Worker routes during a
+deploy, including when the configured target is a custom domain. DNS Edit and
+broad access to other zones are not required.
 
 ## Optional staging webhook
 

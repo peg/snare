@@ -94,19 +94,19 @@ jobs:
         id: deploy
         working-directory: worker
         env:
-          WRANGLER_OUTPUT_FILE: ${{ runner.temp }}/wrangler-output.jsonl
+          WRANGLER_OUTPUT_FILE_PATH: ${{ runner.temp }}/wrangler-output.jsonl
         run: |
           set -euo pipefail
-          : > "$WRANGLER_OUTPUT_FILE"
+          : > "$WRANGLER_OUTPUT_FILE_PATH"
           npm run cf:deploy -- --message "GitHub Actions deploy of ${{ github.sha }}"
 
           version_id="$(
             jq -r 'select(.type == "deploy") | .version_id // empty' \
-              "$WRANGLER_OUTPUT_FILE" | tail -n 1
+              "$WRANGLER_OUTPUT_FILE_PATH" | tail -n 1
           )"
           if [[ -z "$version_id" ]]; then
             echo "Wrangler did not report the deployed Worker version ID." >&2
-            cat "$WRANGLER_OUTPUT_FILE" >&2
+            cat "$WRANGLER_OUTPUT_FILE_PATH" >&2
             exit 1
           fi
           echo "version_id=$version_id" >> "$GITHUB_OUTPUT"
