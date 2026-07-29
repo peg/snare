@@ -4,15 +4,20 @@ on:
   workflow_dispatch:
     inputs:
       operation:
-        description: Validate access or deploy the selected ref
+        description: Validate access or deploy a staging-qualified commit
         required: true
         type: choice
         default: validate
         options:
           - validate
           - deploy
+      commit_sha:
+        description: Exact 40-character commit SHA from main
+        required: true
+        type: string
 
 permissions:
+  actions: read
   contents: read
 
 concurrency:
@@ -27,14 +32,76 @@ jobs:
     environment:
       name: snare-worker-production
       url: https://snare.sh/health
-    env:
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_WORKER_API_TOKEN }}
-      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ inputs.commit_sha }}
+          fetch-depth: 0
           persist-credentials: false
+
+      - name: Verify production source and staging qualification
+        id: qualify
+        env:
+          DEPLOY_OPERATION: ${{ inputs.operation }}
+          DEPLOY_SHA: ${{ inputs.commit_sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+            echo "Production workflow must be dispatched from main." >&2
+            exit 1
+          fi
+          if [[ ! "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "commit_sha must be an exact lowercase 40-character commit SHA." >&2
+            exit 1
+          fi
+          if [[ "$(git rev-parse HEAD)" != "$DEPLOY_SHA" ]]; then
+            echo "Checked-out commit does not match commit_sha." >&2
+            exit 1
+          fi
+
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$DEPLOY_SHA" FETCH_HEAD; then
+            echo "Production commit must belong to main." >&2
+            exit 1
+          fi
+
+          echo "deploy_sha=$DEPLOY_SHA" >> "$GITHUB_OUTPUT"
+          if [[ "$DEPLOY_OPERATION" != "deploy" ]]; then
+            exit 0
+          fi
+
+          runs_url="${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/workflows/deploy-worker-staging.yml/runs"
+          response="$(curl --fail-with-body --silent --show-error \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --header "Accept: application/vnd.github+json" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            --get \
+            --data-urlencode "event=workflow_run" \
+            --data-urlencode "status=success" \
+            --data-urlencode "head_sha=${DEPLOY_SHA}" \
+            --data-urlencode "per_page=100" \
+            "$runs_url")"
+          staging_run_url="$(jq -r --arg sha "$DEPLOY_SHA" '
+            [.workflow_runs[]
+              | select(
+                  .head_sha == $sha and
+                  .event == "workflow_run" and
+                  .conclusion == "success"
+                )]
+            | sort_by(.run_number)
+            | last
+            | .html_url // empty
+          ' <<<"$response")"
+          if [[ -z "$staging_run_url" ]]; then
+            echo "No successful automatic staging run found for ${DEPLOY_SHA}." >&2
+            exit 1
+          fi
+
+          echo "staging_run_url=$staging_run_url" >> "$GITHUB_OUTPUT"
+          echo "Qualified by staging run: $staging_run_url"
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -61,6 +128,9 @@ jobs:
       - name: Verify Cloudflare access and production secret
         working-directory: worker
         shell: bash
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_WORKER_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           set -euo pipefail
           secrets="$(npx wrangler secret list --env="" --format json)"
@@ -70,17 +140,21 @@ jobs:
       - name: Record current deployment
         working-directory: worker
         env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_WORKER_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           DEPLOY_OPERATION: ${{ inputs.operation }}
-          DEPLOY_REF: ${{ github.ref_name }}
-          DEPLOY_SHA: ${{ github.sha }}
+          DEPLOY_SHA: ${{ steps.qualify.outputs.deploy_sha }}
+          STAGING_RUN_URL: ${{ steps.qualify.outputs.staging_run_url }}
         run: |
           set -euo pipefail
           {
             echo "## Deployment input"
             echo
             printf -- '- Operation: `%s`\n' "$DEPLOY_OPERATION"
-            printf -- '- Ref: `%s`\n' "$DEPLOY_REF"
             printf -- '- Commit: `%s`\n' "$DEPLOY_SHA"
+            if [[ -n "$STAGING_RUN_URL" ]]; then
+              printf -- '- Qualifying staging run: %s\n' "$STAGING_RUN_URL"
+            fi
             echo
             echo "## Deployment before this run"
             echo
@@ -94,11 +168,14 @@ jobs:
         id: deploy
         working-directory: worker
         env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_WORKER_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          DEPLOY_SHA: ${{ steps.qualify.outputs.deploy_sha }}
           WRANGLER_OUTPUT_FILE_PATH: ${{ runner.temp }}/wrangler-output.jsonl
         run: |
           set -euo pipefail
           : > "$WRANGLER_OUTPUT_FILE_PATH"
-          npm run cf:deploy -- --message "GitHub Actions deploy of ${{ github.sha }}"
+          npm run cf:deploy -- --message "GitHub Actions deploy of ${DEPLOY_SHA}"
 
           version_id="$(
             jq -r 'select(.type == "deploy") | .version_id // empty' \
@@ -150,6 +227,9 @@ jobs:
       - name: Record deployed version and rollback command
         if: inputs.operation == 'deploy'
         working-directory: worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_WORKER_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           set -euo pipefail
           {

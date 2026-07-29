@@ -22,8 +22,30 @@ and runs a synthetic lifecycle test:
 4. Read the stored event with device authentication.
 5. Revoke the token and remove the synthetic device and event keys.
 
-The workflow can also be dispatched manually. Production remains a separate,
-manually dispatched workflow protected by `snare-worker-production`.
+The workflow can also be dispatched manually. A manual staging run is useful
+for diagnosis, but it does not qualify a commit for production because it is
+not chained to a successful `CI` push run.
+
+## Production promotion
+
+Production remains a separate, manually dispatched workflow protected by
+`snare-worker-production`. To deploy:
+
+1. Copy the exact 40-character commit SHA from `main`.
+2. Confirm the automatic staging workflow for that commit passed.
+3. Dispatch `Deploy Cloudflare Worker` from the `main` branch, choose `deploy`,
+   and enter that commit SHA.
+4. If a reviewer gate is configured, approve the protected production
+   environment deployment when prompted.
+
+The production workflow checks out the requested commit, proves that it belongs
+to `main`, and uses the GitHub Actions API to require a successful automatic
+staging run for that exact SHA. A successful manual staging run does not satisfy
+the gate. Production then reports and verifies the exact Cloudflare Worker
+version that became active.
+
+Use `validate` with a `main` commit SHA to test the production credentials and
+deployment bundle without requiring a staging run or changing production.
 
 ## Required GitHub environment configuration
 
@@ -43,6 +65,12 @@ KV write access is required because the smoke test deletes its synthetic
 records after verification. Wrangler also reconciles Worker routes during a
 deploy, including when the configured target is a custom domain. DNS Edit and
 broad access to other zones are not required.
+
+Configure `snare-worker-production` separately with its production-scoped
+Cloudflare token and account ID, restrict deployments to `main`, and require an
+environment reviewer when the repository has a second trusted maintainer. The
+workflow exposes the Cloudflare credentials only to the steps that inspect or
+change the production Worker.
 
 ## Optional staging webhook
 
