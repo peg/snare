@@ -142,6 +142,7 @@ export default {
       const version = env.CF_VERSION_METADATA;
       return json({
         status: "ok",
+        environment: env.SNARE_ENVIRONMENT || "production",
         version: {
           id: version.id,
           tag: version.tag,

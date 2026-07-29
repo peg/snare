@@ -27,6 +27,34 @@
   ],
   "version_metadata": {
     "binding": "CF_VERSION_METADATA"
+  },
+  "env": {
+    "staging": {
+      "name": "snare-callback-staging",
+      "routes": [
+        {
+          "pattern": "staging.snare.sh",
+          "custom_domain": true
+        }
+      ],
+      "kv_namespaces": [
+        {
+          "binding": "SNARE_KV",
+          "id": "64c03175839d4983b6d54649dec5dcf1"
+        }
+      ],
+      "version_metadata": {
+        "binding": "CF_VERSION_METADATA"
+      },
+      "vars": {
+        "SNARE_ENVIRONMENT": "staging"
+      },
+      "observability": {
+        "enabled": true,
+        "head_sampling_rate": 1
+      }
+    }
   }
-  // WEBHOOK_URLS remains a remote Worker secret and is never committed.
+  // WEBHOOK_URLS remains a remote Worker secret and is never committed. If
+  // configured for staging, it must point to a dedicated non-production sink.
 }
