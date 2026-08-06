@@ -82,6 +82,13 @@ Device IDs are server-assigned via `POST /api/devices` — clients cannot choose
 3. Fire all webhooks in parallel via `Promise.allSettled`
 4. Failures logged to CF Workers Logs but don't affect the response
 
+The repository contains a tested v1 message contract as a non-active foundation
+for durable delivery. The current Worker has no queue binding, does not enqueue
+messages, and continues to use the direct flow above. The queue topology,
+privacy boundary, retry policy, self-hosting constraint, and activation gates
+are documented in
+[Durable webhook delivery](docs/webhook-delivery.md).
+
 Outbound webhook requests include `X-Snare-Signature: sha256=<hmac>` when the Cloudflare Worker `WEBHOOK_SIGNING_SECRET` secret is configured. Receivers can verify alerts came from the configured Snare callback deployment.
 
 **Supported webhook formats:** Discord (embed), Slack (attachment), Telegram (HTML), generic JSON (`event: "canary.fired"`).
