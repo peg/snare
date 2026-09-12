@@ -14,7 +14,7 @@ A hijacked AI agent does something a healthy one doesn't: it looks for credentia
 
 Snare exploits this. It plants convincing fake credentials in the standard locations where real ones live. Precision canaries fire when a planted target is actively used; `awsproc` fires before any AWS API call leaves the machine.
 
-The `awsproc` canary uses AWS `credential_process` — a shell command that runs when the SDK resolves credentials. When a compromised agent runs `aws s3 ls --profile prod-admin`, the alert lands at T+0.01s. CloudTrail never sees it.
+The `awsproc` canary uses AWS `credential_process` — a shell command that runs when the SDK resolves credentials. When a client runs `aws s3 ls --profile prod-admin`, that hook attempts a callback before the AWS request. Notification timing depends on network and delivery availability; Snare does not need AWS audit infrastructure for this hook.
 
 ```ini
 # ~/.aws/config
@@ -36,11 +36,11 @@ Token   agent-prod-admin-2026-••••••••
 Time    2026-03-14 04:07:33 UTC
 IP      34.121.8.92       Location  Council Bluffs, US
 Network Amazon Technologies Inc (AS16509)
-UA      Boto3/1.34.46 md/Botocore#1.34.46 ua/2.0 os/linux#6.8.0...
-⚠️ Likely AI agent   Request originated from Amazon Technologies Inc
+UA      curl/8.0
+Cloud infrastructure   Request originated from Amazon Technologies Inc
 ```
 
-The Boto3 user agent tells you which SDK fired it. The ASN tells you it came from a cloud-hosted agent. **The credential itself is the sensor.**
+For `awsproc`, the receiver sees the callback helper’s user agent, such as curl. It cannot infer the parent SDK or whether the actor was an AI agent. An ASN supplies network context. **The planted credential hook is the sensor.**
 
 ---
 
@@ -111,7 +111,7 @@ To arm all canary types (including dotenv-based ones like OpenAI, Anthropic, etc
 snare arm --all --webhook https://discord.com/api/webhooks/YOUR/WEBHOOK
 ```
 
-Supported webhook destinations: Discord, Slack, Telegram, or any endpoint that accepts JSON. Treat webhook URLs as secrets — don't commit, screenshot, or share them.
+Supported webhook destinations include Discord, Slack, Telegram, and operator-allowlisted HTTPS JSON endpoints. Treat webhook URLs as secrets — don't commit, screenshot, or share them.
 
 Evaluating Snare for a team or lab? Start with the [enterprise evaluation guide](docs/enterprise-evaluation.md), then wire alerts to your SIEM with the [webhook integration docs](docs/integrations/generic-webhook.md).
 
@@ -172,7 +172,7 @@ After `snare arm`, the expected healthy loop is:
 - `snare repair` (or `snare sync`) safely re-registers active tokens and re-tests callback/event readability when drift is detected.
 - `snare prove` prints safe precision trigger commands so you can intentionally prove alerts fire for `awsproc`, `ssh`, `k8s`, `git`, and `npm`.
 - `snare prove --pack mcp` prints a safe MCP Streamable HTTP initialize probe for planted `mcp` canaries without modifying active MCP client configs.
-- `snare prove --run --report` executes the selected proof triggers, confirms callbacks through the events API, and prints a compact proof report with cleanup commands, event visibility, observed latency, and explicit proof/limitation notes.
+- `snare prove --run --report` verifies the planted snippets on disk, executes isolated temporary copies with unique callback paths, and requires matching proof/event IDs through the events API. It leaves original files unchanged and prints cleanup commands, event visibility, observed latency, and proof limitations. This checks the selected snippet, not its interaction with the rest of your configuration or downstream notification delivery; see [detection contracts](docs/detection-contracts.md#correlation-in-cli-proof-reports).
 - `snare prove --format json --redact --output proof.json` writes a machine-readable artifact with device IDs, token IDs, labels, cleanup tokens, and absolute local paths redacted.
 
 Important state distinction:
@@ -202,7 +202,7 @@ Important state distinction:
 | `terraform` | `~/.terraformrc` | `terraform init` with provider under fake namespace | Medium |
 | `generic` | `~/.env.production` | Any SDK reading `API_BASE_URL` | Medium |
 
-**Precision** canaries fire via existing SDK and OS plumbing — near-zero false positives during normal work because they require active use of the planted fake profile, host, or context. Default with `snare arm`.
+**Precision** canaries use existing SDK and OS plumbing and require active use of a planted fake profile, host, or context. They are the quiet default with `snare arm`; legitimate tests or automation that use those fake targets will also fire.
 
 **High** canaries fire when the credential is actively used by anyone — human attacker, compromised agent, scanner.
 
@@ -218,19 +218,18 @@ Snare detects active use, not arbitrary file reads. `snare scan` verifies integr
 
 `awsproc` uses AWS `credential_process` — a shell command that runs when the SDK resolves credentials, before any API call is made.
 
-Timeline when a compromised agent runs `aws s3 ls --profile prod-admin`:
+Sequence when a client runs `aws s3 ls --profile prod-admin`:
 
 ```
-T+0.00s  aws s3 ls --profile prod-admin
-T+0.01s  AWS SDK begins credential resolution
-T+0.01s  credential_process shell command executes
-T+0.01s  curl fires to snare.sh -> alert in your webhook
-T+0.02s  SDK receives fake JSON credentials
-T+0.03s  SDK attempts s3.ListBuckets() -> fails (fake creds)
-T+0.03s  Agent: "AWS error, credentials may be invalid"
+AWS CLI begins credential resolution
+credential_process executes the callback helper
+helper attempts a callback to snare.sh
+SDK receives synthetic credentials and attempts the AWS operation
+notification delivery runs independently and may retry
 ```
 
-**The alert arrives before the agent knows the credentials don't work.** CloudTrail-based tools like Canarytokens see the API call; awsproc fires before it exists.
+The callback hook runs before the AWS API operation. This is a detection
+opportunity, not a guarantee that the webhook arrives before the operation fails.
 
 The two-profile pattern looks like a real assume-role setup:
 
@@ -244,9 +243,7 @@ source_profile = prod-admin-source
 credential_process = sh -c 'curl -sf https://snare.sh/c/{token} >/dev/null 2>&1; echo "{\"Version\":1,\"AccessKeyId\":\"AKIA...\",\"SecretAccessKey\":\"...\"}"'
 ```
 
-Canarytokens can't do this. Their AWS canary creates a real IAM user and monitors CloudTrail, which adds minutes of lag and requires external AWS infrastructure. `awsproc` runs locally, which is the whole point.
-
-On airgapped or firewalled machines: even if the callback can't reach snare.sh, the shell command still returns fake credential JSON. The agent gets apparently-valid creds and keeps going. If it later tries to use them from outside your network, that fires separately.
+If egress blocks the callback, the hook still returns synthetic credential JSON, but Snare has no observation. Using those raw synthetic keys against real AWS later does not trigger Snare. A later callback requires the callback-bearing configuration or hook to travel with them and execute.
 
 This is why `awsproc`, `ssh`, and `k8s` are planted by default — they fire only on active credential use, making them the best choice for machines running AI agents.
 
@@ -260,7 +257,7 @@ To intentionally prove an MCP canary without wiring it into an active client, ru
 snare prove --pack mcp --run --report
 ```
 
-That sends one Streamable HTTP `initialize` request to the planted fake server URL and verifies the callback through the events API.
+That verifies the planted snippet, sends a Streamable HTTP `initialize` probe to a copy of its fake server URL with a unique proof path, and requires that exact callback through the events API.
 
 ---
 
@@ -271,9 +268,9 @@ Each alert includes:
 - Which canary fired and what machine it was on
 - Timestamp (UTC)
 - IP, city, country
-- ASN (hosting org — `Amazon Technologies Inc` = cloud agent, `Hetzner` = VPS, etc.)
-- User agent (identifies the exact SDK: `Boto3/1.34.46`, `kubectl/v1.35.1`, etc.)
-- "Likely AI agent" flag when the request comes from cloud infrastructure
+- ASN and hosting organization as network context
+- User agent as a client hint, which can be forged or belong to a callback helper
+- Cloud infrastructure context, without claiming an AI or attacker identity
 
 Alerts are signed with `X-Snare-Signature` (HMAC-SHA256) when webhook signing is configured, so receivers can verify the sender.
 
@@ -283,11 +280,11 @@ See [generic webhooks](docs/integrations/generic-webhook.md), [Splunk](docs/inte
 
 ## Privacy
 
-Snare's callback handlers never read request bodies. When a canary fires, the worker returns a response before the body is consumed. Canary callbacks can carry real credentials or prompts in their body — the application code does not inspect them. In managed mode, Cloudflare still terminates the network request; self-host if you need full network-layer control.
+Snare's callback handlers never read request bodies. D1 mode acknowledges after event admission; callback bodies are never read in either storage mode. Canary callbacks can carry real credentials or prompts in their body — the application code does not inspect them. In managed mode, Cloudflare still terminates the network request; self-host if you need full network-layer control.
 
-Each alert stores only: token ID, timestamp, IP, user agent, method, path, country, ASN.
+Stored evidence includes token/device and event IDs, timestamp, IP, user agent, method, path, city/country, ASN, optional bot score, bounded SDK header hints, classification and suppression status, and proof correlation when present. Delivery state and registration metadata are stored separately. This metadata can be sensitive even without request bodies.
 
-Fake credential content lives locally in `~/.snare/manifest.json` (0600) and is never sent to snare.sh. Token IDs are 128-bit random hex. Other snare.sh users can't query your events.
+The local manifest lives in `~/.snare/manifest.json` (0600) and is not uploaded. An SDK may nevertheless send credential material in callback bodies or authorization headers; Snare does not persist or forward those values. Token IDs include 128 bits of randomness, and event reads require the owning device secret.
 
 ---
 
@@ -299,23 +296,19 @@ Fake credential content lives locally in `~/.snare/manifest.json` (0600) and is 
 
 ---
 
-## vs. canarytokens.org
+## Project focus
 
-[Canarytokens](https://canarytokens.org) is good. Snare is built specifically for AI agents:
-
-| | Canarytokens | Snare |
-|---|---|---|
-| Setup | Manual, one token at a time | `snare arm` covers 15 supported credential and tool-use types |
-| AWS detection | CloudTrail (minutes lag) | Direct SDK callback (sub-second) |
-| Credential types | AWS + a few others | AWS, GCP, SSH, k8s, git, terraform, OpenAI, Anthropic, npm, PyPI, MCP, and more |
-| AI agent context | None | Cloud ASN detection, SDK user-agent parsing, `credential_process` timing |
-| Fires on | Read or use (varies) | Use only |
+Snare focuses on planting and verifying callback-bearing decoys in developer and
+agent workspaces. Its useful distinction is the workflow: reproducible
+real-client proof contracts, removable configuration, owner-controlled event
+history, and inspectable self-hosted code. Canary technology itself is not new,
+and these signals do not establish whether a person or AI caused the request.
 
 ---
 
 ## Relationship to Rampart
 
-[Rampart](https://rampart.sh) enforces policy and blocks agents from making calls they shouldn't. Snare detects when an agent has already been compromised. They solve different parts of the problem and work fine independently.
+[Rampart](https://rampart.sh) enforces policy and blocks agents from making calls they shouldn't. Snare records use of planted decoys, which can indicate compromise and needs investigation. They solve different parts of the problem and work fine independently.
 
 ---
 
@@ -345,7 +338,7 @@ curl -fsS http://localhost:8080/health
 
 Only expose `snare serve` behind a reverse proxy you control. By default the server ignores `X-Forwarded-For` and `X-Real-IP`; set `--trusted-proxy <cidr,...>` only for proxy networks that are allowed to supply those headers.
 
-See the [self-hosting guide](docs/self-hosting.md) for reverse proxy, backup, upgrade, Cloudflare Worker, and client `callback_base` steps.
+See the [self-hosting guide](docs/self-hosting.md) for reverse proxy, backup, upgrade, Cloudflare Worker, and client `callback_base` steps. The optional D1 backend adds atomic ownership, admission caps and durable delivery; follow the [activation guide](docs/receiver-activation.md) and [abuse controls](docs/cloudflare-abuse-controls.md) before enabling it. The managed configuration remains KV until that separate migration.
 
 ---
 

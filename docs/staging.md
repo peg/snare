@@ -18,9 +18,9 @@ and runs a synthetic lifecycle test:
 
 1. Create a staging device.
 2. Register a `snare-test-*` token.
-3. Trigger its callback.
-4. Read the stored event with device authentication.
-5. Revoke the token and remove the synthetic device and event keys.
+3. Trigger its callback with a unique proof path and a preview user-agent hint.
+4. Read the matching event with device authentication and verify notification suppression.
+5. Revoke the token and remove only this run’s disposable staging records.
 
 The workflow can also be dispatched manually. A manual staging run is useful
 for diagnosis, but it does not qualify a commit for production because it is
@@ -62,7 +62,10 @@ Use a dedicated staging token with:
 - zone-scoped `Workers Routes: Edit` restricted to `snare.sh`.
 
 KV write access is required because the smoke test deletes its synthetic
-records after verification. Wrangler also reconciles Worker routes during a
+records after verification. If staging is migrated to D1, bind `SNARE_DB` in that
+environment and give its deployment token D1 access for schema management and
+synthetic cleanup. Invite enrollment also requires a separate matching
+`SNARE_ENROLLMENT_TOKEN` secret in the staging GitHub environment. Wrangler also reconciles Worker routes during a
 deploy, including when the configured target is a custom domain. DNS Edit and
 broad access to other zones are not required.
 
@@ -74,12 +77,13 @@ change the production Worker.
 
 ## Optional staging webhook
 
-The lifecycle test proves registration, callback ingestion, KV storage, and
-authenticated event reads without requiring an outbound webhook. To exercise
-delivery manually, set the staging Worker's `WEBHOOK_URLS` secret to a dedicated
-non-production destination:
+The lifecycle test proves registration, correlated callback ingestion, storage,
+notification suppression, and authenticated event reads. It registers a
+non-secret placeholder Slack URL and sends a preview-classified callback, which
+must never produce an outbound notification. It does not enroll the synthetic
+device in the operator's global destination allowlist.
 
-```sh
-cd worker
-npx wrangler secret put WEBHOOK_URLS --env staging
-```
+To validate real delivery, use a separate staging token with an explicitly
+configured dedicated non-production webhook and exercise the
+[delivery activation checks](webhook-delivery.md#activation-checks). Do not use
+production destinations or interpret the ingestion smoke as delivery proof.
