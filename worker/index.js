@@ -1,3 +1,9 @@
+import { PolicyError, readManagementJSON, validateManagementBody, authorizeEnrollment,
+  authorizeGlobalWebhook, sanitizeCallbackMetadata, enforceSourceRateLimit, enforceDeviceRateLimit } from "./policy.js";
+import { D1Store } from "./store.js";
+import { createDeliveryMessage } from "./delivery.js";
+import { dispatchOutbox, consumeQueue } from "./outbox.js";
+
 /**
  * snare.sh — Cloudflare Worker callback receiver
  *
@@ -5,7 +11,7 @@
  *   Canary callback requests (/c/{token}) NEVER have their bodies read,
  *   logged, stored, or forwarded. The worker captures only connection
  *   metadata (IP, User-Agent, method, country, ASN) from HEADERS.
- *   The response is returned BEFORE any body could be consumed.
+ *   D1 deployments acknowledge callbacks after durable event admission.
  *   This is a deliberate design choice — canary callbacks may carry
  *   real credentials or sensitive data in their bodies, and we must
  *   never have access to that data, even transiently in memory.
@@ -33,7 +39,7 @@
  * Routes:
  *   GET/POST /c/{token}[/*]  — canary callback (metadata-only capture)
  *   POST     /api/register   — register webhook + metadata for a token
- *   POST     /api/revoke     — remove a token registration
+ *   POST     /api/revoke     — revoke registration and preserve ownership
  *   GET      /api/events/*   — retrieve recent events for a token
  *   GET      /health         — health check
  */
@@ -63,7 +69,7 @@ const CANARY_TYPES = {
 
 const DEFAULT_TYPE = { emoji: "🪤", color: 0xB2121A, name: "Canary" };
 
-// Known cloud/AI infrastructure ASNs — strong indicator of agent origin
+// Cloud infrastructure context; this does not establish AI or attacker origin.
 const CLOUD_PROVIDERS = [
   "amazon", "google", "microsoft", "openai", "anthropic",
   "digitalocean", "linode", "akamai", "vultr", "hetzner",
@@ -71,7 +77,7 @@ const CLOUD_PROVIDERS = [
   "together", "replicate", "modal",
 ];
 
-// Known link-preview bots — ignore these
+// Preview hints suppress notifications; evidence remains available.
 const PREVIEW_BOTS = [
   "Discordbot", "Slackbot", "Twitterbot", "facebookexternalhit",
   "LinkedInBot", "TelegramBot", "WhatsApp", "iMessage",
@@ -79,7 +85,7 @@ const PREVIEW_BOTS = [
 ];
 
 // Known security scanner org names (substring match against cf.asOrganization).
-// These generate high-volume false positives with no security value.
+// These hints can reduce notification noise but do not establish benign intent.
 // List is intentionally conservative — only well-known, confirmed scanner orgs.
 const SCANNER_ORGS = [
   "shodan",
@@ -96,38 +102,34 @@ const SCANNER_ORGS = [
 ];
 
 // Per-canary-type false-positive filtering.
-// Returns true if the request should be DROPPED (not an alert).
-// Philosophy: hard gates where SDK signal is unambiguous (zero false-negative risk),
-// scanner blocklist everywhere else.
+// Returns true when notification should be suppressed. These are heuristics:
+// unrecognized clients and forged metadata can trigger them. Evidence is retained.
 function shouldFilter(canaryType, metadata) {
   const asnLower = (metadata.asnOrg || "").toLowerCase();
   const ua = metadata.userAgent || "";
   const hints = metadata.sdkHints || {};
 
-  // Always drop known security scanners — they produce zero actionable signal.
-  // A real attacker using a scanner IP is pathological; if worried, disable this.
+  // Organization attribution is a notification hint, not proof of harmlessness.
   if (SCANNER_ORGS.some(s => asnLower.includes(s))) return true;
 
   switch (canaryType) {
     case "aws":
-      // AWS SDK ALWAYS sends AWS4-HMAC-SHA256 Authorization signature.
-      // A plain HTTP GET with no Authorization header is a crawler, not boto3/aws-sdk.
-      // This is the single safest hard gate — every AWS SDK on every language/version signs.
+      // The supported AWS proof signs with SigV4. Unsigned requests remain
+      // recorded as probes, including clients outside that detection contract.
       return !hints.hasAwsSig;
 
     case "awsproc":
-      // awsproc fires via shell ProxyCommand — always a curl POST or GET with no browser UA.
-      // Crawlers use Mozilla/5.0 — safe to drop browser-like UAs.
+      // The credential_process proof uses curl. Browser-like user agents are
+      // only a suppression hint and are trivial for another client to forge.
       return /^mozilla\//i.test(ua) && !hints.hasAwsSig;
 
     case "gcp":
-      // GCP OAuth token_uri exchange is always a POST.
-      // Crawlers use GET. Any GET on a GCP canary callback is a bot/scanner.
+      // The supported OAuth exchange uses POST; preserve other methods as probes.
       return !hints.isPost;
 
     default:
       // For all other types (github, openai, anthropic, ssh, k8s, npm, pypi, mcp, stripe, generic):
-      // scanner blocklist already applied above; no additional hard gate.
+      // scanner hints already applied above; no additional suppression.
       // These canaries may be triggered via GET by non-SDK clients (legitimate attack paths),
       // so we don't gate on method or auth headers.
       return false;
@@ -136,82 +138,63 @@ function shouldFilter(canaryType, metadata) {
 
 export default {
   async fetch(request, env, ctx) {
-    const url = new URL(request.url);
-
-    if (url.pathname === "/health") {
-      const version = env.CF_VERSION_METADATA;
-      return json({
-        status: "ok",
-        environment: env.SNARE_ENVIRONMENT || "production",
-        version: {
-          id: version.id,
-          tag: version.tag,
-          timestamp: version.timestamp,
-        },
-        ts: new Date().toISOString(),
-      });
-    }
-
-    // Rate limit all /api/* endpoints: 30 requests per minute per IP
-    if (url.pathname.startsWith("/api/")) {
-      const ip = request.headers.get("cf-connecting-ip") || "unknown";
-      const rateLimited = await checkRateLimit(env, `api:${ip}`, 30, 60);
-      if (rateLimited) {
-        return json({ error: "rate limited" }, 429);
+    try {
+      if (env.STORAGE_BACKEND === "d1" && !env.SNARE_DB) {
+        throw new PolicyError(503, "storage_unavailable", "transactional storage is not configured");
       }
+      const url = new URL(request.url);
+      if (url.pathname === "/health") {
+        return json({ status: "ok", environment: env.SNARE_ENVIRONMENT || "production",
+          version: env.CF_VERSION_METADATA || {}, storage: env.SNARE_DB ? "d1" : "kv",
+          delivery: env.SNARE_DB ? (env.WEBHOOK_DELIVERY_QUEUE ? "queue" : "outbox") : "best_effort",
+          enrollment: env.ENROLLMENT_MODE || "open", ts: new Date().toISOString() });
+      }
+      if (url.pathname.startsWith("/api/")) {
+        await enforceSourceRateLimit(request, env, url.pathname === "/api/devices" ? "enrollment" : "api");
+        const routes = { "/api/devices": handleCreateDevice, "/api/register": handleRegister,
+          "/api/revoke": handleRevoke, "/api/rotate": handleRotateSecret };
+        if (Object.hasOwn(routes, url.pathname)) {
+          if (request.method !== "POST") return json({ error: "method not allowed" }, 405);
+          return await routes[url.pathname](request, env);
+        }
+        const eventMatch = url.pathname.match(/^\/api\/events\/([a-zA-Z0-9_-]{8,80})$/);
+        if (eventMatch && request.method === "GET") return await handleEvents(eventMatch[1], request, env);
+        return json({ error: "not found" }, 404);
+      }
+      const match = url.pathname.match(/^\/c\/([a-zA-Z0-9_-]{8,80})(\/.*)?$/);
+      if (match) {
+        await enforceSourceRateLimit(request, env, "callback");
+        // Callback bodies are never accessed, including while awaiting durable
+        // storage. An acknowledgement describes ingestion, not webhook receipt.
+        const metadata = extractMetadata(request, url);
+        metadata.proof_id = (match[2] || "").match(/^\/proof\/([0-9a-f]{32})(?:\/|$)/)?.[1] || null;
+        if (env.SNARE_DB) {
+          await processAlert(match[1], metadata, env, ctx);
+        } else {
+          // Legacy self-hosting mode remains explicitly best effort.
+          ctx.waitUntil(processAlert(match[1], metadata, env, ctx).catch(() =>
+            console.error("ALERT_ERROR token=***")));
+        }
+        return gif();
+      }
+      return new Response("not found", { status: 404 });
+    } catch (error) {
+      if (error instanceof PolicyError) {
+        const response = json({ error: error.message, code: error.code }, error.status);
+        if (error.retryAfter) response.headers.set("retry-after", String(error.retryAfter));
+        return response;
+      }
+      console.error("REQUEST_STORAGE_UNAVAILABLE");
+      return json({ error: "service temporarily unavailable" }, 503);
     }
-
-    if (url.pathname === "/api/devices" && request.method === "POST") {
-      return handleCreateDevice(request, env);
-    }
-
-    if (url.pathname === "/api/register" && request.method === "POST") {
-      return handleRegister(request, env);
-    }
-
-    if (url.pathname === "/api/revoke" && request.method === "POST") {
-      return handleRevoke(request, env);
-    }
-
-    if (url.pathname === "/api/rotate" && request.method === "POST") {
-      return handleRotateSecret(request, env);
-    }
-
-    // Events lookup: GET /api/events/{token}
-    const eventsMatch = url.pathname.match(/^\/api\/events\/([a-zA-Z0-9_-]{8,80})$/);
-    if (eventsMatch && request.method === "GET") {
-      return handleEvents(eventsMatch[1], request, env);
-    }
-
-    // Canary callback: /c/{token} or /c/{token}/anything (for OpenAI /v1 suffix etc.)
-    // NO AUTH — SDKs/tools must hit this unknowingly
-    const match = url.pathname.match(/^\/c\/([a-zA-Z0-9_-]{8,80})(\/.*)?$/);
-    if (match) {
-      // ═══════════════════════════════════════════════════════════════════
-      // PRIVACY CRITICAL PATH
-      //
-      // 1. Extract metadata from HEADERS ONLY — body is never touched
-      // 2. Return the response IMMEDIATELY — before any body is consumed
-      // 3. Process the alert asynchronously via ctx.waitUntil
-      //
-      // The request body may contain real credentials, API keys, prompts,
-      // or other sensitive data. We MUST return before it reaches us.
-      // ═══════════════════════════════════════════════════════════════════
-      const token = match[1];
-      const metadata = extractMetadata(request, url);
-
-      // Process alert asynchronously AFTER response is sent to caller
-      ctx.waitUntil(
-        processAlert(token, metadata, env).catch(err =>
-          console.error(`ALERT_ERROR token=*** err=${err.message}`)
-        )
-      );
-
-      // Return immediately — body is never read
-      return gif();
-    }
-
-    return new Response("not found", { status: 404 });
+  },
+  async queue(batch, env) { await consumeQueue(batch, env, { resolveWebhooks, forwardAlert }); },
+  async scheduled(_controller, env, ctx) {
+    if (!env.SNARE_DB) return;
+    ctx.waitUntil((async () => {
+      await dispatchOutbox(env, { resolveWebhooks, forwardAlert });
+      await new D1Store(env.SNARE_DB).cleanup(Date.now());
+    })());
   },
 };
 
@@ -287,45 +270,28 @@ async function hashSecret(secret) {
 // Validate Authorization: Bearer <device_secret> against stored hash.
 // Returns { ok, deviceId, error } where deviceId is from the request body or header.
 async function validateAuth(request, env, deviceId) {
-  const authHeader = request.headers.get("authorization") || "";
-  const match = authHeader.match(/^Bearer\s+(.+)$/i);
-  if (!match) {
-    return { ok: false, error: "missing Authorization header" };
-  }
-  const secret = match[1];
-
-  if (!deviceId) {
-    return { ok: false, error: "missing device_id" };
-  }
-
-  if (!env.SNARE_KV) {
-    return { ok: false, error: "KV not configured" };
-  }
-
-  const secretHash = await hashSecret(secret);
-
-  const storedRaw = await env.SNARE_KV.get(`device:${deviceId}`);
-  if (!storedRaw) {
-    return { ok: false, error: "unknown device_id" };
-  }
-
-  // Validate secret against stored hash
-  try {
-    const stored = JSON.parse(storedRaw);
-    if (stored.secret_hash !== secretHash) {
-      return { ok: false, error: "invalid device secret" };
-    }
-    return { ok: true, deviceId };
-  } catch {
-    return { ok: false, error: "corrupt device record" };
-  }
+  const match = (request.headers.get("authorization") || "").match(/^Bearer ([\x21-\x7e]{32,256})$/i);
+  if (!match) return { ok: false, error: "missing or invalid Authorization header" };
+  if (typeof deviceId !== "string" || !/^[a-zA-Z0-9_-]{1,80}$/.test(deviceId)) return { ok: false, error: "invalid device_id" };
+  const stored = env.SNARE_DB ? await new D1Store(env.SNARE_DB).getDevice(deviceId)
+    : await readKVRecord(env, `device:${deviceId}`);
+  if (!stored) return { ok: false, error: "unknown device_id" };
+  const hash = await hashSecret(match[1]);
+  // Native verification provides constant-time comparison in both Workers and
+  // Web Crypto test runtimes without comparing secret-bearing JS strings.
+  if (typeof stored.secret_hash !== "string" || !/^[0-9a-f]{64}$/.test(stored.secret_hash)) return { ok: false, error: "corrupt device record" };
+  const bytes = new TextEncoder();
+  const key = await crypto.subtle.importKey("raw", bytes.encode(stored.secret_hash), { name: "HMAC", hash: "SHA-256" }, false, ["sign", "verify"]);
+  const tag = await crypto.subtle.sign("HMAC", key, bytes.encode(stored.secret_hash));
+  if (!await crypto.subtle.verify("HMAC", key, tag, bytes.encode(hash))) return { ok: false, error: "invalid device secret" };
+  return { ok: true, deviceId };
 }
 
 // ─── Metadata extraction (HEADERS ONLY — never touches body) ────────────────
 
 function extractMetadata(request, url) {
   const cf = request.cf || {};
-  return {
+  return sanitizeCallbackMetadata({
     timestamp: new Date().toISOString(),
     ip:        request.headers.get("cf-connecting-ip") || "unknown",
     userAgent: request.headers.get("user-agent") || "",
@@ -345,151 +311,72 @@ function extractMetadata(request, url) {
       amzTarget:     request.headers.get("x-amz-target") || null,
       contentType:   request.headers.get("content-type") || null,
       // Boolean: does this request look like a real AWS SDK call?
-      // AWS4-HMAC-SHA256 is sent by every AWS SDK on every language/version.
+      // This recognizes the signature scheme used by the supported proof.
       hasAwsSig:  (request.headers.get("authorization") || "").startsWith("AWS4-HMAC-SHA256"),
       // Boolean: is this a POST? GCP token_uri exchange is always POST.
       isPost: request.method === "POST",
     },
-  };
+  });
 }
 
-// ─── Alert processing (runs after response is already sent) ─────────────────
+// ─── Event admission and notification scheduling ───────────────────────────
 
-async function processAlert(token, metadata, env) {
-  const ua = metadata.userAgent;
-
-  // Ignore link preview bots
-  if (PREVIEW_BOTS.some(b => ua.includes(b))) return;
-
-  // Resolve registration before any stateful operation. Token prefixes are
-  // attacker-controlled and cannot grant access to rate-limit state, event
-  // storage, or webhook delivery.
-  const { webhooks, meta, registered } = await resolveWebhooks(token, env);
-  if (!registered) {
-    console.log("UNREGISTERED_TOKEN", "token=***", "ip=***");
+async function processAlert(token, metadata, env, ctx) {
+  const registration = await resolveWebhooks(token, env);
+  if (!registration.registered) return;
+  const { webhooks, meta, revision } = registration;
+  const preview = PREVIEW_BOTS.some(bot => metadata.userAgent.includes(bot));
+  const scanner = SCANNER_ORGS.some(org => (metadata.asnOrg || "").toLowerCase().includes(org));
+  const classification = preview ? "preview" : scanner ? "scanner" : shouldFilter(meta.canaryType, metadata) ? "probe" : "activity";
+  let suppression = classification === "activity" ? null : classification;
+  if (!suppression && env.NOTIFICATION_RATE_LIMITER) {
+    const outcome = await env.NOTIFICATION_RATE_LIMITER.limit({ key: `notify:${token}:${metadata.ip}` });
+    if (!outcome || typeof outcome.success !== "boolean") throw new Error("invalid notification limiter result");
+    if (!outcome.success) suppression = "coalesced";
+  }
+  const event = { ...metadata, id: crypto.randomUUID(), token, device_id: meta.deviceId,
+    token_revision: revision, is_test: token.startsWith("snare-test-"), classification,
+    notification_suppressed: suppression };
+  // No body, authorization value, or arbitrary request property is copied.
+  if (env.SNARE_DB) {
+    const messages = suppression ? [] : await Promise.all(webhooks.map(url =>
+      createDeliveryMessage(url, event, meta, { tokenRevision: revision })));
+    const admitted = await new D1Store(env.SNARE_DB).saveEvent(event, messages);
+    if (!admitted) throw new PolicyError(429, "event_admission_limited", "event admission limit reached or registration changed", 60);
+    if (messages.length) ctx.waitUntil(dispatchOutbox(env, { resolveWebhooks, forwardAlert }).catch(() => console.error("DELIVERY_DISPATCH_FAILED")));
     return;
   }
-
-  // Rate limit and deduplicate only registered tokens, preventing random token
-  // probes from consuming KV writes.
-  if (await checkRateLimit(env, `cb:${token}`, 10, 60)) return;
-  if (await isDuplicate(env, token, metadata.ip)) return;
-
-  // Per-type false-positive filtering: drop scanner orgs and requests
-  // that lack expected SDK signatures for high-confidence canary types.
-  if (shouldFilter(meta.canaryType, metadata)) return;
-
-  const isTest = token.startsWith("snare-test-");
-
-  const event = {
-    token,
-    device_id: meta.deviceId || null,
-    is_test:   isTest,
-    timestamp: metadata.timestamp,
-    ip:        metadata.ip,
-    userAgent: metadata.userAgent,
-    method:    metadata.method,
-    path:      metadata.path,
-    country:   metadata.country,
-    city:      metadata.city,
-    asn:       metadata.asn,
-    asnOrg:    metadata.asnOrg,
-    botScore:  metadata.botScore,
-    sdkHints:  metadata.sdkHints,
-    // EXPLICITLY: no body field. This is intentional and must never be added.
-  };
-
-  // Log metadata only — never body content
-  console.log(isTest ? "CANARY_TEST" : "CANARY_FIRED", JSON.stringify({
-    token: "***",
-    is_test: event.is_test,
-    ip: event.ip ? "***" : event.ip,
-    method: event.method,
-    country: event.country,
-    asnOrg: event.asnOrg,
-    userAgent: (event.userAgent || "").slice(0, 100),
-  }));
-
-  // Store event (metadata only)
   if (env.SNARE_KV) {
-    const key = `event:${token}:${Date.now()}:${crypto.randomUUID()}`;
-    await env.SNARE_KV.put(key, JSON.stringify(event), {
-      expirationTtl: 60 * 60 * 24 * 90,
-    });
+    await env.SNARE_KV.put(`event:${token}:${Date.now()}:${event.id}`, JSON.stringify({ ...event, delivery_mode: "best_effort" }),
+      { expirationTtl: 60 * 60 * 24 * 90 });
   }
-
-  const results = await Promise.allSettled(
-    webhooks.map(wh => forwardAlert(wh, event, meta, env))
-  );
-  results.forEach((r, i) => {
-    if (r.status === "rejected") {
-      console.error(`WEBHOOK_FAILED url=*** token=*** err=${r.reason}`);
-    }
-  });
+  if (!suppression) {
+    const results = await Promise.allSettled(webhooks.map(url => forwardAlert(url, event, meta, env)));
+    if (results.some(result => result.status === "rejected")) console.error("WEBHOOK_FAILED url=*** token=***");
+  }
 }
 
 // ─── Events lookup ───────────────────────────────────────────────────────────
 
 async function handleEvents(token, request, env) {
-  if (!env.SNARE_KV) return json({ error: "KV not configured" }, 500);
-
-  // Auth: require device secret
-  // Look up which device owns this token
-  const regRaw = await env.SNARE_KV.get(`webhook:${token}`);
-  let deviceId = null;
-  if (regRaw) {
-    try {
-      const reg = JSON.parse(regRaw);
-      deviceId = reg.device_id;
-    } catch { /* fall through */ }
+  const proofId = new URL(request.url).searchParams.get("proof_id");
+  if (proofId !== null && !/^[0-9a-f]{32}$/.test(proofId)) return json({ error: "invalid proof_id" }, 400);
+  const record = await getTokenRecord(token, env);
+  let legacyEvents;
+  let owner = record?.device_id;
+  if (!owner && !env.SNARE_DB) {
+    legacyEvents = await readLegacyEvents(env, token);
+    const owners = new Set(legacyEvents.map(event => event.device_id).filter(Boolean));
+    if (owners.size === 1) owner = [...owners][0];
   }
-
-  // If the token is no longer registered, fall back to the owner recorded on
-  // the newest stored event so revoked tokens don't become readable by any
-  // random valid device.
-  if (!deviceId) {
-    const list = await env.SNARE_KV.list({ prefix: `event:${token}:`, limit: 20 });
-    for (const key of list.keys) {
-      const raw = await env.SNARE_KV.get(key.name);
-      if (!raw) continue;
-      try {
-        const event = JSON.parse(raw);
-        if (event.device_id) {
-          deviceId = event.device_id;
-          break;
-        }
-      } catch { /* skip corrupt */ }
-    }
-  }
-
-  // Auth required for ALL event reads. The token itself must have a known owner
-  // via active registration or stored event history; otherwise status/events
-  // must not turn an unregistered local canary into a misleading "never fired".
-  if (!deviceId) {
-    return json({ error: "token not registered" }, 401);
-  }
-  const auth = await validateAuth(request, env, deviceId);
-  if (!auth.ok) {
-    return json({ error: auth.error }, 401);
-  }
-
-  const prefix = `event:${token}:`;
-  const list = await env.SNARE_KV.list({ prefix, limit: 20 });
-
-  const events = [];
-  for (const key of list.keys) {
-    const raw = await env.SNARE_KV.get(key.name);
-    if (raw) {
-      try { events.push(JSON.parse(raw)); } catch { /* skip corrupt */ }
-    }
-  }
-
-  if (events.length === 0) {
-    return json({ token, events: [] }, 404);
-  }
-
-  events.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
-  return json({ token, events: events.slice(0, 10) });
+  if (!owner) return json({ error: "token not registered" }, 401);
+  const auth = await validateAuth(request, env, owner);
+  if (!auth.ok) return json({ error: auth.error }, 401);
+  await enforceDeviceRateLimit(env, owner, "events");
+  const events = env.SNARE_DB ? await new D1Store(env.SNARE_DB).getEvents(token, { proofId })
+    : (legacyEvents || await readLegacyEvents(env, token)).filter(event => event.device_id === owner && (proofId === null || event.proof_id === proofId)).slice(0, 10);
+  if (record?.revoked && proofId === null && events.length === 0) return json({ error: "token not registered" }, 401);
+  return json({ token, count: events.length, events, storage: env.SNARE_DB ? "d1" : "kv" });
 }
 
 // ─── Device creation ────────────────────────────────────────────────────────
@@ -497,114 +384,68 @@ async function handleEvents(token, request, env) {
 // POST /api/devices — server mints a device_id, client sends only its secret.
 // This prevents squatting on device IDs.
 async function handleCreateDevice(request, env) {
-  let body;
-  try { body = await request.json(); }
-  catch { return json({ error: "invalid JSON" }, 400); }
-
-  const { device_secret } = body;
-  if (!device_secret || typeof device_secret !== "string" || device_secret.length < 32) {
-    return json({ error: "device_secret required (min 32 chars)" }, 400);
-  }
-  if (!env.SNARE_KV) return json({ error: "KV not configured" }, 500);
-
-  // Server-minted device ID — client cannot predict or squat it
-  const randomBytes = crypto.getRandomValues(new Uint8Array(16));
-  const deviceId = "dev-" + Array.from(randomBytes).map(b => b.toString(16).padStart(2, "0")).join("");
-
+  await authorizeEnrollment(request, env);
+  const { device_secret } = validateManagementBody("devices", await readManagementJSON(request));
+  const deviceId = `dev-${crypto.randomUUID().replaceAll("-", "")}`;
   const secretHash = await hashSecret(device_secret);
-  await env.SNARE_KV.put(`device:${deviceId}`, JSON.stringify({
-    secret_hash: secretHash,
-    created_at: new Date().toISOString(),
-  }));
-
+  if (env.SNARE_DB) {
+    if (!await new D1Store(env.SNARE_DB).createDevice(deviceId, secretHash)) return json({ error: "device capacity reached" }, 429);
+  } else {
+    if (!env.SNARE_KV) return json({ error: "storage not configured" }, 503);
+    await env.SNARE_KV.put(`device:${deviceId}`, JSON.stringify({ secret_hash: secretHash, created_at: new Date().toISOString() }));
+  }
   return json({ status: "created", device_id: deviceId });
 }
 
 // ─── Registration ───────────────────────────────────────────────────────────
 
 async function handleRegister(request, env) {
-  let body;
-  try { body = await request.json(); }
-  catch { return json({ error: "invalid JSON" }, 400); }
-
-  const { token_id, webhook_url, device_id, canary_type, label } = body;
-
-  if (!token_id?.match(/^[a-zA-Z0-9_-]{8,80}$/)) {
-    return json({ error: "invalid token_id" }, 400);
-  }
-  // "use-global" sentinel binds token ownership without a per-token webhook;
-  // delivery routes through the global WEBHOOK_URLS CF secret.
-  if (webhook_url !== "use-global") {
-    if (!webhook_url?.startsWith("https://")) {
-      return json({ error: "webhook_url must be https:// or 'use-global'" }, 400);
-    }
-    if (!isAllowedWebhookURL(webhook_url, env)) {
-      return json({ error: "webhook_url domain not allowed — must be Discord, Slack, Telegram, PagerDuty, Teams, or 'use-global'" }, 403);
-    }
-  }
-  if (!device_id) {
-    return json({ error: "missing device_id" }, 400);
-  }
-  if (!env.SNARE_KV) {
-    return json({ error: "KV not configured" }, 500);
-  }
-
-  // Validate device auth
+  const body = validateManagementBody("register", await readManagementJSON(request));
+  const { token_id, webhook_url, device_id } = body;
   const auth = await validateAuth(request, env, device_id);
-  if (!auth.ok) {
-    return json({ error: auth.error }, 401);
+  if (!auth.ok) return json({ error: auth.error }, 401);
+  await enforceDeviceRateLimit(env, device_id, "register");
+  const existing = await getTokenRecord(token_id, env);
+  if (existing && existing.device_id !== device_id) return json({ error: "token belongs to another device" }, 403);
+  if (webhook_url === "use-global") {
+    // Preserve existing operator-approved routes; a new token needs an explicit
+    // device allowlist entry, even when enrollment itself is public.
+    const previousGlobal = existing?.device_id === device_id && existing.webhook_url === "use-global";
+    if (!previousGlobal && !authorizeGlobalWebhook(device_id, env)) return json({ error: "global webhook access is not authorized" }, 403);
+  } else if (!isAllowedWebhookURL(webhook_url, env)) return json({ error: "webhook_url domain not allowed" }, 403);
+  const changed = !existing || existing.revoked || existing.webhook_url !== webhook_url ||
+    existing.canary_type !== body.canary_type || existing.label !== body.label;
+  const record = { ...body, registered_at: new Date().toISOString(), revoked: false,
+    revision: (existing?.revision || 1) + (existing && changed ? 1 : 0) };
+  if (env.SNARE_DB) {
+    const result = await new D1Store(env.SNARE_DB).registerToken(token_id, record);
+    if (result !== "registered") return json({ error: result === "owner_mismatch" ? "token belongs to another device" : "token capacity reached" }, result === "owner_mismatch" ? 403 : 429);
+  } else {
+    if (!env.SNARE_KV) return json({ error: "storage not configured" }, 503);
+    const history = existing ? [] : await readLegacyEvents(env, token_id);
+    if (history.some(event => !event.device_id || event.device_id !== device_id)) return json({ error: "token history belongs to another device" }, 403);
+    // Immutable tombstone in legacy mode. KV cannot serialize concurrent first
+    // claims; managed deployments requiring atomic claims must enable D1.
+    await env.SNARE_KV.put(`owner:${token_id}`, JSON.stringify({ device_id }));
+    await env.SNARE_KV.put(`webhook:${token_id}`, JSON.stringify(record));
   }
-
-  // Check if this token is already registered to a DIFFERENT device
-  const existingRaw = await env.SNARE_KV.get(`webhook:${token_id}`);
-  if (existingRaw) {
-    try {
-      const existing = JSON.parse(existingRaw);
-      if (existing.device_id && existing.device_id !== device_id) {
-        return json({ error: "token already registered to another device" }, 403);
-      }
-    } catch { /* corrupt entry — allow overwrite */ }
-  }
-
-  await env.SNARE_KV.put(`webhook:${token_id}`, JSON.stringify({
-    webhook_url,
-    device_id:     device_id   || null,
-    canary_type:   canary_type || null,
-    label:         label       || null,
-    registered_at: new Date().toISOString(),
-  }), { expirationTtl: 60 * 60 * 24 * 365 }); // 1 year TTL
-
   return json({ status: "registered", token_id });
 }
 
 async function handleRevoke(request, env) {
-  let body;
-  try { body = await request.json(); }
-  catch { return json({ error: "invalid JSON" }, 400); }
-
-  if (!body.token_id) return json({ error: "missing token_id" }, 400);
-  if (!body.device_id) return json({ error: "missing device_id" }, 400);
-  if (!env.SNARE_KV)  return json({ error: "KV not configured" }, 500);
-
-  // Validate: only the device that registered can revoke
-  const regRaw = await env.SNARE_KV.get(`webhook:${body.token_id}`);
-  if (regRaw) {
-    try {
-      const reg = JSON.parse(regRaw);
-      if (reg.device_id && reg.device_id !== body.device_id) {
-        return json({ error: "device_id mismatch — only the registering device can revoke" }, 403);
-      }
-    } catch { /* fall through */ }
+  const { token_id, device_id } = validateManagementBody("revoke", await readManagementJSON(request));
+  const auth = await validateAuth(request, env, device_id);
+  if (!auth.ok) return json({ error: auth.error }, 401);
+  await enforceDeviceRateLimit(env, device_id, "revoke");
+  const record = await getTokenRecord(token_id, env);
+  if (record && record.device_id !== device_id) return json({ error: "token belongs to another device" }, 403);
+  if (env.SNARE_DB) {
+    if (record && !await new D1Store(env.SNARE_DB).revokeToken(token_id, device_id)) return json({ error: "token belongs to another device" }, 403);
+  } else if (record) {
+    await env.SNARE_KV.put(`owner:${token_id}`, JSON.stringify({ device_id }));
+    await env.SNARE_KV.put(`webhook:${token_id}`, JSON.stringify({ ...record, revoked: true, revision: (record.revision || 0) + 1 }));
   }
-
-  // Validate device auth
-  const auth = await validateAuth(request, env, body.device_id);
-  if (!auth.ok) {
-    return json({ error: auth.error }, 401);
-  }
-
-  await env.SNARE_KV.delete(`webhook:${body.token_id}`);
-  return json({ status: "revoked", token_id: body.token_id });
+  return json({ status: "revoked", token_id });
 }
 
 // ─── Device secret rotation ──────────────────────────────────────────────────
@@ -612,75 +453,73 @@ async function handleRevoke(request, env) {
 // POST /api/rotate — update device secret hash for an existing device.
 // Requires: old secret for auth (proves ownership), new secret in body.
 async function handleRotateSecret(request, env) {
-  let body;
-  try { body = await request.json(); }
-  catch { return json({ error: "invalid JSON" }, 400); }
-
-  const { device_id, new_secret } = body;
-  if (!device_id)   return json({ error: "missing device_id" }, 400);
-  if (!new_secret)  return json({ error: "missing new_secret" }, 400);
-  if (new_secret.length < 32) return json({ error: "new_secret too short (min 32 chars)" }, 400);
-  if (!env.SNARE_KV) return json({ error: "KV not configured" }, 500);
-
-  // Auth with current secret (Authorization header)
+  const { device_id, new_secret } = validateManagementBody("rotate", await readManagementJSON(request));
   const auth = await validateAuth(request, env, device_id);
   if (!auth.ok) return json({ error: auth.error }, 401);
-
-  // Hash the new secret and update device record
-  const encoder = new TextEncoder();
-  const keyData = encoder.encode(new_secret);
-  const hashBuf = await crypto.subtle.digest("SHA-256", keyData);
-  const newHash = Array.from(new Uint8Array(hashBuf)).map(b => b.toString(16).padStart(2, "0")).join("");
-
-  const deviceRaw = await env.SNARE_KV.get(`device:${device_id}`);
-  let deviceRecord = {};
-  try { deviceRecord = JSON.parse(deviceRaw || "{}"); } catch { /**/ }
-
-  deviceRecord.secret_hash = newHash;
-  deviceRecord.rotated_at = new Date().toISOString();
-
-  await env.SNARE_KV.put(`device:${device_id}`, JSON.stringify(deviceRecord));
-
+  await enforceDeviceRateLimit(env, device_id, "rotate");
+  const secret_hash = await hashSecret(new_secret);
+  if (env.SNARE_DB) await new D1Store(env.SNARE_DB).rotateDevice(device_id, secret_hash);
+  else {
+    const record = await readKVRecord(env, `device:${device_id}`);
+    await env.SNARE_KV.put(`device:${device_id}`, JSON.stringify({ ...record, secret_hash, rotated_at: new Date().toISOString() }));
+  }
   return json({ status: "rotated", device_id });
 }
 
 // ─── Webhook resolution ─────────────────────────────────────────────────────
 
 async function resolveWebhooks(token, env) {
-  let meta = {};
-  let perTokenWebhook = null;
-  let registered = false;
+  const record = await getTokenRecord(token, env);
+  if (!record || record.revoked || !record.device_id) return { webhooks: [], meta: {}, registered: false };
+  const meta = { canaryType: record.canary_type, label: record.label, deviceId: record.device_id };
+  const destinations = isAllowedWebhookURL(record.webhook_url, env) ? [record.webhook_url]
+    : (record.webhook_url === "use-global" ? (env.WEBHOOK_URLS || "").split(",") : []);
+  const webhooks = [...new Set(destinations.map(url => url.trim()).filter(url => isAllowedWebhookURL(url, env)))].slice(0, 3);
+  return { webhooks, meta, registered: true, revision: record.revision || 1 };
+}
 
-  // Always try to load registration metadata (type, label, device)
-  if (env.SNARE_KV) {
-    const raw = await env.SNARE_KV.get(`webhook:${token}`);
-    if (raw) {
-      try {
-        const reg = JSON.parse(raw);
-        registered = true;
-        meta = { canaryType: reg.canary_type, label: reg.label, deviceId: reg.device_id };
-        // Revalidate stored records so legacy or manually edited KV entries
-        // cannot bypass the current outbound destination policy.
-        if (reg.webhook_url && isAllowedWebhookURL(reg.webhook_url, env)) {
-          perTokenWebhook = reg.webhook_url;
-        }
-      } catch { /* fall through */ }
+async function readKVRecord(env, key) {
+  if (!env.SNARE_KV) return null;
+  const raw = await env.SNARE_KV.get(key);
+  if (raw === null || raw === undefined) return null;
+  try { return JSON.parse(raw); } catch { throw new Error("invalid stored record"); }
+}
+
+async function getTokenRecord(token, env) {
+  if (env.SNARE_DB) return new D1Store(env.SNARE_DB).getToken(token);
+  const record = await readKVRecord(env, `webhook:${token}`);
+  const owner = await readKVRecord(env, `owner:${token}`);
+  if (owner && record && owner.device_id !== record.device_id) throw new Error("ownership conflict");
+  return record || (owner ? { ...owner, revoked: true } : null);
+}
+
+async function readLegacyEvents(env, token) {
+  if (!env.SNARE_KV?.list) return [];
+  const events = [];
+  let keysRead = 0;
+  let cursor;
+  // Compatibility path only: paginate before sorting, never call the oldest
+  // first page 'recent'. D1 provides the indexed path for larger histories.
+  for (let page = 0; page < 10; page++) {
+    const result = await env.SNARE_KV.list({ prefix: `event:${token}:`, limit: 1000, ...(cursor ? { cursor } : {}) });
+    if (keysRead + result.keys.length > 900) {
+      throw new PolicyError(503, "history_migration_required", "history requires indexed storage migration");
     }
+    keysRead += result.keys.length;
+    for (const key of result.keys) {
+      const event = await readKVRecord(env, key.name);
+      if (event) events.push({ ...event, id: event.id || key.name.split(":").at(-1) });
+    }
+    if (result.list_complete !== false) return events.sort((a, b) => b.timestamp.localeCompare(a.timestamp) || b.id.localeCompare(a.id));
+    if (!result.cursor || result.cursor === cursor) break;
+    cursor = result.cursor;
   }
-
-  // Per-token webhook takes priority; otherwise fall back to global
-  const webhooks = (perTokenWebhook
-    ? [perTokenWebhook]
-    : (env.WEBHOOK_URLS || "").split(","))
-    .map(url => url.trim())
-    .filter(url => isAllowedWebhookURL(url, env));
-
-  return { webhooks, meta, registered };
+  throw new PolicyError(503, "history_migration_required", "history requires indexed storage migration");
 }
 
 // ─── Alert formatting ────────────────────────────────────────────────────────
 
-async function forwardAlert(webhookURL, event, meta = {}, env = {}) {
+async function forwardAlert(webhookURL, event, meta = {}, env = {}, { deliveryId } = {}) {
   // Validate again at the network boundary. Resolution may have happened
   // earlier, and callers or legacy records must not be able to bypass policy.
   const parsedWebhookURL = parseAllowedWebhookURL(webhookURL, env);
@@ -710,6 +549,9 @@ async function forwardAlert(webhookURL, event, meta = {}, env = {}) {
     "user-agent": "snare.sh/1.0",
   };
 
+  if (deliveryId) headers["x-snare-delivery-id"] = deliveryId;
+  if (event.id) headers["x-snare-event-id"] = event.id;
+
   // Sign outbound webhook payload so receivers can verify it came from snare.sh
   // Signature: HMAC-SHA256(payload, WEBHOOK_SIGNING_SECRET) encoded as hex
   // Receivers check: X-Snare-Signature header
@@ -725,8 +567,8 @@ async function forwardAlert(webhookURL, event, meta = {}, env = {}) {
       const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(body));
       headers["x-snare-signature"] = "sha256=" + Array.from(new Uint8Array(sig))
         .map(b => b.toString(16).padStart(2, "0")).join("");
-    } catch (e) {
-      console.error("SIGN_ERROR", e.message);
+    } catch {
+      throw new Error("webhook signing unavailable");
     }
   }
 
@@ -737,10 +579,19 @@ async function forwardAlert(webhookURL, event, meta = {}, env = {}) {
     headers,
     body,
     redirect: "manual",
+    signal: AbortSignal.timeout(5000),
   });
   if (response.status < 200 || response.status >= 300) {
-    throw new Error(`webhook returned ${response.status}`);
+    const error = new Error(`webhook returned ${response.status}`);
+    error.status = response.status;
+    const retryAfter = response.headers.get("retry-after");
+    error.retryAfter = retryAfter && /^\d+$/.test(retryAfter) ? Math.min(3600, Number(retryAfter)) : undefined;
+    await response.body?.cancel();
+    throw error;
   }
+  // No response body is needed; release the connection even if a destination
+  // streams indefinitely after sending successful headers.
+  await response.body?.cancel();
   return response;
 }
 
@@ -776,7 +627,7 @@ function buildDiscordPayload(event, meta, type, fromCloud) {
 
   if (fromCloud && !isTest) {
     fields.push({
-      name:   "⚠️ Likely AI agent",
+      name:   "Cloud infrastructure",
       value:  `Request originated from **${event.asnOrg}** — cloud infrastructure`,
       inline: false,
     });
@@ -838,6 +689,10 @@ function buildSlackPayload(event, meta, type, fromCloud) {
   };
 }
 
+function escapeHTML(value) {
+  return String(value).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+}
+
 function buildTelegramPayload(event, meta, type, fromCloud) {
   const isTest   = event.is_test;
   const location = [event.city, event.country].filter(Boolean).join(", ") || "unknown";
@@ -847,7 +702,7 @@ function buildTelegramPayload(event, meta, type, fromCloud) {
   if (isTest) {
     title = `🧪 <b>Test alert — ${type.name}</b>`;
   } else if (meta.label) {
-    title = `${type.emoji} <b>${type.name} canary fired — ${meta.label}</b>`;
+    title = `${type.emoji} <b>${type.name} canary fired — ${escapeHTML(meta.label)}</b>`;
   } else {
     title = `${type.emoji} <b>${type.name} canary fired</b>`;
   }
@@ -855,17 +710,17 @@ function buildTelegramPayload(event, meta, type, fromCloud) {
   const lines = [
     title,
     "",
-    `<b>Token:</b> <code>${event.token}</code>`,
-    `<b>Time:</b> ${event.timestamp.replace("T", " ").replace(/\.\d+Z$/, " UTC")}`,
-    `<b>IP:</b> ${event.ip || "unknown"}`,
-    `<b>Location:</b> ${location}`,
-    `<b>Network:</b> ${network}`,
-    `<b>Method:</b> ${event.method}`,
-    `<b>UA:</b> <code>${(event.userAgent || "unknown").slice(0, 100)}</code>`,
+    `<b>Token:</b> <code>${escapeHTML(event.token)}</code>`,
+    `<b>Time:</b> ${escapeHTML(event.timestamp.replace("T", " ").replace(/\.\d+Z$/, " UTC"))}`,
+    `<b>IP:</b> ${escapeHTML(event.ip || "unknown")}`,
+    `<b>Location:</b> ${escapeHTML(location)}`,
+    `<b>Network:</b> ${escapeHTML(network)}`,
+    `<b>Method:</b> ${escapeHTML(event.method)}`,
+    `<b>UA:</b> <code>${escapeHTML((event.userAgent || "unknown").slice(0, 100))}</code>`,
   ];
 
   if (fromCloud && !isTest) {
-    lines.push("", `⚠️ <b>Likely AI agent</b> — request from cloud infrastructure`);
+    lines.push("", `<b>Cloud infrastructure</b> — actor identity is unknown`);
   }
 
   lines.push("", "<i>Request body was never captured</i>");
@@ -876,6 +731,9 @@ function buildTelegramPayload(event, meta, type, fromCloud) {
 function buildGenericPayload(event, meta, type, fromCloud) {
   return {
     event:       "canary.fired",
+    id:          event.id || null,
+    proof_id:    event.proof_id || null,
+    classification: event.classification || "activity",
     is_test:     event.is_test,
     token:       event.token,
     canary_type: meta.canaryType || null,
@@ -906,33 +764,7 @@ function buildGenericPayload(event, meta, type, fromCloud) {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-// Rate limiter using KV.
-// Note: KV is eventually consistent — this is a best-effort rate limit.
-// It will not prevent every concurrent burst but stops sustained abuse.
-// For strict atomicity, migrate to Durable Objects (v2 milestone).
-async function checkRateLimit(env, key, maxRequests, windowSeconds) {
-  if (!env.SNARE_KV) return false;
-  const bucket = `rl:${key}:${Math.floor(Date.now() / (windowSeconds * 1000))}`;
-  // Write-then-read: write optimistically, then check the count
-  // This doesn't fully prevent races but reduces the window significantly
-  const current = parseInt(await env.SNARE_KV.get(bucket) || "0", 10);
-  if (current >= maxRequests) return true;
-  // Increment — may race under high concurrency but worst case is minor overshoot
-  await env.SNARE_KV.put(bucket, String(current + 1), { expirationTtl: windowSeconds * 2 });
-  return false;
-}
 
-// Dedup: prevent duplicate alerts for same token+IP within the window.
-// KV is eventually consistent — duplicate events are possible under race.
-// The 60-second window significantly reduces duplicate noise in practice.
-// Strict dedup requires Durable Objects (v2 milestone).
-async function isDuplicate(env, token, ip) {
-  if (!env.SNARE_KV) return false;
-  const key = `dedup:${token}:${ip}:${Math.floor(Date.now() / 60000)}`;
-  if (await env.SNARE_KV.get(key)) return true;
-  await env.SNARE_KV.put(key, "1", { expirationTtl: 120 });
-  return false;
-}
 
 function gif() {
   // 1x1 transparent GIF — smallest valid response
