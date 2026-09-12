@@ -76,6 +76,10 @@ jobs:
         working-directory: worker
         run: npm run cf:check
 
+      - name: Validate D1 example deployment bundle
+        working-directory: worker
+        run: npx wrangler deploy --dry-run --config wrangler.d1.example.jsonc
+
       - name: Docker Compose smoke test
         run: |
           export SNARE_DASHBOARD_TOKEN=0123456789abcdef0123456789abcdef

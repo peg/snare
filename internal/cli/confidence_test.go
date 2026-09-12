@@ -23,6 +23,8 @@ type fakeTokenReg struct {
 }
 
 type fakeEvent struct {
+	ID        string `json:"id"`
+	ProofID   string `json:"proof_id,omitempty"`
 	Token     string `json:"token"`
 	IsTest    bool   `json:"is_test"`
 	Timestamp string `json:"timestamp"`
@@ -211,6 +213,18 @@ func (f *fakeSnareAPI) handleEvents(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid device secret"})
 		return
 	}
+	if proofID := r.URL.Query().Get("proof_id"); proofID != "" {
+		filtered := events[:0]
+		for _, event := range events {
+			if event.ProofID == proofID {
+				filtered = append(filtered, event)
+			}
+		}
+		events = filtered
+	}
+	if len(events) > 10 {
+		events = events[:10]
+	}
 	if len(events) == 0 {
 		writeJSON(w, http.StatusNotFound, map[string]interface{}{"token": tokenID, "events": []fakeEvent{}})
 		return
@@ -237,8 +251,12 @@ func (f *fakeSnareAPI) handleCallback(w http.ResponseWriter, r *http.Request) {
 		Method:    r.Method,
 		Path:      r.URL.Path,
 	}
+	if suffix := strings.TrimPrefix(r.URL.Path, "/c/"+token+"/proof/"); suffix != r.URL.Path {
+		e.ProofID = strings.SplitN(suffix, "/", 2)[0]
+	}
 
 	f.mu.Lock()
+	e.ID = fmt.Sprintf("%d", len(f.events[token])+1)
 	f.events[token] = append([]fakeEvent{e}, f.events[token]...)
 	f.mu.Unlock()
 
@@ -863,7 +881,7 @@ Host proof-run-bastion
 	logPath := filepath.Join(home, "proof-bin.log")
 	writeExecutable(t, filepath.Join(binDir, "aws"), fmt.Sprintf(`#!/bin/sh
 echo "aws AWS_CONFIG_FILE=$AWS_CONFIG_FILE $*" >> %s
-url=$(grep -m1 -o 'http://[^"'"'"' ]*/c/%s' "$AWS_CONFIG_FILE")
+url=$(grep -m1 -o 'http://[^"'"'"' ]*/c/%s[^"'"'"' ]*' "$AWS_CONFIG_FILE")
 [ -n "$url" ] && curl -sf "$url" >/dev/null 2>&1
 exit 1
 `, shellQuoteForShellScript(logPath), awsToken))
@@ -874,7 +892,7 @@ while [ "$#" -gt 0 ]; do
   if [ "$1" = "-F" ]; then config="$2"; shift 2; continue; fi
   shift
 done
-url=$(grep -m1 -o 'http://[^ ]*/c/%s' "$config")
+url=$(grep -m1 -o 'http://[^ ]*/c/%s[^ ]*' "$config")
 [ -n "$url" ] && curl -sf "$url" >/dev/null 2>&1
 exit 1
 `, shellQuoteForShellScript(logPath), sshToken))
@@ -888,7 +906,7 @@ while [ "$#" -gt 0 ]; do
     *) shift ;;
   esac
 done
-url=$(grep -m1 -o 'http://[^ ]*/c/%s' "$config")
+url=$(grep -m1 -o 'http://[^ ]*/c/%s[^ ]*' "$config")
 [ -n "$url" ] && curl -sf "$url" >/dev/null 2>&1
 exit 1
 `, shellQuoteForShellScript(logPath), k8sToken))
@@ -922,12 +940,22 @@ exit 1
 	}
 	logText := string(logData)
 	for _, want := range []string{
-		"AWS_CONFIG_FILE=" + awsPath,
-		"ssh -F " + sshPath,
-		"kubectl --kubeconfig " + kubePath,
+		"AWS_CONFIG_FILE=",
+		"ssh -F ",
+		"kubectl --kubeconfig ",
+		"snare-proof-",
 	} {
 		if !strings.Contains(logText, want) {
 			t.Fatalf("fake binary log missing %q:\n%s", want, logText)
+		}
+	}
+	for path, content := range map[string]string{awsPath: awsContent, sshPath: sshContent, kubePath: k8sContent} {
+		data, err := os.ReadFile(path)
+		if err != nil || string(data) != content {
+			t.Fatalf("proof changed original file %s: %v", path, err)
+		}
+		if strings.Contains(logText, path) {
+			t.Fatalf("proof should execute an isolated copy, got original path in %s", logText)
 		}
 	}
 }

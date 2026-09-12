@@ -309,6 +309,32 @@ describe("webhook destination policy", () => {
   });
 });
 
+describe("outbound failure and formatting boundaries", () => {
+  it("never sends an unsigned request when configured signing fails", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("crypto", { subtle: { importKey: vi.fn().mockRejectedValue(new Error("private failure")) } });
+    await expect(forwardAlert("https://hooks.slack.com/services/a/b/c",
+      { timestamp: "2026-09-11T00:00:00Z" }, {}, { WEBHOOK_SIGNING_SECRET: "configured-secret" }))
+      .rejects.toThrow("webhook signing unavailable");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("escapes callback text in Telegram HTML", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await forwardAlert("https://api.telegram.org/bot-example/sendMessage?chat_id=123",
+      { token: "token-123", timestamp: "2026-09-11T00:00:00Z", method: "GET",
+        userAgent: "<broken & input>", city: "A&B", ip: "203.0.113.1" },
+      { label: "<production>" });
+    const payload = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(payload.text).toContain("&lt;broken &amp; input&gt;");
+    expect(payload.text).toContain("&lt;production&gt;");
+    expect(payload.text).toContain("A&amp;B");
+    expect(payload.text).not.toContain("<broken");
+  });
+});
+
 // ─── resolveWebhooks ─────────────────────────────────────────────────────────
 
 describe("validateAuth", () => {
@@ -486,7 +512,7 @@ describe("resolveWebhooks", () => {
     ]);
   });
 
-  it("rejects an invalid legacy per-token URL and uses valid global URLs", async () => {
+  it("does not fall back to operator webhooks for an invalid legacy per-token URL", async () => {
     const mockKV = {
       get: async () => JSON.stringify({
         webhook_url: "https://hooks.slack.com.attacker.example/services/a/b/c",
@@ -504,7 +530,7 @@ describe("resolveWebhooks", () => {
     });
 
     expect(result.registered).toBe(true);
-    expect(result.webhooks).toEqual(["https://hooks.slack.com/services/a/b/c"]);
+    expect(result.webhooks).toEqual([]);
   });
 
   it("returns empty webhooks when no KV is configured", async () => {

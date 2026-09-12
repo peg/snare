@@ -117,6 +117,8 @@ jobs:
           done
 
       - name: Run staging lifecycle smoke test
+        env:
+          SNARE_ENROLLMENT_TOKEN: ${{ secrets.SNARE_ENROLLMENT_TOKEN }}
         run: worker/scripts/smoke-staging.sh https://staging.snare.sh
 
       - name: Summarize staging deployment
