@@ -1,11 +1,30 @@
 package serve
 
 import (
+	"errors"
 	"log"
 	"net/http"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
+
+var proofIDPattern = regexp.MustCompile(`^[a-f0-9]{32}$`)
+
+// A proof identifier correlates one intentional callback; it grants no rights
+// and does not change test classification or notification behavior.
+func callbackProofID(token, path string) string {
+	prefix := "/c/" + token + "/proof/"
+	if !strings.HasPrefix(path, prefix) {
+		return ""
+	}
+	id := strings.SplitN(strings.TrimPrefix(path, prefix), "/", 2)[0]
+	if !proofIDPattern.MatchString(id) {
+		return ""
+	}
+	return id
+}
 
 // ─── GET /health ─────────────────────────────────────────────────────────────
 
@@ -73,6 +92,7 @@ func (s *Server) processAlert(token, ip, ua, method, path, timestamp string, isT
 
 	e := event{
 		TokenID:   token,
+		ProofID:   callbackProofID(token, path),
 		DeviceID:  "",
 		IsTest:    isTest,
 		Timestamp: timestamp,
@@ -204,17 +224,6 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check if token is already owned by a different device
-	existing, err := s.db.getToken(body.TokenID)
-	if err != nil {
-		jsonResp(w, http.StatusInternalServerError, map[string]string{"error": "db error"})
-		return
-	}
-	if existing != nil && existing.DeviceID != body.DeviceID {
-		jsonResp(w, http.StatusForbidden, map[string]string{"error": "token already registered to another device"})
-		return
-	}
-
 	if err := s.db.upsertToken(tokenReg{
 		TokenID:      body.TokenID,
 		DeviceID:     body.DeviceID,
@@ -223,6 +232,10 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		Label:        body.Label,
 		RegisteredAt: time.Now().UTC().Format(time.RFC3339),
 	}); err != nil {
+		if errors.Is(err, errTokenOwned) {
+			jsonResp(w, http.StatusForbidden, map[string]string{"error": "token already owned or reserved"})
+			return
+		}
 		jsonResp(w, http.StatusInternalServerError, map[string]string{"error": "db error"})
 		log.Printf("upsertToken: %v", err)
 		return
@@ -270,18 +283,11 @@ func (s *Server) handleRevoke(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Ownership check
-	existing, err := s.db.getToken(body.TokenID)
-	if err != nil {
-		jsonResp(w, http.StatusInternalServerError, map[string]string{"error": "db error"})
-		return
-	}
-	if existing != nil && existing.DeviceID != body.DeviceID {
-		jsonResp(w, http.StatusForbidden, map[string]string{"error": "device_id mismatch — only the registering device can revoke"})
-		return
-	}
-
-	if err := s.db.deleteToken(body.TokenID); err != nil {
+	if err := s.db.revokeToken(body.TokenID, body.DeviceID); err != nil {
+		if errors.Is(err, errTokenOwned) {
+			jsonResp(w, http.StatusForbidden, map[string]string{"error": "device_id mismatch — only the owner can revoke"})
+			return
+		}
 		jsonResp(w, http.StatusInternalServerError, map[string]string{"error": "db error"})
 		return
 	}
@@ -358,27 +364,20 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Determine device that owns this token
-	reg, err := s.db.getToken(tokenID)
+	proofID := r.URL.Query().Get("proof_id")
+	if proofID != "" && !proofIDPattern.MatchString(proofID) {
+		jsonResp(w, http.StatusBadRequest, map[string]string{"error": "invalid proof_id"})
+		return
+	}
+
+	// Ownership survives revocation and is never inferred from a caller header
+	// or the current delivery registration.
+	deviceID, err := s.db.tokenOwner(tokenID)
 	if err != nil {
 		jsonResp(w, http.StatusInternalServerError, map[string]string{"error": "db error"})
 		return
 	}
 
-	// Auth is required. Device ID comes from token registration or stored event
-	// ownership. Header-only fallback would make unregistered local canaries look
-	// like registered-but-quiet canaries in `snare status`.
-	deviceID := ""
-	if reg != nil {
-		deviceID = reg.DeviceID
-	}
-	if deviceID == "" {
-		deviceID, err = s.db.latestEventDeviceID(tokenID)
-		if err != nil {
-			jsonResp(w, http.StatusInternalServerError, map[string]string{"error": "db error"})
-			return
-		}
-	}
 	if deviceID == "" {
 		jsonResp(w, http.StatusUnauthorized, map[string]string{"error": "token not registered"})
 		return
@@ -390,19 +389,33 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	events, err := s.db.getEvents(tokenID)
+	events, err := s.db.getProofEvents(tokenID, proofID)
 	if err != nil {
 		jsonResp(w, http.StatusInternalServerError, map[string]string{"error": "db error"})
 		return
 	}
 
 	if len(events) == 0 {
+		if proofID == "" {
+			reg, err := s.db.getToken(tokenID)
+			if err != nil {
+				jsonResp(w, http.StatusInternalServerError, map[string]string{"error": "db error"})
+				return
+			}
+			if reg == nil {
+				// A retained owner alone does not mean detection is registered.
+				jsonResp(w, http.StatusUnauthorized, map[string]string{"error": "token not registered"})
+				return
+			}
+		}
 		jsonResp(w, http.StatusNotFound, map[string]interface{}{"token": tokenID, "events": []struct{}{}})
 		return
 	}
 
 	// Serialise in the same shape as the Cloudflare Worker response.
 	type eventOut struct {
+		ID        string `json:"id"`
+		ProofID   string `json:"proof_id,omitempty"`
 		Token     string `json:"token"`
 		IsTest    bool   `json:"is_test"`
 		Timestamp string `json:"timestamp"`
@@ -418,6 +431,8 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	out := make([]eventOut, len(events))
 	for i, e := range events {
 		out[i] = eventOut{
+			ID:        strconv.FormatInt(e.ID, 10),
+			ProofID:   e.ProofID,
 			Token:     e.TokenID,
 			IsTest:    e.IsTest,
 			Timestamp: e.Timestamp,

@@ -19,6 +19,8 @@ import (
 )
 
 type apiEvent struct {
+	ID        string `json:"id"`
+	ProofID   string `json:"proof_id"`
 	Timestamp string `json:"timestamp"`
 	IsTest    bool   `json:"is_test"`
 }
@@ -92,6 +94,9 @@ type proofReportEntry struct {
 	EventVisibility string `json:"event_visibility"`
 	ObservedAt      string `json:"observed_at,omitempty"`
 	ObservedAfterMS int64  `json:"observed_after_ms,omitempty"`
+	ProofID         string `json:"proof_id,omitempty"`
+	EventID         string `json:"event_id,omitempty"`
+	ExecutionMode   string `json:"execution_mode,omitempty"`
 	Error           string `json:"error,omitempty"`
 	NextCommand     string `json:"next_command"`
 }
@@ -596,13 +601,26 @@ With --redact:
 			continue
 		}
 
-		baseline := countEventsByKind(before.Events, false)
+		correlated, proofID, cleanup, err := prepareCorrelatedProof(cfg, recipe)
+		if err != nil {
+			msg := fmt.Sprintf("cannot prepare proof: %v", err)
+			report.Proofs[i].Status = "failed"
+			report.Proofs[i].Error = msg
+			report.Proofs[i].EventVisibility = "trigger not run; planted content could not be verified"
+			fmt.Fprintf(os.Stderr, "    ✗ %s\n", msg)
+			failures++
+			continue
+		}
+		report.Proofs[i].ProofID = proofID
+		report.Proofs[i].ExecutionMode = "verified planted snippet in isolated temporary config with a unique callback path"
 		report.Proofs[i].EventVisibility = "events API readable before trigger"
 		if !jsonOutput {
 			fmt.Printf("  Running %-8s proof...\n", recipe.Canary.Type)
 		}
 		startedAt := time.Now()
-		if err := runProofCommand(recipe.Command, 15*time.Second); err != nil {
+		runErr := runProofCommand(correlated.Command, 15*time.Second)
+		cleanup()
+		if err := runErr; err != nil {
 			msg := fmt.Sprintf("trigger command failed: %v", err)
 			report.Proofs[i].Status = "failed"
 			report.Proofs[i].EventVisibility = "events API readable before trigger; callback observation skipped because trigger command failed"
@@ -612,7 +630,7 @@ With --redact:
 			continue
 		}
 
-		ts, err := waitForEventCountAbove(cfg, recipe.Canary.ID, baseline, false, 8*time.Second)
+		observed, err := waitForProofEvent(cfg, recipe.Canary.ID, proofID, false, 8*time.Second)
 		if err != nil {
 			msg := fmt.Sprintf("callback not observed: %v", err)
 			report.Proofs[i].Status = "failed"
@@ -622,12 +640,14 @@ With --redact:
 			failures++
 			continue
 		}
+		ts := observed.Timestamp
 		if ts == "" {
 			ts = "just now"
 		}
 		report.Proofs[i].Status = "passed"
 		report.Proofs[i].EventVisibility = "callback observed through events API after trigger"
 		report.Proofs[i].ObservedAt = ts
+		report.Proofs[i].EventID = observed.ID
 		report.Proofs[i].ObservedAfterMS = time.Since(startedAt).Milliseconds()
 		if !jsonOutput {
 			fmt.Printf("    ✓ callback observed at %s\n", ts)
@@ -784,6 +804,9 @@ func formatProofReport(report proofReport) string {
 		fmt.Fprintf(&b, "      path:       %s\n", proof.Path)
 		fmt.Fprintf(&b, "      command:    %s\n", proof.Command)
 		fmt.Fprintf(&b, "      expect:     %s\n", proof.Expected)
+		if proof.ExecutionMode != "" {
+			fmt.Fprintf(&b, "      execution:  %s\n", proof.ExecutionMode)
+		}
 		if proof.EventVisibility != "" {
 			fmt.Fprintf(&b, "      visibility: %s\n", proof.EventVisibility)
 		}
@@ -822,8 +845,8 @@ func proofReportProves(run bool, mode string) []string {
 	label := proofModeLabel(mode)
 	if run {
 		return []string{
-			fmt.Sprintf("Snare found active %s canaries and executed their safe trigger commands.", label),
-			"Passed proofs produced real non-test callbacks that were readable through Snare's events API.",
+			fmt.Sprintf("Snare verified the selected active %s snippets on disk, then executed isolated copies with unique callback paths.", label),
+			"Passed proofs produced non-test callbacks matching their own proof identifiers through Snare's events API.",
 		}
 	}
 	return []string{
@@ -839,6 +862,8 @@ func proofReportLimitations(run bool, mode string) []string {
 	}
 	if !run {
 		limitations = append(limitations, "It does not prove callback delivery until rerun with --run.")
+	} else {
+		limitations = append(limitations, "The proof exercises a verified snippet copy, not interactions with the rest of the original configuration; unrelated callbacks cannot satisfy it.")
 	}
 	return limitations
 }
@@ -966,12 +991,20 @@ func proofTriggerDescription(t string) string {
 }
 
 func probeTokenEvents(cfg *config.Config, tokenID string) tokenProbeResult {
+	return probeTokenProofEvents(cfg, tokenID, "")
+}
+
+func probeTokenProofEvents(cfg *config.Config, tokenID, proofID string) tokenProbeResult {
 	result := tokenProbeResult{
 		TokenID:     tokenID,
 		Unavailable: true,
 	}
 
-	resp, err := authedGet(cfg.APIBase()+"/api/events/"+tokenID, cfg)
+	eventsURL := cfg.APIBase() + "/api/events/" + tokenID
+	if proofID != "" {
+		eventsURL += "?proof_id=" + proofID // generated lowercase hex, no escaping needed
+	}
+	resp, err := authedGet(eventsURL, cfg)
 	if err != nil {
 		result.Err = err
 		return result
@@ -1042,46 +1075,28 @@ func summarizeProbes(probes []tokenProbeResult) probeSummary {
 
 func runWebhookTest(cfg *config.Config) webhookTestResult {
 	testToken := deviceTestTokenID(cfg)
-	before := probeTokenEvents(cfg, testToken)
-	baseline := 0
-	if before.OwnedReadable {
-		baseline = countEventsByKind(before.Events, true)
-	}
-
 	res := webhookTestResult{}
 	if err := registerToken(cfg, testToken, "test", "test"); err != nil {
 		res.RegisterErr = err
+		return res
 	}
-	if err := httpGet(cfg.CallbackURL(testToken)); err != nil {
+	proofID, err := newProofID()
+	if err != nil {
+		res.FireErr = err
+		return res
+	}
+	if err := httpGet(cfg.CallbackURL(testToken) + "/proof/" + proofID); err != nil {
 		res.FireErr = err
 		return res
 	}
 
-	ts, err := waitForEventCountAbove(cfg, testToken, baseline, true, 8*time.Second)
+	observed, err := waitForProofEvent(cfg, testToken, proofID, true, 8*time.Second)
 	if err != nil {
 		res.ObserveErr = err
 		return res
 	}
-	res.ObservedAt = ts
+	res.ObservedAt = observed.Timestamp
 	return res
-}
-
-func waitForEventCountAbove(cfg *config.Config, tokenID string, baseline int, testOnly bool, timeout time.Duration) (string, error) {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		probe := probeTokenEvents(cfg, tokenID)
-		if probe.AuthFailed {
-			return "", fmt.Errorf("events API auth failed")
-		}
-		if probe.OwnedReadable {
-			n := countEventsByKind(probe.Events, testOnly)
-			if n > baseline {
-				return latestEventTimestamp(probe.Events, testOnly), nil
-			}
-		}
-		time.Sleep(300 * time.Millisecond)
-	}
-	return "", fmt.Errorf("no new callback observed within %s", timeout.Round(time.Second))
 }
 
 func countEventsByKind(events []apiEvent, testOnly bool) int {
