@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"text/template"
 
 	"github.com/peg/snare/internal/manifest"
@@ -355,7 +356,7 @@ func removeAppended(c manifest.Canary, force bool, dryRun bool) error {
 		return fmt.Errorf("%s: canary ID still present after excision — duplicate entry? Use --force", c.Path)
 	}
 
-	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".snare-tmp-*")
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+strings.TrimPrefix(filepath.Base(path), ".")+".snare-tmp-*")
 	if err != nil {
 		return fmt.Errorf("creating temp file: %w", err)
 	}

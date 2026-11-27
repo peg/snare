@@ -366,7 +366,7 @@ Safety:
 	reenrolled := false
 	for _, c := range active {
 		err := registerToken(cfg, c.ID, c.Type, c.Label)
-		if err != nil && !reenrolled && regOK == 0 && preSum.Readable == 0 && strings.Contains(err.Error(), "unknown device") {
+		if err != nil && !reenrolled && regOK == 0 && !anyOwned(pre) && strings.Contains(err.Error(), "unknown device") {
 			// The receiver never minted this device ID (older CLIs invented
 			// one locally when enrollment failed), so no registration can
 			// succeed with it. Enroll a fresh identity once and retry.
@@ -1054,6 +1054,15 @@ func probeTokenProofEvents(cfg *config.Config, tokenID, proofID string) tokenPro
 	}
 
 	return result
+}
+
+func anyOwned(probes []tokenProbeResult) bool {
+	for _, p := range probes {
+		if p.OwnedReadable {
+			return true
+		}
+	}
+	return false
 }
 
 func summarizeProbes(probes []tokenProbeResult) probeSummary {

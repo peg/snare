@@ -485,34 +485,10 @@ async function readEvents(env, token, legacy = true) {
 
 async function handleEvents(token, request, env) {
   if (!env.SNARE_KV) return json({ error: "KV not configured" }, 500);
-  if (!/^Bearer\s+\S/i.test(request.headers.get("authorization") || "")) {
-    return json({ error: "missing Authorization header" }, 401);
-  }
 
-  let deviceId = null;
-  const regRaw = await env.SNARE_KV.get(`webhook:${token}`);
-  if (regRaw) {
-    try { deviceId = JSON.parse(regRaw).device_id; } catch { /* fall through */ }
-  }
-  // `registered: false` tells the owner that callbacks are being dropped even
-  // though old events are still readable (expired or revoked registration).
-  const registered = regRaw !== null;
-
-  // An unregistered token is owned by the device on its newest stored event,
-  // so revoked tokens don't become readable by any valid device.
-  let events = null;
-  if (!deviceId) {
-    events = await readEvents(env, token);
-    deviceId = events.find(e => e.device_id)?.device_id || null;
-  }
-
-  // Auth required for ALL event reads. The token itself must have a known owner
-  // via active registration or stored event history; otherwise status/events
-  // must not turn an unregistered local canary into a misleading "never fired".
-  if (!deviceId) {
-    return json({ error: "token not registered" }, 401);
-  }
-  const auth = await validateAuth(request, env, deviceId);
+  // Authenticate the caller's own device before any token lookup, so
+  // unauthenticated requests cost no KV lists and learn nothing about tokens.
+  const auth = await validateAuth(request, env, request.headers.get("x-snare-device-id"));
   if (!auth.ok) {
     return json({ error: auth.error }, 401);
   }
@@ -521,8 +497,32 @@ async function handleEvents(token, request, env) {
   if (proofId !== null && !PROOF_ID.test(proofId)) {
     return json({ error: "invalid proof_id" }, 400);
   }
+  const legacy = proofId === null;
 
-  events ??= await readEvents(env, token, proofId === null);
+  let owner = null;
+  const regRaw = await env.SNARE_KV.get(`webhook:${token}`);
+  if (regRaw) {
+    try { owner = JSON.parse(regRaw).device_id; } catch { /* fall through */ }
+  }
+  // `registered: false` tells the owner that callbacks are being dropped even
+  // though old events are still readable (expired or revoked registration).
+  const registered = regRaw !== null;
+
+  // An unregistered token is owned by the device on its newest stored event,
+  // so revoked tokens don't become readable by any valid device.
+  let events = null;
+  if (!owner) {
+    events = await readEvents(env, token, legacy);
+    owner = events.find(e => e.device_id)?.device_id || null;
+  }
+  if (!owner) {
+    return json({ error: "token not registered" }, 401);
+  }
+  if (owner !== auth.deviceId) {
+    return json({ error: "invalid device secret" }, 401);
+  }
+
+  events ??= await readEvents(env, token, legacy);
   if (proofId !== null) events = events.filter(e => e.proof_id === proofId);
 
   if (events.length === 0) {
