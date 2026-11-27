@@ -20,8 +20,6 @@ Versioning: [Semantic Versioning](https://semver.org/)
 
 ### Changed
 - `arm` and `doctor` say a test callback was recorded and ask you to confirm the alert arrived, rather than claiming the webhook fired or the machine is protected; `arm` warns when some canaries failed to register.
-
-### Docs
 - README: awsproc example matches the planted config and real alert (curl UA); hosted webhook destinations stated accurately; note that the callback URL is visible in the config.
 
 ## [0.5.0] - 2026-07-27
