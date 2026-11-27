@@ -448,13 +448,16 @@ export function eventKey(token, ms, id) {
   return `evr:${token}:${String(MAX_TS - ms).padStart(13, "0")}:${id}`;
 }
 
+// Legacy keys have a 90-day TTL; assumes v0.5.1 is in production by 2026-12-15.
+export const LEGACY_EVENT_KEYS_UNTIL = Date.UTC(2027, 2, 15);
+
 // Returns up to n event key names, newest first. Keys written before v0.5.1
 // used `event:{token}:{ms}:{uuid}` (oldest first); they expire within 90 days
 // and are paged in full only when the new prefix has fewer than n keys.
-export async function newestEventKeys(env, token, n) {
+export async function newestEventKeys(env, token, n, now = Date.now()) {
   const current = await env.SNARE_KV.list({ prefix: `evr:${token}:`, limit: n });
   const names = current.keys.map(k => k.name);
-  if (names.length >= n) return names.slice(0, n);
+  if (names.length >= n || now >= LEGACY_EVENT_KEYS_UNTIL) return names.slice(0, n);
 
   let legacy = [];
   let cursor;

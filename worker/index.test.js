@@ -1,6 +1,7 @@
 import { afterEach, describe, it, expect, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import worker, {
+  eventKey,
   CANARY_TYPES,
   SCANNER_ORGS,
   forwardAlert,
@@ -359,7 +360,7 @@ describe("event ownership after revoke", () => {
     const kv = new Map([
       [`device:${ownerDevice}`, JSON.stringify({ secret_hash: await sha256(ownerSecret) })],
       [`device:${otherDevice}`, JSON.stringify({ secret_hash: await sha256(otherSecret) })],
-      [`event:${token}:1:a`, JSON.stringify({ token, device_id: ownerDevice, timestamp: "2026-04-27T22:05:00Z", ip: "1.2.3.4" })],
+      [eventKey(token, Date.parse("2026-04-27T22:05:00Z"), "a"), JSON.stringify({ token, device_id: ownerDevice, timestamp: "2026-04-27T22:05:00Z", ip: "1.2.3.4" })],
     ]);
 
     const env = {

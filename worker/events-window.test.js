@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import worker, { buildTelegramPayload, CANARY_TYPES, eventKey, newestEventKeys } from "./index.js";
+import { describe, it, expect, vi, afterEach } from "vitest";
+import worker, { buildTelegramPayload, CANARY_TYPES, eventKey, newestEventKeys, LEGACY_EVENT_KEYS_UNTIL } from "./index.js";
 
 // In-memory KV with Cloudflare's lexicographic list order and pagination.
 function memoryKV(entries = []) {
@@ -67,7 +67,11 @@ describe("events window", () => {
     expect(body.events.map(e => e.n)).toEqual([24, 23, 22, 21, 20, 19, 18, 17, 16, 15]);
   });
 
+  afterEach(() => { vi.useRealTimers(); });
+
   it("still finds the newest legacy (oldest-first) keys across list pages", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.UTC(2026, 11, 1));
     const rows = [];
     for (let i = 0; i < 2100; i++) {
       const ms = Date.UTC(2026, 9, 1) + i * 1000;
@@ -85,6 +89,19 @@ describe("events window", () => {
       [eventKey(TOKEN, Date.UTC(2026, 10, 2), "new"), JSON.stringify(ev(99))],
     ]);
     expect(await newestEventKeys(env, TOKEN, 1)).toEqual([eventKey(TOKEN, Date.UTC(2026, 10, 2), "new")]);
+  });
+
+  it("stops listing legacy keys once they have all expired", async () => {
+    const legacy = `event:${TOKEN}:${Date.UTC(2026, 9, 1)}:old`;
+    const env = await ownerEnv([[legacy, JSON.stringify(ev(0))]]);
+    const prefixes = [];
+    const list = env.SNARE_KV.list;
+    env.SNARE_KV.list = (opts) => { prefixes.push(opts.prefix); return list(opts); };
+
+    expect(await newestEventKeys(env, TOKEN, 20, LEGACY_EVENT_KEYS_UNTIL - 1)).toEqual([legacy]);
+    prefixes.length = 0;
+    expect(await newestEventKeys(env, TOKEN, 20, LEGACY_EVENT_KEYS_UNTIL)).toEqual([]);
+    expect(prefixes).toEqual([`evr:${TOKEN}:`]);
   });
 });
 
