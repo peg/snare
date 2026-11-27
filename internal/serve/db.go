@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -30,6 +31,11 @@ CREATE TABLE IF NOT EXISTS tokens (
 	label         TEXT,
 	registered_at TEXT NOT NULL,
 	FOREIGN KEY (device_id) REFERENCES devices(device_id)
+);
+
+CREATE TABLE IF NOT EXISTS token_owners (
+	token_id  TEXT PRIMARY KEY,
+	device_id TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS events (
@@ -69,20 +75,47 @@ func openDB(path string) (*DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("opening sqlite: %w", err)
 	}
+	// Keep connection-local pragmas effective and serialize transactions in this
+	// process. SQLite still arbitrates claims across independent server processes.
+	db.SetMaxOpenConns(1)
 
 	// WAL mode for concurrent reads
-	if _, err := db.Exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;`); err != nil {
+	if _, err := db.Exec(`PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;`); err != nil {
+		db.Close()
 		return nil, fmt.Errorf("pragma: %w", err)
 	}
 
 	if _, err := db.Exec(schema); err != nil {
+		db.Close()
 		return nil, fmt.Errorf("schema: %w", err)
 	}
 	if _, err := db.Exec(`ALTER TABLE events ADD COLUMN device_id TEXT`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		db.Close()
 		return nil, fmt.Errorf("add events.device_id column: %w", err)
 	}
 	if _, err := db.Exec(`ALTER TABLE events ADD COLUMN proof_id TEXT NOT NULL DEFAULT ''`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		db.Close()
 		return nil, fmt.Errorf("add events.proof_id column: %w", err)
+	}
+	// Preserve legacy ownership before any new claim. Ambiguous or ownerless
+	// histories are reserved with an empty owner, which cannot authenticate or
+	// claim the token. Never guess an owner from the most recent event.
+	if _, err := db.Exec(`
+		INSERT INTO token_owners (token_id, device_id)
+		SELECT token_id, CASE WHEN COUNT(DISTINCT NULLIF(device_id, '')) = 1
+			THEN MAX(device_id) ELSE '' END
+		FROM (
+			SELECT token_id, device_id FROM tokens
+			UNION ALL
+			SELECT token_id, COALESCE(device_id, '') FROM events
+		)
+		GROUP BY token_id
+		ON CONFLICT(token_id) DO NOTHING;
+		CREATE INDEX IF NOT EXISTS idx_events_token_order ON events(token_id, id DESC);
+		CREATE INDEX IF NOT EXISTS idx_events_token_proof ON events(token_id, proof_id, id DESC);
+	`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate token ownership and event indexes: %w", err)
 	}
 
 	return &DB{db: db}, nil
@@ -145,19 +178,58 @@ type tokenReg struct {
 	RegisteredAt string
 }
 
-// upsertToken inserts or replaces a token registration.
+var errTokenOwned = errors.New("token already owned or reserved")
+
+// upsertToken atomically claims ownership and updates an owner's registration.
+// Revocation never removes the ownership record.
 func (d *DB) upsertToken(t tokenReg) error {
-	_, err := d.db.Exec(`
+	tx, err := d.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	// Acquire the write lock before reading, preventing a read/check/write race.
+	if _, err := tx.Exec(`INSERT INTO token_owners (token_id, device_id) VALUES (?, ?)
+		ON CONFLICT(token_id) DO NOTHING`, t.TokenID, t.DeviceID); err != nil {
+		return err
+	}
+	var owner string
+	if err := tx.QueryRow(`SELECT device_id FROM token_owners WHERE token_id = ?`, t.TokenID).Scan(&owner); err != nil {
+		return err
+	}
+	if owner == "" || owner != t.DeviceID {
+		return errTokenOwned
+	}
+	res, err := tx.Exec(`
 		INSERT INTO tokens (token_id, device_id, webhook_url, canary_type, label, registered_at)
 		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT(token_id) DO UPDATE SET
-			device_id     = excluded.device_id,
 			webhook_url   = excluded.webhook_url,
 			canary_type   = excluded.canary_type,
 			label         = excluded.label,
 			registered_at = excluded.registered_at
+		WHERE tokens.device_id = excluded.device_id
 	`, t.TokenID, t.DeviceID, t.WebhookURL, t.CanaryType, t.Label, t.RegisteredAt)
-	return err
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n != 1 {
+		return errTokenOwned
+	}
+	return tx.Commit()
+}
+
+func (d *DB) tokenOwner(tokenID string) (string, error) {
+	var owner string
+	err := d.db.QueryRow(`SELECT device_id FROM token_owners WHERE token_id = ?`, tokenID).Scan(&owner)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return owner, err
 }
 
 // getToken returns the registration for a token, or nil if not found.
@@ -165,7 +237,8 @@ func (d *DB) getToken(tokenID string) (*tokenReg, error) {
 	var t tokenReg
 	err := d.db.QueryRow(`
 		SELECT token_id, device_id, COALESCE(webhook_url,''), COALESCE(canary_type,''), COALESCE(label,''), registered_at
-		FROM tokens WHERE token_id = ?
+		FROM tokens WHERE token_id = ? AND device_id =
+			(SELECT device_id FROM token_owners WHERE token_id = tokens.token_id)
 	`, tokenID).Scan(&t.TokenID, &t.DeviceID, &t.WebhookURL, &t.CanaryType, &t.Label, &t.RegisteredAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -179,6 +252,19 @@ func (d *DB) getToken(tokenID string) (*tokenReg, error) {
 // deleteToken removes a token registration.
 func (d *DB) deleteToken(tokenID string) error {
 	_, err := d.db.Exec(`DELETE FROM tokens WHERE token_id = ?`, tokenID)
+	return err
+}
+
+func (d *DB) revokeToken(tokenID, deviceID string) error {
+	owner, err := d.tokenOwner(tokenID)
+	if err != nil {
+		return err
+	}
+	if owner != "" && owner != deviceID {
+		return errTokenOwned
+	}
+	// A claim made after the read above must not be deleted by another device.
+	_, err = d.db.Exec(`DELETE FROM tokens WHERE token_id = ? AND device_id = ?`, tokenID, deviceID)
 	return err
 }
 
@@ -223,7 +309,6 @@ func (d *DB) getEvents(tokenID string) ([]event, error) {
 	return d.getProofEvents(tokenID, "")
 }
 
-// getProofEvents is getEvents filtered to one proof nonce when proofID is set.
 func (d *DB) getProofEvents(tokenID, proofID string) ([]event, error) {
 	filter := ""
 	args := []interface{}{tokenID}
@@ -254,7 +339,7 @@ func (d *DB) recentEvents(limit int) ([]event, error) {
 		       COALESCE(e.method,''), COALESCE(e.path,''), COALESCE(e.country,''), COALESCE(e.city,''),
 		       COALESCE(e.asn,''), COALESCE(e.asn_org,''), e.created_at, e.proof_id
 		FROM events e
-		ORDER BY e.timestamp DESC
+		ORDER BY e.id DESC
 		LIMIT ?
 	`, limit)
 	if err != nil {
@@ -280,23 +365,6 @@ func scanEvents(rows *sql.Rows) ([]event, error) {
 		out = append(out, e)
 	}
 	return out, rows.Err()
-}
-
-// latestEventDeviceID returns the owner device recorded on the newest stored event.
-// Returns ("", nil) when no events exist or legacy events lack device ownership.
-func (d *DB) latestEventDeviceID(tokenID string) (string, error) {
-	var deviceID string
-	err := d.db.QueryRow(`
-		SELECT COALESCE(device_id,'')
-		FROM events
-		WHERE token_id = ?
-		ORDER BY timestamp DESC
-		LIMIT 1
-	`, tokenID).Scan(&deviceID)
-	if err == sql.ErrNoRows {
-		return "", nil
-	}
-	return deviceID, err
 }
 
 // listDevices returns all registered devices (for dashboard).

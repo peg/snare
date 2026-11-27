@@ -1,6 +1,7 @@
 package serve
 
 import (
+	"errors"
 	"log"
 	"net/http"
 	"regexp"
@@ -223,17 +224,6 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check if token is already owned by a different device
-	existing, err := s.db.getToken(body.TokenID)
-	if err != nil {
-		jsonResp(w, http.StatusInternalServerError, map[string]string{"error": "db error"})
-		return
-	}
-	if existing != nil && existing.DeviceID != body.DeviceID {
-		jsonResp(w, http.StatusForbidden, map[string]string{"error": "token already registered to another device"})
-		return
-	}
-
 	if err := s.db.upsertToken(tokenReg{
 		TokenID:      body.TokenID,
 		DeviceID:     body.DeviceID,
@@ -242,6 +232,10 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		Label:        body.Label,
 		RegisteredAt: time.Now().UTC().Format(time.RFC3339),
 	}); err != nil {
+		if errors.Is(err, errTokenOwned) {
+			jsonResp(w, http.StatusForbidden, map[string]string{"error": "token already owned or reserved"})
+			return
+		}
 		jsonResp(w, http.StatusInternalServerError, map[string]string{"error": "db error"})
 		log.Printf("upsertToken: %v", err)
 		return
@@ -289,18 +283,11 @@ func (s *Server) handleRevoke(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Ownership check
-	existing, err := s.db.getToken(body.TokenID)
-	if err != nil {
-		jsonResp(w, http.StatusInternalServerError, map[string]string{"error": "db error"})
-		return
-	}
-	if existing != nil && existing.DeviceID != body.DeviceID {
-		jsonResp(w, http.StatusForbidden, map[string]string{"error": "device_id mismatch — only the registering device can revoke"})
-		return
-	}
-
-	if err := s.db.deleteToken(body.TokenID); err != nil {
+	if err := s.db.revokeToken(body.TokenID, body.DeviceID); err != nil {
+		if errors.Is(err, errTokenOwned) {
+			jsonResp(w, http.StatusForbidden, map[string]string{"error": "device_id mismatch — only the owner can revoke"})
+			return
+		}
 		jsonResp(w, http.StatusInternalServerError, map[string]string{"error": "db error"})
 		return
 	}
@@ -377,27 +364,20 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Determine device that owns this token
-	reg, err := s.db.getToken(tokenID)
+	proofID := r.URL.Query().Get("proof_id")
+	if proofID != "" && !proofIDPattern.MatchString(proofID) {
+		jsonResp(w, http.StatusBadRequest, map[string]string{"error": "invalid proof_id"})
+		return
+	}
+
+	// Ownership survives revocation and is never inferred from a caller header
+	// or the current delivery registration.
+	deviceID, err := s.db.tokenOwner(tokenID)
 	if err != nil {
 		jsonResp(w, http.StatusInternalServerError, map[string]string{"error": "db error"})
 		return
 	}
 
-	// Auth is required. Device ID comes from token registration or stored event
-	// ownership. Header-only fallback would make unregistered local canaries look
-	// like registered-but-quiet canaries in `snare status`.
-	deviceID := ""
-	if reg != nil {
-		deviceID = reg.DeviceID
-	}
-	if deviceID == "" {
-		deviceID, err = s.db.latestEventDeviceID(tokenID)
-		if err != nil {
-			jsonResp(w, http.StatusInternalServerError, map[string]string{"error": "db error"})
-			return
-		}
-	}
 	if deviceID == "" {
 		jsonResp(w, http.StatusUnauthorized, map[string]string{"error": "token not registered"})
 		return
@@ -409,12 +389,6 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	proofID := r.URL.Query().Get("proof_id")
-	if proofID != "" && !proofIDPattern.MatchString(proofID) {
-		jsonResp(w, http.StatusBadRequest, map[string]string{"error": "invalid proof_id"})
-		return
-	}
-
 	events, err := s.db.getProofEvents(tokenID, proofID)
 	if err != nil {
 		jsonResp(w, http.StatusInternalServerError, map[string]string{"error": "db error"})
@@ -422,6 +396,18 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if len(events) == 0 {
+		if proofID == "" {
+			reg, err := s.db.getToken(tokenID)
+			if err != nil {
+				jsonResp(w, http.StatusInternalServerError, map[string]string{"error": "db error"})
+				return
+			}
+			if reg == nil {
+				// A retained owner alone does not mean detection is registered.
+				jsonResp(w, http.StatusUnauthorized, map[string]string{"error": "token not registered"})
+				return
+			}
+		}
 		jsonResp(w, http.StatusNotFound, map[string]interface{}{"token": tokenID, "events": []struct{}{}})
 		return
 	}
