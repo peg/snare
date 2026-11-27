@@ -118,7 +118,9 @@ describe("offline KV migration", () => {
 
   it("rejects oversized physical imports and escapes hostile metadata as SQL data", () => {
     const tooMany = Array.from({ length: 201 }, (_, i) => entry(`device:device_${i}`, { secret_hash: SECRET_HASH }));
-    expect(() => compileMigration(tooMany, { now: NOW })).toThrow("CAPACITY_EXCEEDED");
+    expect(() => compileMigration(tooMany, { now: NOW, limits: { maxDevices: 200 } })).toThrow("CAPACITY_EXCEEDED");
+    expect(compileMigration(tooMany, { now: NOW }).counts.devices).toBe(201);
+    expect(() => compileMigration(tooMany, { now: NOW, limits: { maxDevicez: 1 } })).toThrow("INVALID_LIMITS");
     const source = backup();
     const registration = JSON.parse(source[1].value);
     registration.label = "x'); DROP TABLE devices; --";
@@ -174,5 +176,22 @@ describe("offline KV migration", () => {
         expect(outputText).not.toContain(TOKEN);
       }
     } finally { await rm(dir, { recursive: true, force: true }); }
+  });
+
+  it("imports newest-first evr: event keys and legacy registered_at device records", () => {
+    const inverted = String(9999999999999 - NOW).padStart(13, "0");
+    const source = [
+      entry(`device:${DEVICE}`, { secret_hash: SECRET_HASH, registered_at: new Date(NOW - 5000).toISOString() }),
+      entry(`webhook:${TOKEN}`, { device_id: DEVICE, webhook_url: "use-global", canary_type: null, label: "", registered_at: NOW - 1000 }),
+      entry(`evr:${TOKEN}:${inverted}:33333333-3333-3333-3333-333333333333`, { id: "event_reversed_001", token: TOKEN, device_id: DEVICE,
+        timestamp: new Date(NOW).toISOString(), method: "GET" }),
+    ];
+    const db = database();
+    try {
+      db.exec(compileMigration(source, { now: NOW }).sql);
+      expect(db.prepare("SELECT created_at FROM devices").get().created_at).toBe(NOW - 5000);
+      expect(db.prepare("SELECT canary_type FROM tokens").get().canary_type).toBe("generic");
+      expect(db.prepare("SELECT event_id, admitted_at FROM events").get()).toMatchObject({ event_id: "event_reversed_001", admitted_at: NOW });
+    } finally { db.close(); }
   });
 });

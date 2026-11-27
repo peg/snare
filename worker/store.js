@@ -5,23 +5,61 @@ const DELIVERY_MAX_AGE = DAY;
 const TERMINAL = new Set(["delivered", "failed", "cancelled"]);
 
 export const DEFAULT_STORE_LIMITS = Object.freeze({
-  maxDevices: 200,
-  maxTokens: 500,
+  maxDevices: 25000,
+  maxTokens: 25000,
   maxTokensPerDevice: 100,
-  maxTokenRecords: 10000,
+  maxTokenRecords: 100000,
   maxTokenRecordsPerDevice: 2000,
-  dailyEvents: 200,
+  dailyEvents: 1000,
   dailyEventsPerDevice: 50,
-  dailySuppressedEvents: 50,
+  dailySuppressedEvents: 250,
   dailySuppressedEventsPerDevice: 10,
-  retainedEvents: 5000,
+  retainedEvents: 10000,
   retainedEventsPerDevice: 1000,
-  dailyAttempts: 1000,
+  dailyAttempts: 2000,
   dailyAttemptsPerDevice: 200,
-  maxDeliveryRows: 10000,
+  maxDeliveryRows: 15000,
   maxDestinationsPerEvent: 8,
   retentionDays: 7,
 });
+
+const NESTED_LIMITS = [
+  ["maxTokensPerDevice", "maxTokens"], ["maxTokens", "maxTokenRecords"],
+  ["maxTokenRecordsPerDevice", "maxTokenRecords"], ["dailyEventsPerDevice", "dailyEvents"],
+  ["dailySuppressedEvents", "dailyEvents"], ["dailySuppressedEventsPerDevice", "dailySuppressedEvents"],
+  ["dailySuppressedEventsPerDevice", "dailyEventsPerDevice"], ["maxDestinationsPerEvent", "maxDeliveryRows"],
+  ["retainedEventsPerDevice", "retainedEvents"], ["dailyAttemptsPerDevice", "dailyAttempts"],
+];
+
+function validateLimits(limits) {
+  if (validated.has(limits)) return limits;
+  const result = Object.fromEntries(Object.entries(DEFAULT_STORE_LIMITS).map(([key, fallback]) => [
+    key, integer(limits[key] ?? fallback, 1, key === "retentionDays" ? 30 : fallback * 10, key),
+  ]));
+  validated.add(limits = Object.freeze(result));
+  return limits;
+}
+
+const resolvedLimits = new Map();
+const validated = new WeakSet();
+
+export function storeLimits(env) {
+  const raw = env.STORE_LIMITS ?? "";
+  const cacheKey = typeof raw === "string" ? raw : JSON.stringify(raw);
+  if (!resolvedLimits.has(cacheKey)) {
+    const parsed = raw === "" ? {} : typeof raw === "string" ? JSON.parse(raw) : raw;
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) throw new TypeError("Invalid STORE_LIMITS");
+    for (const key of Object.keys(parsed)) if (!Object.hasOwn(DEFAULT_STORE_LIMITS, key)) throw new TypeError(`Unknown STORE_LIMITS key ${key}`);
+    const limits = validateLimits(parsed);
+    for (const [inner, outer] of NESTED_LIMITS) if (limits[inner] > limits[outer]) throw new TypeError(`${inner} exceeds ${outer}`);
+    resolvedLimits.set(cacheKey, limits);
+  }
+  return resolvedLimits.get(cacheKey);
+}
+
+export function storeFor(env) { return new D1Store(env.SNARE_DB, storeLimits(env)); }
+
+const count = (name, day = "-1") => `COALESCE((SELECT n FROM counts WHERE name = ${name} AND day = ${day}), 0)`;
 
 function integer(value, min, max, name) {
   if (!Number.isSafeInteger(value) || value < min || value > max) throw new TypeError(`Invalid ${name}`);
@@ -51,9 +89,7 @@ function delivery(row) {
 export class D1Store {
   constructor(db, limits = {}) {
     this.db = db;
-    this.limits = Object.fromEntries(Object.entries(DEFAULT_STORE_LIMITS).map(([key, fallback]) => [
-      key, integer(limits[key] ?? fallback, 1, key === "retentionDays" ? 30 : Math.min(100000, fallback * 10), key),
-    ]));
+    this.limits = validateLimits(limits);
   }
 
   statement(sql, ...values) { return this.db.prepare(sql).bind(...values); }
@@ -64,15 +100,15 @@ export class D1Store {
 
   async createDevice(id, secretHash, createdAt = Date.now()) {
     const result = await this.statement(`INSERT INTO devices(device_id, secret_hash, created_at)
-      SELECT ?, ?, ? WHERE (SELECT COUNT(*) FROM devices) < ?
+      SELECT ?, ?, ? WHERE ${count("'devices'")} < ?
       ON CONFLICT(device_id) DO NOTHING`, text(id, 128, "device id"), text(secretHash, 128, "secret hash"),
     milliseconds(createdAt), this.limits.maxDevices).run();
-    return result.meta.changes === 1;
+    return result.meta.changes > 0;
   }
 
   async rotateDevice(id, hash) {
     const result = await this.statement("UPDATE devices SET secret_hash = ? WHERE device_id = ?", text(hash, 128, "secret hash"), id).run();
-    return result.meta.changes === 1;
+    return result.meta.changes > 0;
   }
 
   async getToken(token) {
@@ -87,10 +123,10 @@ export class D1Store {
       this.statement(`INSERT INTO tokens(token, device_id, webhook_url, canary_type, label, registered_at)
         SELECT ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM devices WHERE device_id = ?)
         AND (EXISTS (SELECT 1 FROM tokens WHERE token = ? AND device_id = ? AND revoked = 0)
-          OR ((SELECT COUNT(*) FROM tokens WHERE revoked = 0) < ?
+          OR (${count("'tokens_active'")} < ?
             AND (SELECT COUNT(*) FROM tokens WHERE device_id = ? AND revoked = 0) < ?))
         AND (EXISTS (SELECT 1 FROM tokens WHERE token = ?)
-          OR ((SELECT COUNT(*) FROM tokens) < ? AND (SELECT COUNT(*) FROM tokens WHERE device_id = ?) < ?))
+          OR (${count("'tokens'")} < ? AND (SELECT COUNT(*) FROM tokens WHERE device_id = ?) < ?))
         ON CONFLICT(token) DO UPDATE SET webhook_url = excluded.webhook_url,
           canary_type = excluded.canary_type, label = excluded.label,
           registered_at = CASE WHEN tokens.revoked = 0 AND tokens.webhook_url = excluded.webhook_url
@@ -107,7 +143,7 @@ export class D1Store {
       this.statement(`UPDATE deliveries SET state = 'cancelled', error_code = 'token_changed', lease_token = NULL, lease_until = NULL
         WHERE token = ? AND state IN ('pending', 'enqueued') AND token_revision <> (SELECT revision FROM tokens WHERE token = ?)`, token, token),
     ]);
-    if (result[0].meta.changes === 1) return "registered";
+    if (result[0].meta.changes > 0) return "registered";
     const existing = await this.getToken(token);
     return existing && existing.device_id !== owner ? "owner_mismatch" : "quota";
   }
@@ -120,7 +156,7 @@ export class D1Store {
         WHERE token = ? AND device_id = ? AND state IN ('pending', 'enqueued')
         AND EXISTS (SELECT 1 FROM tokens WHERE token = ? AND device_id = ? AND revoked = 1)`, token, deviceId, token, deviceId),
     ]);
-    if (result[0].meta.changes === 1) return true;
+    if (result[0].meta.changes > 0) return true;
     const existing = await this.getToken(token);
     return Boolean(existing && existing.device_id === deviceId && existing.revoked);
   }
@@ -162,12 +198,12 @@ export class D1Store {
       admission_day, admission_id, proof_id, suppressed, token_revision, event_json)
       SELECT ?, token, device_id, ?, ?, ?, ?, ?, ?, revision, ? FROM tokens
       WHERE token = ? AND device_id = ? AND revoked = 0 AND revision = ?
-      AND (SELECT COUNT(*) FROM events WHERE admission_day = ?) < ?
+      AND ${count("'events'", "?")} < ?
       AND (SELECT COUNT(*) FROM events WHERE device_id = ? AND admission_day = ?) < ?
-      AND (? = 0 OR ((SELECT COUNT(*) FROM events WHERE suppressed = 1 AND admission_day = ?) < ?
+      AND (? = 0 OR (${count("'suppressed'", "?")} < ?
         AND (SELECT COUNT(*) FROM events WHERE device_id = ? AND suppressed = 1 AND admission_day = ?) < ?))
-      AND (SELECT COUNT(*) FROM events) < ? AND (SELECT COUNT(*) FROM events WHERE device_id = ?) < ?
-      AND (SELECT COUNT(*) FROM deliveries) + ? <= ?
+      AND ${count("'events'")} < ? AND ${count("'events:' || ?")} < ?
+      AND ${count("'deliveries'")} + ? <= ?
       ON CONFLICT(event_id) DO NOTHING`, id, milliseconds(event.timestamp), now, day, nonce,
     event.proof_id == null ? null : text(event.proof_id, 128, "proof id"), suppressed, json(event), token, owner, revision,
     day, l.dailyEvents, owner, day, l.dailyEventsPerDevice, suppressed, day, l.dailySuppressedEvents,
@@ -180,7 +216,7 @@ export class D1Store {
       message.delivery_id, message.destination_id, json(message), now, now, id, nonce));
     }
     const result = await this.db.batch(statements);
-    return result[0].meta.changes === 1;
+    return result[0].meta.changes > 0;
   }
 
   async expireDeliveries(now) {
@@ -213,7 +249,7 @@ export class D1Store {
     const result = await this.statement(`UPDATE deliveries SET state = 'failed', error_code = 'delivery_expired',
       lease_token = NULL, lease_kind = NULL, lease_until = NULL
       WHERE delivery_id = ? AND state IN ('pending', 'enqueued') AND created_at <= ?`, id, now - DELIVERY_MAX_AGE).run();
-    return result.meta.changes === 1;
+    return result.meta.changes > 0;
   }
 
   async claimEnqueue(id, now, leaseMs = 30000) {
@@ -234,7 +270,7 @@ export class D1Store {
       lease_token = NULL, lease_kind = NULL, lease_until = NULL WHERE delivery_id = ?
       AND state IN ('pending', 'enqueued') AND lease_token = ? AND lease_kind = 'publisher' AND lease_until > ?`,
     now, now + 3600000, id, leaseToken, now).run();
-    return result.meta.changes === 1;
+    return result.meta.changes > 0;
   }
 
   async releaseEnqueue(id, now, leaseToken) {
@@ -244,7 +280,7 @@ export class D1Store {
       lease_token = NULL, lease_kind = NULL, lease_until = NULL WHERE delivery_id = ?
       AND state IN ('pending', 'enqueued') AND lease_token = ? AND lease_kind = 'publisher' AND lease_until > ?`,
     now + 60000, id, leaseToken, now).run();
-    return result.meta.changes === 1;
+    return result.meta.changes > 0;
   }
 
   async claimDelivery(id, now, leaseMs = 30000) {
@@ -269,7 +305,7 @@ export class D1Store {
       error_code = ?, lease_token = NULL, lease_kind = NULL, lease_until = NULL, enqueued_at = NULL
       WHERE delivery_id = ? AND lease_token = ? AND lease_kind = 'consumer' AND lease_until > ? AND state IN ('pending', 'enqueued') AND attempts <= ?`,
     state, milliseconds(nextAttemptAt ?? now), errorCode == null ? null : text(errorCode, 64, "error code"), id, leaseToken, now, attempts).run();
-    return result.meta.changes === 1;
+    return result.meta.changes > 0;
   }
 
   async reserveDeliveryAttempt(deliveryId, leaseToken, now, maxAttempts = 5) {
@@ -284,14 +320,14 @@ export class D1Store {
         WHERE d.delivery_id = ? AND d.lease_token = ? AND d.lease_kind = 'consumer' AND d.lease_until > ?
         AND d.state IN ('pending', 'enqueued') AND d.attempts < ? AND d.created_at > ?
         AND t.revoked = 0 AND t.revision = d.token_revision
-        AND (SELECT COUNT(*) FROM delivery_attempts WHERE admission_day = ?) < ?
+        AND ${count("'attempts'", "?")} < ?
         AND (SELECT COUNT(*) FROM delivery_attempts WHERE device_id = d.device_id AND admission_day = ?) < ?
         ON CONFLICT(delivery_id, lease_token) DO NOTHING`, attemptId, day, now, deliveryId, leaseToken, now, maxAttempts,
       now - DELIVERY_MAX_AGE, day, this.limits.dailyAttempts, day, this.limits.dailyAttemptsPerDevice),
       this.statement(`UPDATE deliveries SET attempts = attempts + 1 WHERE delivery_id = ?
         AND EXISTS (SELECT 1 FROM delivery_attempts WHERE attempt_id = ?)`, deliveryId, attemptId),
     ]);
-    return result[0].meta.changes === 1;
+    return result[0].meta.changes > 0;
   }
 
   async admitDeliveryAttempt(deviceId, now) {
@@ -299,11 +335,11 @@ export class D1Store {
     const day = Math.floor(now / DAY);
     const result = await this.statement(`INSERT INTO delivery_attempts(attempt_id, device_id, admission_day, admitted_at)
       SELECT ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM devices WHERE device_id = ?)
-      AND (SELECT COUNT(*) FROM delivery_attempts WHERE admission_day = ?) < ?
+      AND ${count("'attempts'", "?")} < ?
       AND (SELECT COUNT(*) FROM delivery_attempts WHERE device_id = ? AND admission_day = ?) < ?`,
     crypto.randomUUID(), deviceId, day, now, deviceId, day, this.limits.dailyAttempts,
     deviceId, day, this.limits.dailyAttemptsPerDevice).run();
-    return result.meta.changes === 1;
+    return result.meta.changes > 0;
   }
 
   async cleanup(now) {
@@ -317,6 +353,7 @@ export class D1Store {
       this.statement(`DELETE FROM deliveries WHERE delivery_id IN (SELECT delivery_id FROM deliveries
         WHERE created_at < ? AND state IN ('delivered', 'failed', 'cancelled') ORDER BY created_at LIMIT 100)`, cutoff),
       this.statement("DELETE FROM delivery_attempts WHERE attempt_id IN (SELECT attempt_id FROM delivery_attempts WHERE admitted_at < ? ORDER BY admitted_at LIMIT 100)", cutoff),
+      this.statement("DELETE FROM counts WHERE n = 0 AND day < ?", Math.floor(now / DAY)),
     ]);
   }
 }

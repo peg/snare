@@ -1,12 +1,30 @@
-# Offline KV-to-D1 migration
+# KV-to-D1 migration
+
+Two steps: `export-kv.mjs` takes a read-only snapshot of a KV namespace through
+the Cloudflare API, and `migrate-kv-to-d1.mjs` converts that snapshot offline.
+
+```sh
+CLOUDFLARE_API_TOKEN=... CLOUDFLARE_ACCOUNT_ID=... \
+  node worker/scripts/export-kv.mjs <kv-namespace-id> /private/path/backup.json
+```
+
+The exporter only lists keys and bulk-reads values (100 per request, retrying
+on 429). If a listed key disappears before it is read (for example a TTL
+expiry), it fails with `INCONSISTENT_SNAPSHOT` instead of writing a partial
+backup; quiesce writes and retry. Output is mode `0600`, never overwritten, and
+stdout prints only per-prefix key counts.
+
+## Offline conversion
 
 `migrate-kv-to-d1.mjs` reads a **local JSON backup** and creates a new SQL file. It has no Cloudflare authentication or network operations, creates no database, and sends no notifications.
 
 From the repository root, using Node 22:
 
 ```sh
-node worker/scripts/migrate-kv-to-d1.mjs /private/path/backup.json /private/path/import.sql
+node worker/scripts/migrate-kv-to-d1.mjs /private/path/backup.json /private/path/import.sql [--limits '{"maxDevices":50000}']
 ```
+
+Pass `--limits` with the same `STORE_LIMITS` JSON the target Worker will use, so capacity checks match.
 
 The output is created exclusively with mode `0600`. An existing output file or symlink is never overwritten. Standard output contains only numeric counts in JSON; failures print a fixed error code without record values, token IDs, hashes, or URLs. The SQL file itself necessarily contains credential hashes, webhook destinations, and event metadata, so keep it with the private backup.
 
@@ -38,13 +56,13 @@ For example, the following shows the structure; replace placeholders with origin
 ]
 ```
 
-Recognized persistent keys are `device:<id>`, `webhook:<token>`, `owner:<token>`, and `event:<token>:<epoch-milliseconds>:<unique-suffix>`. Known transient `rl:` and `dedup:` keys are counted and skipped. Unknown key types, duplicate identities, malformed values, or conflicting owners fail the entire conversion before output is created. A deleted registration with retained, consistently owned events becomes a revoked tombstone. Missing event ownership or a missing corresponding device hash requires private operator investigation; the converter never guesses ownership from a current registration.
+Recognized persistent keys are `device:<id>`, `webhook:<token>`, `owner:<token>`, `event:<token>:<epoch-milliseconds>:<unique-suffix>`, and the newest-first `evr:<token>:<inverted-13-digit-timestamp>:<unique-suffix>` keys used by newer Workers. Device records that stored `registered_at` instead of `created_at` keep that time. Known transient `rl:` and `dedup:` keys are counted and skipped. Unknown key types, duplicate identities, malformed values, or conflicting owners fail the entire conversion before output is created. A deleted registration with retained, consistently owned events becomes a revoked tombstone. Missing event ownership or a missing corresponding device hash requires private operator investigation; the converter never guesses ownership from a current registration.
 
 Existing event IDs and valid proof IDs are preserved. Events without IDs receive `legacy_` plus the SHA-256 digest of their KV key, making repeated conversions stable. Event metadata is rebuilt from the bounded allowlist; arbitrary body/authorization fields are discarded. Historical events create no outbox entries and cannot replay notifications. Tokens deleted before backup with no remaining owner record or owned history cannot be reconstructed from absent data.
 
 ## Restore procedure and limits
 
-Quiesce writes before taking a complete backup; an eventually consistent, partial export cannot be treated as a transactionally consistent snapshot. Check the count report and resolve every conflict before proceeding. The converter accepts at most 64 MiB, 30,000 entries, and 64 KiB per persistent KV value, and rejects imports exceeding the default D1 device/token/event capacity limits rather than silently truncating them.
+Quiesce writes before taking a complete backup; an eventually consistent, partial export cannot be treated as a transactionally consistent snapshot. Check the count report and resolve every conflict before proceeding. The converter accepts at most 64 MiB, 200,000 entries, and 64 KiB per persistent KV value, and rejects imports exceeding the default D1 device/token/event capacity limits rather than silently truncating them.
 
 Apply `worker/migrations/0001_state.sql` to a new, empty target first. Then import the generated SQL. Its first data statement rejects a populated target; it never replaces existing ownership or merges into a live database. The generated file omits explicit `BEGIN`/`COMMIT` because [D1 SQL imports manage transactions](https://developers.cloudflare.com/d1/best-practices/import-export-data/).
 

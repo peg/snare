@@ -1,10 +1,9 @@
-import { D1Store } from "./store.js";
+import { storeFor } from "./store.js";
 import { validateDeliveryMessage, destinationIdentity } from "./delivery.js";
 
 const MAX_ATTEMPTS = 5;
 const MAX_AGE = 24 * 60 * 60 * 1000;
 
-function storeFor(env) { return new D1Store(env.SNARE_DB); }
 
 function retryDelay(attempt, requested) {
   return Math.min(3600, Math.max(5, Number(requested) || Math.min(900, 15 * 2 ** Math.min(attempt, 6))));

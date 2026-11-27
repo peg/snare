@@ -1,6 +1,6 @@
 import { PolicyError, readManagementJSON, validateManagementBody, authorizeEnrollment,
   authorizeGlobalWebhook, sanitizeCallbackMetadata, enforceSourceRateLimit, enforceDeviceRateLimit } from "./policy.js";
-import { D1Store } from "./store.js";
+import { storeFor, storeLimits } from "./store.js";
 import { createDeliveryMessage } from "./delivery.js";
 import { dispatchOutbox, consumeQueue } from "./outbox.js";
 
@@ -142,6 +142,9 @@ export default {
       if (env.STORAGE_BACKEND === "d1" && !env.SNARE_DB) {
         throw new PolicyError(503, "storage_unavailable", "transactional storage is not configured");
       }
+      if (env.SNARE_DB) {
+        try { storeLimits(env); } catch { throw new PolicyError(503, "configuration_invalid", "STORE_LIMITS is invalid"); }
+      }
       const url = new URL(request.url);
       if (url.pathname === "/health") {
         return json({ status: "ok", environment: env.SNARE_ENVIRONMENT || "production",
@@ -193,7 +196,7 @@ export default {
     if (!env.SNARE_DB) return;
     ctx.waitUntil((async () => {
       await dispatchOutbox(env, { resolveWebhooks, forwardAlert });
-      await new D1Store(env.SNARE_DB).cleanup(Date.now());
+      await storeFor(env).cleanup(Date.now());
     })());
   },
 };
@@ -273,7 +276,7 @@ async function validateAuth(request, env, deviceId) {
   const match = (request.headers.get("authorization") || "").match(/^Bearer ([\x21-\x7e]{32,256})$/i);
   if (!match) return { ok: false, error: "missing or invalid Authorization header" };
   if (typeof deviceId !== "string" || !/^[a-zA-Z0-9_-]{1,80}$/.test(deviceId)) return { ok: false, error: "invalid device_id" };
-  const stored = env.SNARE_DB ? await new D1Store(env.SNARE_DB).getDevice(deviceId)
+  const stored = env.SNARE_DB ? await storeFor(env).getDevice(deviceId)
     : await readKVRecord(env, `device:${deviceId}`);
   if (!stored) return { ok: false, error: "unknown device_id" };
   const hash = await hashSecret(match[1]);
@@ -341,7 +344,7 @@ async function processAlert(token, metadata, env, ctx) {
   if (env.SNARE_DB) {
     const messages = suppression ? [] : await Promise.all(webhooks.map(url =>
       createDeliveryMessage(url, event, meta, { tokenRevision: revision })));
-    const admitted = await new D1Store(env.SNARE_DB).saveEvent(event, messages);
+    const admitted = await storeFor(env).saveEvent(event, messages);
     if (!admitted) throw new PolicyError(429, "event_admission_limited", "event admission limit reached or registration changed", 60);
     if (messages.length) ctx.waitUntil(dispatchOutbox(env, { resolveWebhooks, forwardAlert }).catch(() => console.error("DELIVERY_DISPATCH_FAILED")));
     return;
@@ -373,7 +376,7 @@ async function handleEvents(token, request, env) {
   const auth = await validateAuth(request, env, owner);
   if (!auth.ok) return json({ error: auth.error }, 401);
   await enforceDeviceRateLimit(env, owner, "events");
-  const events = env.SNARE_DB ? await new D1Store(env.SNARE_DB).getEvents(token, { proofId })
+  const events = env.SNARE_DB ? await storeFor(env).getEvents(token, { proofId })
     : (legacyEvents || await readLegacyEvents(env, token)).filter(event => event.device_id === owner && (proofId === null || event.proof_id === proofId)).slice(0, 10);
   if (record?.revoked && proofId === null && events.length === 0) return json({ error: "token not registered" }, 401);
   return json({ token, count: events.length, events, storage: env.SNARE_DB ? "d1" : "kv" });
@@ -389,7 +392,7 @@ async function handleCreateDevice(request, env) {
   const deviceId = `dev-${crypto.randomUUID().replaceAll("-", "")}`;
   const secretHash = await hashSecret(device_secret);
   if (env.SNARE_DB) {
-    if (!await new D1Store(env.SNARE_DB).createDevice(deviceId, secretHash)) return json({ error: "device capacity reached" }, 429);
+    if (!await storeFor(env).createDevice(deviceId, secretHash)) return json({ error: "device capacity reached" }, 429);
   } else {
     if (!env.SNARE_KV) return json({ error: "storage not configured" }, 503);
     await env.SNARE_KV.put(`device:${deviceId}`, JSON.stringify({ secret_hash: secretHash, created_at: new Date().toISOString() }));
@@ -418,7 +421,7 @@ async function handleRegister(request, env) {
   const record = { ...body, registered_at: new Date().toISOString(), revoked: false,
     revision: (existing?.revision || 1) + (existing && changed ? 1 : 0) };
   if (env.SNARE_DB) {
-    const result = await new D1Store(env.SNARE_DB).registerToken(token_id, record);
+    const result = await storeFor(env).registerToken(token_id, record);
     if (result !== "registered") return json({ error: result === "owner_mismatch" ? "token belongs to another device" : "token capacity reached" }, result === "owner_mismatch" ? 403 : 429);
   } else {
     if (!env.SNARE_KV) return json({ error: "storage not configured" }, 503);
@@ -440,7 +443,7 @@ async function handleRevoke(request, env) {
   const record = await getTokenRecord(token_id, env);
   if (record && record.device_id !== device_id) return json({ error: "token belongs to another device" }, 403);
   if (env.SNARE_DB) {
-    if (record && !await new D1Store(env.SNARE_DB).revokeToken(token_id, device_id)) return json({ error: "token belongs to another device" }, 403);
+    if (record && !await storeFor(env).revokeToken(token_id, device_id)) return json({ error: "token belongs to another device" }, 403);
   } else if (record) {
     await env.SNARE_KV.put(`owner:${token_id}`, JSON.stringify({ device_id }));
     await env.SNARE_KV.put(`webhook:${token_id}`, JSON.stringify({ ...record, revoked: true, revision: (record.revision || 0) + 1 }));
@@ -458,7 +461,7 @@ async function handleRotateSecret(request, env) {
   if (!auth.ok) return json({ error: auth.error }, 401);
   await enforceDeviceRateLimit(env, device_id, "rotate");
   const secret_hash = await hashSecret(new_secret);
-  if (env.SNARE_DB) await new D1Store(env.SNARE_DB).rotateDevice(device_id, secret_hash);
+  if (env.SNARE_DB) await storeFor(env).rotateDevice(device_id, secret_hash);
   else {
     const record = await readKVRecord(env, `device:${device_id}`);
     await env.SNARE_KV.put(`device:${device_id}`, JSON.stringify({ ...record, secret_hash, rotated_at: new Date().toISOString() }));
@@ -486,7 +489,7 @@ async function readKVRecord(env, key) {
 }
 
 async function getTokenRecord(token, env) {
-  if (env.SNARE_DB) return new D1Store(env.SNARE_DB).getToken(token);
+  if (env.SNARE_DB) return storeFor(env).getToken(token);
   const record = await readKVRecord(env, `webhook:${token}`);
   const owner = await readKVRecord(env, `owner:${token}`);
   if (owner && record && owner.device_id !== record.device_id) throw new Error("ownership conflict");

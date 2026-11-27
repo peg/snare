@@ -68,6 +68,14 @@ function callback(path = "", headers = {}) {
 }
 
 describe("integrated receiver admission and evidence", () => {
+  it("fails closed, including /health, when STORE_LIMITS is invalid", async () => {
+    const { env, db } = fixture({ STORE_LIMITS: "{\"maxDevice\":1}" });
+    for (const request of [new Request("https://snare.invalid/health"), api("devices", { device_secret: SECRET }, null)]) {
+      expect((await invoke(env, request)).status).toBe(503);
+    }
+    expect(db.count("devices")).toBe(0);
+  });
+
   it("denies public use-global registration while keeping authorized public destinations usable", async () => {
     const { env, db, queued } = fixture({ WEBHOOK_URLS: WEBHOOK });
     const deviceId = await enroll(env);

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DatabaseSync } from "node:sqlite";
 import { readFileSync } from "node:fs";
-import { D1Store } from "./store.js";
+import { D1Store, DEFAULT_STORE_LIMITS, storeLimits } from "./store.js";
 import { createDeliveryMessage } from "./delivery.js";
 
 // Execute the production SQL against real SQLite, preserving D1 batch rollback
@@ -345,5 +345,52 @@ describe("durable delivery leases and budgets", () => {
     expect(await store.expireDelivery(id, NOW + DAY)).toBe(true);
     expect(await store.expireDelivery(id, NOW + DAY)).toBe(false);
     expect(await store.getDelivery(id)).toMatchObject({ state: "failed", error_code: "delivery_expired", lease_token: null });
+  });
+});
+
+describe("STORE_LIMITS configuration", () => {
+  it("validates overrides once and rejects unknown keys, ranges and inverted nesting", () => {
+    expect(storeLimits({})).toEqual(DEFAULT_STORE_LIMITS);
+    expect(storeLimits({ STORE_LIMITS: "{\"maxDevices\":50000,\"retentionDays\":30}" })).toMatchObject({ maxDevices: 50000, retentionDays: 30 });
+    expect(() => storeLimits({ STORE_LIMITS: "{\"maxDevice\":1}" })).toThrow("Unknown STORE_LIMITS key");
+    expect(() => storeLimits({ STORE_LIMITS: "[1]" })).toThrow("Invalid STORE_LIMITS");
+    expect(() => storeLimits({ STORE_LIMITS: "{\"retentionDays\":31}" })).toThrow("Invalid retentionDays");
+    expect(() => storeLimits({ STORE_LIMITS: "{\"dailyEvents\":10}" })).toThrow("dailyEventsPerDevice exceeds dailyEvents");
+  });
+});
+
+describe("trigger-maintained counts", () => {
+  it("match exact row counts through re-arm, revoke, admission and retention cleanup", async () => {
+    const { db, store } = setup();
+    const exact = () => db.sqlite.prepare(`SELECT
+      (SELECT COUNT(*) FROM devices) AS devices, (SELECT COUNT(*) FROM tokens) AS tokens,
+      (SELECT COUNT(*) FROM tokens WHERE revoked = 0) AS tokens_active, (SELECT COUNT(*) FROM events) AS events,
+      (SELECT COUNT(*) FROM events WHERE suppressed = 1) AS suppressed, (SELECT COUNT(*) FROM deliveries) AS deliveries,
+      (SELECT COUNT(*) FROM delivery_attempts) AS attempts`).get();
+    const counted = () => db.sqlite.prepare(`SELECT
+      ${["devices", "tokens", "tokens_active", "events", "deliveries"].map(n => `COALESCE((SELECT n FROM counts WHERE name = '${n}' AND day = -1), 0) AS ${n}`).join(", ")},
+      COALESCE((SELECT SUM(n) FROM counts WHERE name = 'suppressed'), 0) AS suppressed,
+      COALESCE((SELECT SUM(n) FROM counts WHERE name = 'attempts'), 0) AS attempts`).get();
+    const check = () => expect({ ...counted() }).toEqual({ ...exact() });
+    await seed(store);
+    await store.createDevice("device_a", "hash_a", NOW);
+    check();
+    await store.registerToken(TOKEN, { device_id: "device_a", webhook_url: "https://example.com/secret-hook" });
+    await store.revokeToken(TOKEN, "device_a");
+    await store.revokeToken(TOKEN, "device_a");
+    check();
+    await store.registerToken(TOKEN, { device_id: "device_a", label: "re-armed" });
+    const revision = (await store.getToken(TOKEN)).revision;
+    const e = event({ token_revision: revision });
+    expect(await store.saveEvent(e, [await message(e)])).toBe(true);
+    expect(await store.saveEvent(event({ token_revision: revision, notification_suppressed: "preview" }))).toBe(true);
+    expect(await store.saveEvent(e)).toBe(false);
+    expect(await store.admitDeliveryAttempt("device_a", NOW)).toBe(true);
+    check();
+    for (const days of [40, 41]) {
+      await store.cleanup(NOW + days * 86_400_000);
+      check();
+    }
+    expect(db.sqlite.prepare("SELECT COUNT(*) AS n FROM counts WHERE n < 0").get().n).toBe(0);
   });
 });

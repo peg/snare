@@ -6,13 +6,14 @@ import { constants } from "node:fs";
 import { open, unlink } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { DEFAULT_STORE_LIMITS } from "../store.js";
+import { storeLimits } from "../store.js";
 import { sanitizeCallbackMetadata, validateDeviceId, validateTokenId } from "../policy.js";
 
 const MAX_BYTES = 64 * 1024 * 1024;
-const MAX_RECORDS = 30000;
+const MAX_RECORDS = 200000;
 const DAY = 86400000;
 const ID = /^[a-zA-Z0-9_-]{8,80}$/;
+const EVR_MAX_TS = 9999999999999;
 
 export class MigrationError extends Error {
   constructor(code) { super(code); this.code = code; }
@@ -60,8 +61,10 @@ function insert(table, fields, values) {
 }
 function digest(value) { return createHash("sha256").update(value).digest("hex"); }
 
-export function compileMigration(backup, { now = Date.now() } = {}) {
+export function compileMigration(backup, { now = Date.now(), limits = {} } = {}) {
   time(now);
+  let l;
+  try { l = storeLimits({ STORE_LIMITS: limits }); } catch { fail("INVALID_LIMITS"); }
   if (!Array.isArray(backup) || backup.length > MAX_RECORDS || Buffer.byteLength(JSON.stringify(backup)) > MAX_BYTES) fail("INVALID_BACKUP");
   const devices = new Map();
   const registrations = new Map();
@@ -92,7 +95,7 @@ export function compileMigration(backup, { now = Date.now() } = {}) {
         const id = device(match[2]);
         if (record.device_id != null && record.device_id !== id) fail("IDENTITY_CONFLICT");
         if (typeof record.secret_hash !== "string" || !/^[0-9a-fA-F]{64}$/.test(record.secret_hash)) fail("INVALID_SECRET_HASH");
-        devices.set(id, { secret_hash: record.secret_hash.toLowerCase(), created_at: time(record.created_at) });
+        devices.set(id, { secret_hash: record.secret_hash.toLowerCase(), created_at: time(record.created_at ?? record.registered_at) });
       } else {
         const id = token(match[2]);
         const owner = own(id, record.device_id);
@@ -117,7 +120,9 @@ export function compileMigration(backup, { now = Date.now() } = {}) {
       }
       continue;
     }
-    const eventKey = name.match(/^event:([a-zA-Z0-9_-]{8,80}):([0-9]{1,16}):([a-zA-Z0-9_-]{1,80})$/);
+    let eventKey = name.match(/^event:([a-zA-Z0-9_-]{8,80}):([0-9]{1,16}):([a-zA-Z0-9_-]{1,80})$/);
+    const reversed = name.match(/^evr:([a-zA-Z0-9_-]{8,80}):([0-9]{13}):([a-zA-Z0-9_-]{1,80})$/);
+    if (reversed) eventKey = [name, reversed[1], String(EVR_MAX_TS - Number(reversed[2])), reversed[3]];
     if (!eventKey) fail("UNKNOWN_KEY_TYPE");
     const record = parseValue(entry.value);
     const tokenId = token(eventKey[1]);
@@ -145,7 +150,7 @@ export function compileMigration(backup, { now = Date.now() } = {}) {
     const encoded = JSON.stringify(clean);
     if (Buffer.byteLength(encoded) > 16384) fail("EVENT_TOO_LARGE");
     if (JSON.stringify(sanitizeCallbackMetadata(record)) !== JSON.stringify(record)) counts.sanitizedEvents++;
-    if (admitted < now - DEFAULT_STORE_LIMITS.retentionDays * DAY) counts.eventsOutsideRetention++;
+    if (admitted < now - l.retentionDays * DAY) counts.eventsOutsideRetention++;
     events.push({ id, token: tokenId, owner, timestamp, admitted, admission_id: `import_${digest(name)}`,
       proof, suppressed: clean.notification_suppressed ? 1 : 0, revision: tokenRevision, json: encoded });
   }
@@ -174,7 +179,6 @@ export function compileMigration(backup, { now = Date.now() } = {}) {
   for (const event of events) eventsByDevice.set(event.owner, (eventsByDevice.get(event.owner) ?? 0) + 1);
   counts.devices = devices.size;
   counts.events = events.length;
-  const l = DEFAULT_STORE_LIMITS;
   if (devices.size > l.maxDevices || registrations.size > l.maxTokenRecords || counts.activeTokens > l.maxTokens || events.length > l.retainedEvents ||
       [...recordsByDevice.values()].some(count => count > l.maxTokenRecordsPerDevice) ||
       [...activeByDevice.values()].some(count => count > l.maxTokensPerDevice) ||
@@ -187,7 +191,7 @@ export function compileMigration(backup, { now = Date.now() } = {}) {
     "PRAGMA foreign_keys = ON;",
     // Deliberate NOT NULL failure on a populated target. No INSERT OR REPLACE,
     // owner reassignment, table deletion, or merging into a live database.
-    "INSERT INTO devices(device_id, secret_hash, created_at) SELECT NULL, NULL, NULL WHERE EXISTS(SELECT 1 FROM devices) OR EXISTS(SELECT 1 FROM tokens) OR EXISTS(SELECT 1 FROM events) OR EXISTS(SELECT 1 FROM deliveries) OR EXISTS(SELECT 1 FROM delivery_attempts);",
+    "INSERT INTO devices(device_id, secret_hash, created_at) SELECT NULL, NULL, NULL WHERE EXISTS(SELECT 1 FROM devices) OR EXISTS(SELECT 1 FROM tokens) OR EXISTS(SELECT 1 FROM events) OR EXISTS(SELECT 1 FROM deliveries) OR EXISTS(SELECT 1 FROM delivery_attempts) OR EXISTS(SELECT 1 FROM counts);",
   ];
   for (const [id, record] of [...devices].sort(([a], [b]) => a.localeCompare(b))) statements.push(insert("devices",
     ["device_id", "secret_hash", "created_at"], [id, record.secret_hash, record.created_at]));
@@ -200,7 +204,7 @@ export function compileMigration(backup, { now = Date.now() } = {}) {
   return { sql: `${statements.join("\n")}\n`, counts };
 }
 
-export async function migrateFile(inputPath, outputPath) {
+export async function migrateFile(inputPath, outputPath, options = {}) {
   if (!inputPath || !outputPath || resolve(inputPath) === resolve(outputPath)) fail("INVALID_PATHS");
   const input = await open(inputPath, constants.O_RDONLY | constants.O_NOFOLLOW);
   let backup;
@@ -212,7 +216,7 @@ export async function migrateFile(inputPath, outputPath) {
     try { backup = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)); }
     catch { fail("INVALID_BACKUP_JSON"); }
   } finally { await input.close(); }
-  const result = compileMigration(backup);
+  const result = compileMigration(backup, options);
   let output;
   try {
     // Exclusive create refuses existing files and symlinks. Permissions are
@@ -231,8 +235,15 @@ export async function migrateFile(inputPath, outputPath) {
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
-    if (process.argv.length !== 4) fail("USAGE_INPUT_JSON_OUTPUT_SQL");
-    const counts = await migrateFile(process.argv[2], process.argv[3]);
+    const args = process.argv.slice(2);
+    let limits = {};
+    const flag = args.indexOf("--limits");
+    if (flag !== -1) {
+      try { limits = JSON.parse(args[flag + 1]); } catch { fail("INVALID_LIMITS"); }
+      args.splice(flag, 2);
+    }
+    if (args.length !== 2) fail("USAGE_INPUT_JSON_OUTPUT_SQL");
+    const counts = await migrateFile(args[0], args[1], { limits });
     process.stdout.write(`${JSON.stringify(counts)}\n`);
   } catch (error) {
     const code = error instanceof MigrationError ? error.code : "IO_ERROR";

@@ -7,19 +7,33 @@ service automatically. `worker/wrangler.jsonc` remains the current KV deployment
 
 ## Default admission bounds
 
-The D1 store uses these small-service defaults. They are application admission
-limits, not a Cloudflare billing cap:
+The D1 store uses these defaults, sized for the free managed service. They
+are application admission limits, not a Cloudflare billing cap. Override any of
+them per environment with a `STORE_LIMITS` JSON var, for example
+`"STORE_LIMITS": "{\"maxDevices\": 50000}"`; unknown keys or out-of-range
+values make the Worker fail closed instead of silently using defaults.
 
 | Resource | Global bound | Per device |
 |---|---:|---:|
-| Enrolled devices | 200 | — |
-| Active tokens | 500 | 100 |
-| Token records including revoked ownership | 10,000 | 2,000 |
-| Admitted events per UTC day | 200 | 50 |
-| Suppressed events within that daily allowance | 50 | 10 |
-| Retained events | 5,000 | 1,000 |
-| Reserved outbound attempts per UTC day | 1,000 | 200 |
-| Stored delivery records | 10,000 | — |
+| Enrolled devices | 25,000 | — |
+| Active tokens | 25,000 | 100 |
+| Token records including revoked ownership | 100,000 | 2,000 |
+| Admitted events per UTC day | 1,000 | 50 |
+| Suppressed events within that daily allowance | 250 | 10 |
+| Retained events | 10,000 | 1,000 |
+| Reserved outbound attempts per UTC day | 2,000 | 200 |
+| Stored delivery records | 15,000 | — |
+
+Each override may be at most ten times its default (retention at most 30 days),
+and a per-device bound may not exceed its global bound.
+
+Global totals live in a trigger-maintained `counts` table, so an admission check
+reads a few rows regardless of how many devices, tokens or events are stored.
+Writes are the cost to watch: an admitted event, a delivery and each attempt
+write roughly 10 to 15 rows including indexes and counters, and retention
+deletes cost about the same again. Keep `dailyEvents` and `dailyAttempts` low
+enough that their worst case fits your D1 plan's daily write quota, and confirm
+with staging metrics.
 
 The HTTP receiver allows at most three destinations per event. Event and
 attempt admission uses database transactions; it does not rely on KV counters.
@@ -36,7 +50,10 @@ are forgeable hints; they cannot reserve capacity against every attacker.
 Unknown callbacks create no state. Denied requests still consume Worker
 invocations and database reads. Native source limiters and edge rules can reduce
 this load but do not guarantee availability under a distributed flood. A known
-token flood can consume its owner's daily allowance. These limits accept that
+token flood can consume its owner's daily allowance, and devices that flood
+their own tokens can together consume the global daily allowance (with
+defaults, 20 devices), blinding every other tenant until UTC midnight. Use
+invite or closed enrollment on any deployment where that matters. These limits accept that
 availability tradeoff to keep stored evidence and outbound work bounded.
 
 ## Prepare staging
@@ -80,8 +97,25 @@ It creates a new SQL file with mode 0600 and prints only counts and safe errors.
 It does not contact Cloudflare or replay old notifications.
 
 ```sh
+# 1. Read-only export (token scope: Workers KV Storage Read)
+CLOUDFLARE_API_TOKEN=... CLOUDFLARE_ACCOUNT_ID=... \
+  node worker/scripts/export-kv.mjs <kv-namespace-id> /private/path/snare-kv.json
+# 2. Offline conversion (pass --limits with the target's STORE_LIMITS, if any)
 node worker/scripts/migrate-kv-to-d1.mjs /private/path/snare-kv.json /private/path/snare-import.sql
+# 3. Schema, then the import, into a NEW empty database
+npx wrangler d1 migrations apply <db> --remote -c <private-config>
+npx wrangler d1 execute <db> --remote --file /private/path/snare-import.sql -c <private-config>
 ```
+
+`worker/migration.rehearsal.test.js` runs this whole path in CI against real
+workerd D1, using a synthetic namespace with legacy `registered_at` device records,
+`use-global` routes and `evr:` events, then authenticates original device secrets, rejects an owner
+takeover, serves imported history, delivers a new callback, and confirms a
+second import is refused.
+
+KV registrations carried a one-year TTL; D1 registrations do not expire.
+Review existing `use-global` registrations before listing their owners in
+`GLOBAL_WEBHOOK_DEVICE_IDS`.
 
 Apply generated SQL only to an initialized **empty** D1 schema. Rehearse the
 exact export, conversion and import before production. Compare device/token and

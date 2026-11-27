@@ -18,7 +18,8 @@
     "SNARE_ENVIRONMENT": "example",
     "ENROLLMENT_MODE": "closed",
     "RATE_LIMITS_REQUIRED": "true",
-    "GLOBAL_WEBHOOK_DEVICE_IDS": ""
+    "GLOBAL_WEBHOOK_DEVICE_IDS": "",
+    "STORE_LIMITS": ""
   },
   // Replace namespace IDs with unused account IDs, distinct for each environment.
   "ratelimits": [

@@ -18,7 +18,6 @@ CREATE TABLE tokens (
   revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0)
 );
 CREATE INDEX tokens_owner_active ON tokens(device_id, revoked);
-CREATE INDEX tokens_active ON tokens(revoked);
 -- Revoke and re-arm retain ownership. Even accidental application UPDATEs
 -- cannot reassign existing history to a different device.
 CREATE TRIGGER tokens_immutable_owner BEFORE UPDATE OF device_id ON tokens
@@ -42,9 +41,7 @@ CREATE TABLE events (
 );
 CREATE INDEX events_token_recent ON events(token, timestamp DESC, event_id DESC);
 CREATE INDEX events_token_proof_recent ON events(token, proof_id, timestamp DESC, event_id DESC);
-CREATE INDEX events_daily ON events(admission_day);
 CREATE INDEX events_owner_daily ON events(device_id, admission_day);
-CREATE INDEX events_suppressed_daily ON events(admission_day) WHERE suppressed = 1;
 CREATE INDEX events_owner_suppressed_daily ON events(device_id, admission_day) WHERE suppressed = 1;
 CREATE INDEX events_retention ON events(admitted_at);
 
@@ -80,6 +77,80 @@ CREATE TABLE delivery_attempts (
   admitted_at INTEGER NOT NULL,
   UNIQUE(delivery_id, lease_token)
 );
-CREATE INDEX attempts_daily ON delivery_attempts(admission_day);
 CREATE INDEX attempts_owner_daily ON delivery_attempts(device_id, admission_day);
 CREATE INDEX attempts_retention ON delivery_attempts(admitted_at);
+
+-- Global and daily totals maintained by triggers so admission checks read one
+-- row instead of counting every retained row. day = -1 marks a current total.
+CREATE TABLE counts (
+  name TEXT NOT NULL,
+  day INTEGER NOT NULL,
+  n INTEGER NOT NULL,
+  PRIMARY KEY (name, day)
+) WITHOUT ROWID;
+CREATE TRIGGER devices_count_ins AFTER INSERT ON devices
+BEGIN
+  INSERT INTO counts(name, day, n) VALUES ('devices', -1, 1) ON CONFLICT(name, day) DO UPDATE SET n = n + 1;
+END;
+CREATE TRIGGER devices_count_del AFTER DELETE ON devices
+BEGIN
+  INSERT INTO counts(name, day, n) VALUES ('devices', -1, -1) ON CONFLICT(name, day) DO UPDATE SET n = n + -1;
+END;
+CREATE TRIGGER tokens_count_ins AFTER INSERT ON tokens
+BEGIN
+  INSERT INTO counts(name, day, n) VALUES ('tokens', -1, 1) ON CONFLICT(name, day) DO UPDATE SET n = n + 1;
+  INSERT INTO counts(name, day, n) VALUES ('tokens_active', -1, 1 - NEW.revoked) ON CONFLICT(name, day) DO UPDATE SET n = n + 1 - NEW.revoked;
+END;
+CREATE TRIGGER tokens_count_del AFTER DELETE ON tokens
+BEGIN
+  INSERT INTO counts(name, day, n) VALUES ('tokens', -1, -1) ON CONFLICT(name, day) DO UPDATE SET n = n + -1;
+  INSERT INTO counts(name, day, n) VALUES ('tokens_active', -1, OLD.revoked - 1) ON CONFLICT(name, day) DO UPDATE SET n = n + OLD.revoked - 1;
+END;
+CREATE TRIGGER tokens_count_upd AFTER UPDATE OF revoked ON tokens WHEN NEW.revoked <> OLD.revoked
+BEGIN
+  INSERT INTO counts(name, day, n) VALUES ('tokens_active', -1, OLD.revoked - NEW.revoked) ON CONFLICT(name, day) DO UPDATE SET n = n + OLD.revoked - NEW.revoked;
+END;
+CREATE TRIGGER events_count_ins AFTER INSERT ON events
+BEGIN
+  INSERT INTO counts(name, day, n) VALUES ('events', -1, 1) ON CONFLICT(name, day) DO UPDATE SET n = n + 1;
+  INSERT INTO counts(name, day, n) VALUES ('events:' || NEW.device_id, -1, 1) ON CONFLICT(name, day) DO UPDATE SET n = n + 1;
+  INSERT INTO counts(name, day, n) VALUES ('events', NEW.admission_day, 1) ON CONFLICT(name, day) DO UPDATE SET n = n + 1;
+END;
+CREATE TRIGGER events_count_del AFTER DELETE ON events
+BEGIN
+  INSERT INTO counts(name, day, n) VALUES ('events', -1, -1) ON CONFLICT(name, day) DO UPDATE SET n = n + -1;
+  INSERT INTO counts(name, day, n) VALUES ('events:' || OLD.device_id, -1, -1) ON CONFLICT(name, day) DO UPDATE SET n = n + -1;
+  INSERT INTO counts(name, day, n) VALUES ('events', OLD.admission_day, -1) ON CONFLICT(name, day) DO UPDATE SET n = n + -1;
+END;
+CREATE TRIGGER deliveries_count_ins AFTER INSERT ON deliveries
+BEGIN
+  INSERT INTO counts(name, day, n) VALUES ('deliveries', -1, 1) ON CONFLICT(name, day) DO UPDATE SET n = n + 1;
+END;
+CREATE TRIGGER deliveries_count_del AFTER DELETE ON deliveries
+BEGIN
+  INSERT INTO counts(name, day, n) VALUES ('deliveries', -1, -1) ON CONFLICT(name, day) DO UPDATE SET n = n + -1;
+END;
+CREATE TRIGGER attempts_count_ins AFTER INSERT ON delivery_attempts
+BEGIN
+  INSERT INTO counts(name, day, n) VALUES ('attempts', NEW.admission_day, 1) ON CONFLICT(name, day) DO UPDATE SET n = n + 1;
+END;
+CREATE TRIGGER attempts_count_del AFTER DELETE ON delivery_attempts
+BEGIN
+  INSERT INTO counts(name, day, n) VALUES ('attempts', OLD.admission_day, -1) ON CONFLICT(name, day) DO UPDATE SET n = n + -1;
+END;
+CREATE TRIGGER events_suppressed_count_ins AFTER INSERT ON events WHEN NEW.suppressed = 1
+BEGIN
+  INSERT INTO counts(name, day, n) VALUES ('suppressed', NEW.admission_day, 1) ON CONFLICT(name, day) DO UPDATE SET n = n + 1;
+END;
+CREATE TRIGGER events_suppressed_count_del AFTER DELETE ON events WHEN OLD.suppressed = 1
+BEGIN
+  INSERT INTO counts(name, day, n) VALUES ('suppressed', OLD.admission_day, -1) ON CONFLICT(name, day) DO UPDATE SET n = n - 1;
+END;
+CREATE TRIGGER events_counted_immutable BEFORE UPDATE OF device_id, admission_day, suppressed ON events
+BEGIN
+  SELECT RAISE(ABORT, 'immutable counted event');
+END;
+CREATE TRIGGER attempts_counted_immutable BEFORE UPDATE OF admission_day ON delivery_attempts
+BEGIN
+  SELECT RAISE(ABORT, 'immutable counted attempt');
+END;
