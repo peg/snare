@@ -60,6 +60,10 @@ jobs:
         working-directory: worker
         run: npm run cf:check:staging
 
+      - name: Apply staging D1 migrations
+        working-directory: worker
+        run: npx wrangler d1 migrations apply snare-state-staging --remote --env staging
+
       - name: Deploy staging Worker
         id: deploy
         working-directory: worker
