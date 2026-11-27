@@ -106,23 +106,16 @@ func Init(callbackBase, webhookURL string, force bool) (*Config, error) {
 		return nil, err
 	}
 
-	// Try to get a server-assigned device ID (prevents squatting). Managed
-	// snare.sh retains the legacy offline fallback; custom servers fail closed.
-	deviceID := ""
+	// The receiver mints the device ID (prevents squatting). Fail closed: a
+	// locally invented ID is unknown to the receiver, so every later
+	// registration would be rejected and no canary could ever alert.
 	apiBase := callbackBase
 	if len(apiBase) > 2 && apiBase[len(apiBase)-2:] == "/c" {
 		apiBase = apiBase[:len(apiBase)-2]
 	}
-	deviceID, registerErr := registerDeviceWithServer(apiBase, deviceSecret)
-	if deviceID == "" {
-		if callbackBase != "https://snare.sh/c" {
-			return nil, fmt.Errorf("registering device with self-hosted server: %w", registerErr)
-		}
-		// Server unreachable — generate local ID as fallback
-		deviceID, err = newDeviceID()
-		if err != nil {
-			return nil, err
-		}
+	deviceID, err := registerDeviceWithServer(apiBase, deviceSecret)
+	if err != nil {
+		return nil, fmt.Errorf("enrolling this device with %s: %w — nothing was written; try again when the receiver is reachable", apiBase, err)
 	}
 
 	c := &Config{
@@ -188,13 +181,52 @@ func (c *Config) APIBase() string {
 	return base
 }
 
-// registerDeviceWithServer calls POST /api/devices to get a server-minted device ID.
-// SNARE_ENROLLMENT_TOKEN is sent only for this request and is never persisted.
+// Reenroll replaces the device identity with a fresh server-minted one. It is
+// the recovery path for configs whose device ID the receiver does not know
+// (for example one created by an older CLI's offline fallback).
+func (c *Config) Reenroll() error {
+	secret, err := newDeviceSecret()
+	if err != nil {
+		return err
+	}
+	id, err := registerDeviceWithServer(c.APIBase(), secret)
+	if err != nil {
+		return fmt.Errorf("enrolling this device with %s: %w", c.APIBase(), err)
+	}
+	c.DeviceID, c.DeviceSecret = id, secret
+	return c.Save()
+}
+
+// enrollRetryDelay is the wait before retry n (1-based); tests shorten it.
+var enrollRetryDelay = func(n int) time.Duration { return time.Duration(n) * 2 * time.Second }
+
+const enrollAttempts = 3
+
+// registerDeviceWithServer calls POST /api/devices to get a server-minted
+// device ID, retrying network errors, 429 and 5xx responses.
 func registerDeviceWithServer(apiBase, deviceSecret string) (string, error) {
+	var lastErr error
+	for attempt := 1; attempt <= enrollAttempts; attempt++ {
+		id, retry, err := enrollOnce(apiBase, deviceSecret)
+		if err == nil {
+			return id, nil
+		}
+		lastErr = err
+		if !retry || attempt == enrollAttempts {
+			break
+		}
+		time.Sleep(enrollRetryDelay(attempt))
+	}
+	return "", lastErr
+}
+
+// enrollOnce makes one enrollment request. SNARE_ENROLLMENT_TOKEN is sent only
+// for this request and is never persisted.
+func enrollOnce(apiBase, deviceSecret string) (id string, retry bool, err error) {
 	payload, _ := json.Marshal(map[string]string{"device_secret": deviceSecret})
 	req, err := http.NewRequest(http.MethodPost, apiBase+"/api/devices", bytes.NewReader(payload))
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if enrollmentToken := strings.TrimSpace(os.Getenv("SNARE_ENROLLMENT_TOKEN")); enrollmentToken != "" {
@@ -202,32 +234,25 @@ func registerDeviceWithServer(apiBase, deviceSecret string) (string, error) {
 	}
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return "", err
+		return "", true, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return "", fmt.Errorf("device enrollment returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
+		retry := resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500
+		return "", retry, fmt.Errorf("device enrollment returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
 	}
 	var result struct {
 		DeviceID string `json:"device_id"`
 	}
 	data, _ := io.ReadAll(resp.Body)
 	if err := json.Unmarshal(data, &result); err != nil {
-		return "", fmt.Errorf("decoding device enrollment response: %w", err)
+		return "", false, fmt.Errorf("decoding device enrollment response: %w", err)
 	}
 	if result.DeviceID == "" {
-		return "", fmt.Errorf("device enrollment response omitted device_id")
+		return "", false, fmt.Errorf("device enrollment response omitted device_id")
 	}
-	return result.DeviceID, nil
-}
-
-func newDeviceID() (string, error) {
-	b := make([]byte, 16) // 128 bits (was 64 bits — increased per security audit)
-	if _, err := rand.Read(b); err != nil {
-		return "", fmt.Errorf("generating device ID: %w", err)
-	}
-	return "dev-" + hex.EncodeToString(b), nil
+	return result.DeviceID, false, nil
 }
 
 func configPath() (string, error) {

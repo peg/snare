@@ -370,9 +370,10 @@ func guidedInit(force bool) {
 }
 
 type canaryEventState struct {
-	available bool
-	lastSeen  string
-	count     int
+	available    bool
+	unregistered bool // receiver says new callbacks for this token are dropped
+	lastSeen     string
+	count        int
 }
 
 // cmdStatus shows active canaries on this machine.
@@ -425,6 +426,7 @@ func cmdStatus(args []string) {
 					Timestamp string `json:"timestamp"`
 					IsTest    bool   `json:"is_test"`
 				} `json:"events"`
+				Registered *bool `json:"registered"`
 			}
 			data, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
@@ -434,6 +436,7 @@ func cmdStatus(args []string) {
 				// servers) are unavailable, not "never fired".
 				if err := json.Unmarshal(data, &result); err == nil && result.Events != nil {
 					state.available = true
+					state.unregistered = result.Registered != nil && !*result.Registered
 				}
 				eventStates[c.ID] = state
 				continue
@@ -444,6 +447,7 @@ func cmdStatus(args []string) {
 				eventStates[c.ID] = state
 				continue
 			}
+			state.unregistered = result.Registered != nil && !*result.Registered
 			// Find most recent non-test event
 			for _, e := range result.Events {
 				if !e.IsTest {
@@ -464,6 +468,7 @@ func cmdStatus(args []string) {
 	fmt.Printf("Active canaries (%d):\n\n", len(active))
 	anyNever := false
 	anyUnknown := false
+	anyUnregistered := false
 	for _, c := range active {
 		age := time.Since(c.PlantedAt).Round(time.Minute)
 		if age < time.Minute {
@@ -501,6 +506,10 @@ func cmdStatus(args []string) {
 		fmt.Printf("    path:        %s\n", c.Path)
 		fmt.Printf("    planted:     %s ago\n", age)
 		fmt.Printf("    last event:  %s%s\n", lastEvent, alerts)
+		if state := eventStates[c.ID]; state.unregistered {
+			fmt.Println("    ✗ not registered — new callbacks are dropped")
+			anyUnregistered = true
+		}
 		fmt.Println()
 	}
 	fmt.Println("  ◆ precision reliability — active-use only; near-zero false positives")
@@ -512,6 +521,10 @@ func cmdStatus(args []string) {
 	if anyNever {
 		fmt.Println("  `never fired` means no real callback has been recorded for that canary yet.")
 		fmt.Println("  On a fresh install, that is expected until someone tries the fake credential.")
+		fmt.Println()
+	}
+	if anyUnregistered {
+		fmt.Println("  Some canaries are no longer registered and will not alert. Run `snare repair`.")
 		fmt.Println()
 	}
 	if anyUnknown {

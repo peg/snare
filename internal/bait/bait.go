@@ -347,8 +347,16 @@ func removeAppended(c manifest.Canary, force bool, dryRun bool) error {
 		return fmt.Errorf("%s: canary ID still present after excision — duplicate entry? Use --force", c.Path)
 	}
 
+	// Rewrite the real file, not the path we were given. Dotfile managers
+	// symlink ~/.gitconfig etc. into a repo; renaming over the link would
+	// replace it with a regular file and leave the canary in the repo copy.
+	writePath, err := filepath.EvalSymlinks(c.Path)
+	if err != nil {
+		return fmt.Errorf("resolving %s: %w", c.Path, err)
+	}
+
 	// Write back atomically, preserving original file permissions
-	tmp := c.Path + ".snare-tmp"
+	tmp := writePath + ".snare-tmp"
 	if err := os.WriteFile(tmp, []byte(newContent), origMode); err != nil {
 		return fmt.Errorf("writing temp file: %w", err)
 	}
@@ -357,7 +365,7 @@ func removeAppended(c manifest.Canary, force bool, dryRun bool) error {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("setting permissions on temp file: %w", err)
 	}
-	if err := os.Rename(tmp, c.Path); err != nil {
+	if err := os.Rename(tmp, writePath); err != nil {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("replacing %s: %w", c.Path, err)
 	}
