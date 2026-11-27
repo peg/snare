@@ -9,6 +9,9 @@ Versioning: [Semantic Versioning](https://semver.org/)
 
 ## [Unreleased]
 
+### Security
+- The events API authenticates the calling device before looking up a token.
+
 ### Fixed
 - `snare events` on the managed Worker now returns the newest events; event keys sort newest-first and older keys are still read.
 - `snare prove` and `doctor --test` no longer fail once a token has 20 or more stored events: test callbacks carry a proof nonce and `prove` matches the new event by identity instead of counting.
