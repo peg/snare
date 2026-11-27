@@ -371,7 +371,7 @@ Safety:
 			// one locally when enrollment failed), so no registration can
 			// succeed with it. Enroll a fresh identity once and retry.
 			reenrolled = true
-			fmt.Println("  This device is not known to the receiver; enrolling a new device identity...")
+			fmt.Printf("  Device %s is not known to the receiver; enrolling a new device identity...\n", cfg.DeviceID)
 			if rerr := cfg.Reenroll(); rerr != nil {
 				fatal(rerr)
 			}

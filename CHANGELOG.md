@@ -14,7 +14,7 @@ Versioning: [Semantic Versioning](https://semver.org/)
 - `snare prove` and `doctor --test` no longer fail once a token has 20 or more stored events: test callbacks carry a proof nonce and `prove` matches the new event by identity instead of counting.
 - Escape every interpolated value in Telegram alerts so a crafted user agent can no longer make Telegram reject (and drop) the alert.
 - `snare disarm` edits the target of a symlinked dotfile instead of replacing the symlink, so the canary no longer stays in the dotfiles repo.
-- Worker registrations no longer expire after 365 days. Older registrations are rewritten without a TTL the next time their owner runs `snare status`, `doctor`, `events` or `prove`.
+- Worker registrations no longer expire after 365 days. Run `snare repair` to clear the expiry on older ones.
 - `doctor` and `status` report a token whose registration lapsed as not registered instead of healthy.
 - First-run enrollment with snare.sh retries transient failures and then fails without writing a config, instead of inventing a local device ID the receiver rejects forever. `snare repair` re-enrolls configs left in that state.
 

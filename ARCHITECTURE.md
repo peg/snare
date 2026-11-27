@@ -62,7 +62,7 @@ Device IDs are server-assigned via `POST /api/devices` — clients cannot choose
 | Key pattern | Value | TTL |
 |---|---|---|
 | `device:{device_id}` | `{secret_hash, created_at}` | No expiry |
-| `webhook:{token_id}` | `{webhook_url, device_id, canary_type, label, registered_at, persistent}` | none (older records with a 365-day TTL are rewritten on the owner's next events read) |
+| `webhook:{token_id}` | `{webhook_url, device_id, canary_type, label, registered_at}` | none (older records keep a 365-day TTL until `snare repair` re-registers them) |
 | `event:{token}:{timestamp}:{uuid}` | event JSON (see below) | 90 days |
 | `dedup:{token}:{ip}:{minute}` | `1` | 120 seconds |
 | `rl:{scope}:{window}` | request count | 2× window duration |

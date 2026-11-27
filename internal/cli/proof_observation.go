@@ -80,7 +80,7 @@ func waitForEvent(cfg *config.Config, tokenID, proofID string, timeout time.Dura
 				}
 			}
 		}
-		time.Sleep(min(300*time.Millisecond, time.Until(deadline)))
+		time.Sleep(min(time.Second, time.Until(deadline)))
 	}
 	return apiEvent{}, fmt.Errorf("no new callback observed within %s", timeout.Round(time.Second))
 }

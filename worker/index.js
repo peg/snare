@@ -452,8 +452,9 @@ export function eventKey(token, ms, id) {
 export const LEGACY_EVENT_KEYS_UNTIL = Date.UTC(2027, 2, 15);
 
 // Returns up to n event key names, newest first. Keys written before v0.5.1
-// used `event:{token}:{ms}:{uuid}` (oldest first); they expire within 90 days
-// and are paged in full only when the new prefix has fewer than n keys.
+// used `event:{token}:{ms}:{uuid}` (oldest first) and are read, at most
+// LEGACY_PAGES list calls deep, only when the new prefix has fewer than n.
+const LEGACY_PAGES = 2;
 export async function newestEventKeys(env, token, n, now = Date.now()) {
   const current = await env.SNARE_KV.list({ prefix: `evr:${token}:`, limit: n });
   const names = current.keys.map(k => k.name);
@@ -461,7 +462,7 @@ export async function newestEventKeys(env, token, n, now = Date.now()) {
 
   let legacy = [];
   let cursor;
-  for (;;) {
+  for (let i = 0; i < LEGACY_PAGES; i++) {
     const page = await env.SNARE_KV.list({ prefix: `event:${token}:`, cursor });
     legacy = legacy.concat(page.keys.map(k => k.name)).slice(-n);
     if (page.list_complete !== false || !page.cursor) break;
@@ -470,49 +471,36 @@ export async function newestEventKeys(env, token, n, now = Date.now()) {
   return names.concat(legacy.reverse()).slice(0, n);
 }
 
-// ─── Events lookup ───────────────────────────────────────────────────────────
-
-// Registrations written by older Workers carry a 365-day TTL. Rewriting the
-// record once without expirationTtl clears it; `persistent` marks the rewrite
-// so later reads cost no write. Only called after the owner authenticated.
-async function persistRegistration(env, token, reg) {
-  if (!reg || reg.persistent) return;
-  await env.SNARE_KV.put(`webhook:${token}`, JSON.stringify({ ...reg, persistent: true }));
+async function readEvents(env, token) {
+  const events = [];
+  for (const name of await newestEventKeys(env, token, 20)) {
+    const raw = await env.SNARE_KV.get(name);
+    if (!raw) continue;
+    try { events.push(JSON.parse(raw)); } catch { /* skip corrupt */ }
+  }
+  return events;
 }
+
+// ─── Events lookup ───────────────────────────────────────────────────────────
 
 async function handleEvents(token, request, env) {
   if (!env.SNARE_KV) return json({ error: "KV not configured" }, 500);
 
-  // Auth: require device secret
-  // Look up which device owns this token
-  const regRaw = await env.SNARE_KV.get(`webhook:${token}`);
   let deviceId = null;
-  let reg = null;
+  const regRaw = await env.SNARE_KV.get(`webhook:${token}`);
   if (regRaw) {
-    try {
-      reg = JSON.parse(regRaw);
-      deviceId = reg.device_id;
-    } catch { /* fall through */ }
+    try { deviceId = JSON.parse(regRaw).device_id; } catch { /* fall through */ }
   }
   // `registered: false` tells the owner that callbacks are being dropped even
   // though old events are still readable (expired or revoked registration).
   const registered = Boolean(deviceId);
 
-  // If the token is no longer registered, fall back to the owner recorded on
-  // the newest stored event so revoked tokens don't become readable by any
-  // random valid device.
+  // An unregistered token is owned by the device on its newest stored event,
+  // so revoked tokens don't become readable by any valid device.
+  let events = null;
   if (!deviceId) {
-    for (const name of await newestEventKeys(env, token, 20)) {
-      const raw = await env.SNARE_KV.get(name);
-      if (!raw) continue;
-      try {
-        const event = JSON.parse(raw);
-        if (event.device_id) {
-          deviceId = event.device_id;
-          break;
-        }
-      } catch { /* skip corrupt */ }
-    }
+    events = await readEvents(env, token);
+    deviceId = events.find(e => e.device_id)?.device_id || null;
   }
 
   // Auth required for ALL event reads. The token itself must have a known owner
@@ -530,15 +518,8 @@ async function handleEvents(token, request, env) {
   if (proofId !== null && !PROOF_ID.test(proofId)) {
     return json({ error: "invalid proof_id" }, 400);
   }
-  if (registered) await persistRegistration(env, token, reg);
 
-  let events = [];
-  for (const name of await newestEventKeys(env, token, 20)) {
-    const raw = await env.SNARE_KV.get(name);
-    if (raw) {
-      try { events.push(JSON.parse(raw)); } catch { /* skip corrupt */ }
-    }
-  }
+  events ??= await readEvents(env, token);
   if (proofId !== null) events = events.filter(e => e.proof_id === proofId);
 
   if (events.length === 0) {
@@ -629,7 +610,6 @@ async function handleRegister(request, env) {
     canary_type:   canary_type || null,
     label:         label       || null,
     registered_at: new Date().toISOString(),
-    persistent:    true,
   })); // No TTL: an expired registration silently drops callbacks.
 
   return json({ status: "registered", token_id });

@@ -73,13 +73,13 @@ describe("events window", () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(Date.UTC(2026, 11, 1));
     const rows = [];
-    for (let i = 0; i < 2100; i++) {
+    for (let i = 0; i < 1500; i++) {
       const ms = Date.UTC(2026, 9, 1) + i * 1000;
       rows.push([`event:${TOKEN}:${ms}:id${i}`, JSON.stringify({ ...ev(0), timestamp: new Date(ms).toISOString(), n: i })]);
     }
     const resp = await readEvents(await ownerEnv(rows));
     const body = await resp.json();
-    expect(body.events[0].n).toBe(2099);
+    expect(body.events[0].n).toBe(1499);
     expect(body.events).toHaveLength(10);
   });
 
@@ -89,6 +89,22 @@ describe("events window", () => {
       [eventKey(TOKEN, Date.UTC(2026, 10, 2), "new"), JSON.stringify(ev(99))],
     ]);
     expect(await newestEventKeys(env, TOKEN, 1)).toEqual([eventKey(TOKEN, Date.UTC(2026, 10, 2), "new")]);
+  });
+
+  it("bounds legacy paging and lists once for an unregistered token", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.UTC(2026, 11, 1));
+    const rows = [];
+    for (let i = 0; i < 2500; i++) {
+      rows.push([`event:${TOKEN}:${Date.UTC(2026, 9, 1) + i}:id${i}`, JSON.stringify(ev(i))]);
+    }
+    const env = await ownerEnv(rows);
+    env.SNARE_KV.map.delete(`webhook:${TOKEN}`);
+    let lists = 0;
+    const list = env.SNARE_KV.list;
+    env.SNARE_KV.list = (opts) => { lists++; return list(opts); };
+    expect((await readEvents(env)).status).toBe(200);
+    expect(lists).toBe(3);
   });
 
   it("stops listing legacy keys once they have all expired", async () => {
@@ -182,17 +198,10 @@ describe("registration lifetime", () => {
     expect(put.opts?.expirationTtl).toBeUndefined();
   });
 
-  it("rewrites a legacy registration without TTL when the owner reads events", async () => {
+  it("never rewrites the registration when the owner reads events", async () => {
     const env = await ownerEnv();
-    expect((await readEvents(env)).status).toBe(404);
-    const reg = JSON.parse(env.SNARE_KV.map.get(`webhook:${TOKEN}`));
-    expect(reg.persistent).toBe(true);
-    expect(reg.device_id).toBe(DEVICE);
-    const writes = env.SNARE_KV.puts.filter(p => p.k === `webhook:${TOKEN}`);
-    expect(writes).toHaveLength(1);
-    expect(writes[0].opts?.expirationTtl).toBeUndefined();
     await readEvents(env);
-    expect(env.SNARE_KV.puts.filter(p => p.k === `webhook:${TOKEN}`)).toHaveLength(1);
+    expect(env.SNARE_KV.puts.filter(p => p.k.startsWith("webhook:"))).toHaveLength(0);
   });
 
   it("reports registered:false when only event history remains", async () => {
