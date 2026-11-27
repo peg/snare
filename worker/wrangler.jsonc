@@ -37,17 +37,30 @@
           "custom_domain": true
         }
       ],
-      "kv_namespaces": [
+      "kv_namespaces": [],
+      "d1_databases": [
         {
-          "binding": "SNARE_KV",
-          "id": "64c03175839d4983b6d54649dec5dcf1"
+          "binding": "SNARE_DB",
+          "database_name": "snare-state-staging",
+          "database_id": "5e787904-23b9-4c46-9f19-fb94a9210dd8",
+          "migrations_dir": "migrations"
         }
       ],
+      "ratelimits": [
+        { "name": "ENROLLMENT_RATE_LIMITER", "namespace_id": "2101", "simple": { "limit": 3, "period": 60 } },
+        { "name": "API_SOURCE_RATE_LIMITER", "namespace_id": "2102", "simple": { "limit": 120, "period": 60 } },
+        { "name": "CALLBACK_SOURCE_RATE_LIMITER", "namespace_id": "2103", "simple": { "limit": 600, "period": 60 } },
+        { "name": "API_DEVICE_RATE_LIMITER", "namespace_id": "2104", "simple": { "limit": 120, "period": 60 } },
+        { "name": "NOTIFICATION_RATE_LIMITER", "namespace_id": "2105", "simple": { "limit": 1, "period": 60 } }
+      ],
+      "triggers": { "crons": ["*/5 * * * *"] },
       "version_metadata": {
         "binding": "CF_VERSION_METADATA"
       },
       "vars": {
-        "SNARE_ENVIRONMENT": "staging"
+        "SNARE_ENVIRONMENT": "staging",
+        "STORAGE_BACKEND": "d1",
+        "RATE_LIMITS_REQUIRED": "true"
       },
       "observability": {
         "enabled": true,
