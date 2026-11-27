@@ -5,15 +5,12 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/peg/snare/internal/config"
-	"github.com/peg/snare/internal/manifest"
 )
 
 func TestProofObservationRejectsUnrelatedEvents(t *testing.T) {
@@ -22,7 +19,6 @@ func TestProofObservationRejectsUnrelatedEvents(t *testing.T) {
 		{ID: "31", ProofID: strings.Repeat("b", 32), Timestamp: time.Now().Format(time.RFC3339)},
 		{ID: "32", Timestamp: time.Now().Format(time.RFC3339)},
 		{ID: "33", ProofID: want, IsTest: true},
-		{ProofID: want},
 	} {
 		t.Run(fmt.Sprintf("%s-%v", candidate.ID, candidate.IsTest), func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -32,7 +28,7 @@ func TestProofObservationRejectsUnrelatedEvents(t *testing.T) {
 			defer srv.Close()
 			cfg := &config.Config{CallbackBase: srv.URL + "/c", DeviceID: "dev-test", DeviceSecret: strings.Repeat("a", 64)}
 			if _, err := waitForProofEvent(cfg, "proof-token-123", want, false, 20*time.Millisecond); err == nil {
-				t.Fatal("unrelated, mismatched-kind, or unidentified event satisfied proof")
+				t.Fatal("unrelated or mismatched-kind event satisfied proof")
 			}
 		})
 	}
@@ -102,45 +98,5 @@ func TestRepeatedWebhookProofsSurviveFullHistoryAndConcurrentTraffic(t *testing.
 	}
 	if len(seen) != 3 {
 		t.Fatalf("got %d distinct proofs, want 3", len(seen))
-	}
-}
-
-func TestPrepareCorrelatedProofVerifiesOriginalAndCleansCopy(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "mcp.json")
-	const callback = "https://snare.example/c/correlated-mcp-token"
-	content := `{"mcpServers":{"backup":{"url":"` + callback + `/mcp"}}}`
-	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
-		t.Fatal(err)
-	}
-	canary := manifest.Canary{ID: "correlated-mcp-token", Type: "mcp", Path: path, Content: content, ContentHash: manifest.HashContent(content), Mode: manifest.ModeNewFile, CallbackURL: callback}
-	recipe, err := buildProofRecipe(canary)
-	if err != nil {
-		t.Fatal(err)
-	}
-	correlated, proofID, cleanup, err := prepareCorrelatedProof(&config.Config{}, recipe)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer cleanup()
-	if correlated.Canary.Path == path || len(proofID) != 32 || !strings.Contains(correlated.Command, callback+"/proof/"+proofID+"/mcp") {
-		t.Fatalf("incorrect correlated copy: %+v %s", correlated, proofID)
-	}
-	info, err := os.Stat(correlated.Canary.Path)
-	if err != nil || info.Mode().Perm() != 0600 {
-		t.Fatalf("insecure proof copy: %v %v", info, err)
-	}
-	original, err := os.ReadFile(path)
-	if err != nil || string(original) != content {
-		t.Fatalf("original changed: %s %v", original, err)
-	}
-	cleanup()
-	if _, err := os.Stat(correlated.Canary.Path); !os.IsNotExist(err) {
-		t.Fatalf("temporary config remains: %v", err)
-	}
-	if err := os.WriteFile(path, []byte(strings.ReplaceAll(content, "/mcp", "/different")), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, _, err := prepareCorrelatedProof(&config.Config{}, recipe); err == nil {
-		t.Fatal("modified original config passed integrity verification")
 	}
 }

@@ -23,6 +23,9 @@ type apiEvent struct {
 	ProofID   string `json:"proof_id"`
 	Timestamp string `json:"timestamp"`
 	IsTest    bool   `json:"is_test"`
+	IP        string `json:"ip"`
+	UserAgent string `json:"userAgent"`
+	Path      string `json:"path"`
 }
 
 type tokenProbeResult struct {
@@ -94,9 +97,6 @@ type proofReportEntry struct {
 	EventVisibility string `json:"event_visibility"`
 	ObservedAt      string `json:"observed_at,omitempty"`
 	ObservedAfterMS int64  `json:"observed_after_ms,omitempty"`
-	ProofID         string `json:"proof_id,omitempty"`
-	EventID         string `json:"event_id,omitempty"`
-	ExecutionMode   string `json:"execution_mode,omitempty"`
 	Error           string `json:"error,omitempty"`
 	NextCommand     string `json:"next_command"`
 }
@@ -114,7 +114,7 @@ Checks:
   - Local canary file integrity
   - Token registration ownership
   - Events API readability/auth
-  - Webhook test history
+  - Test callback history
 
 Flags:
   --test    fire a live test callback and confirm it is readable via events API
@@ -266,28 +266,28 @@ Flags:
 	testProbe := probeTokenEvents(cfg, testToken)
 	switch {
 	case testProbe.AuthFailed:
-		check("Webhook test history", "fail", "auth failed reading test token history")
+		check("Test callback history", "fail", "auth failed reading test token history")
 	case testProbe.OwnedReadable && countEventsByKind(testProbe.Events, true) > 0:
-		check("Webhook test history", "ok", fmt.Sprintf("last test callback recorded at %s", latestEventTimestamp(testProbe.Events, true)))
+		check("Test callback history", "ok", fmt.Sprintf("last test callback recorded at %s", latestEventTimestamp(testProbe.Events, true)))
 	case testProbe.OwnedReadable:
-		check("Webhook test history", "warn", "test token registered but no test callbacks recorded yet")
+		check("Test callback history", "warn", "test token registered but no test callbacks recorded yet")
 	case testProbe.Unregistered:
-		check("Webhook test history", "warn", "no test token history yet — run `snare doctor --test`")
+		check("Test callback history", "warn", "no test token history yet — run `snare doctor --test`")
 	default:
-		check("Webhook test history", "warn", "test token state unavailable")
+		check("Test callback history", "warn", "test token state unavailable")
 	}
 
 	if runLiveTest {
 		live := runWebhookTest(cfg)
 		switch {
 		case live.RegisterErr != nil:
-			check("Live webhook test", "fail", fmt.Sprintf("test token registration failed: %v", live.RegisterErr))
+			check("Live callback test", "fail", fmt.Sprintf("test token registration failed: %v", live.RegisterErr))
 		case live.FireErr != nil:
-			check("Live webhook test", "fail", fmt.Sprintf("callback trigger failed: %v", live.FireErr))
+			check("Live callback test", "fail", fmt.Sprintf("callback trigger failed: %v", live.FireErr))
 		case live.ObserveErr != nil:
-			check("Live webhook test", "fail", fmt.Sprintf("callback fired but event not readable: %v", live.ObserveErr))
+			check("Live callback test", "fail", fmt.Sprintf("callback fired but event not readable: %v", live.ObserveErr))
 		default:
-			check("Live webhook test", "ok", fmt.Sprintf("callback recorded at %s", live.ObservedAt))
+			check("Live callback test", "ok", fmt.Sprintf("callback recorded at %s; confirm the test alert reached your channel", live.ObservedAt))
 		}
 	}
 
@@ -363,8 +363,22 @@ Safety:
 	fmt.Printf("  Re-registering %d active token(s)...\n", len(active))
 	regOK := 0
 	regFail := 0
+	reenrolled := false
 	for _, c := range active {
-		if err := registerToken(cfg, c.ID, c.Type, c.Label); err != nil {
+		err := registerToken(cfg, c.ID, c.Type, c.Label)
+		if err != nil && !reenrolled && strings.Contains(err.Error(), "unknown device") {
+			// The receiver never minted this device ID (older CLIs invented
+			// one locally when enrollment failed), so no registration can
+			// succeed with it. Enroll a fresh identity once and retry.
+			reenrolled = true
+			fmt.Println("  This device is not known to the receiver; enrolling a new device identity...")
+			if rerr := cfg.Reenroll(); rerr != nil {
+				fatal(rerr)
+			}
+			fmt.Println("  ✓ device enrolled")
+			err = registerToken(cfg, c.ID, c.Type, c.Label)
+		}
+		if err != nil {
 			regFail++
 			fmt.Fprintf(os.Stderr, "    ✗ %-12s %s: %v\n", c.Type, shortTokenID(c.ID), err)
 			continue
@@ -601,26 +615,12 @@ With --redact:
 			continue
 		}
 
-		correlated, proofID, cleanup, err := prepareCorrelatedProof(cfg, recipe)
-		if err != nil {
-			msg := fmt.Sprintf("cannot prepare proof: %v", err)
-			report.Proofs[i].Status = "failed"
-			report.Proofs[i].Error = msg
-			report.Proofs[i].EventVisibility = "trigger not run; planted content could not be verified"
-			fmt.Fprintf(os.Stderr, "    ✗ %s\n", msg)
-			failures++
-			continue
-		}
-		report.Proofs[i].ProofID = proofID
-		report.Proofs[i].ExecutionMode = "verified planted snippet in isolated temporary config with a unique callback path"
 		report.Proofs[i].EventVisibility = "events API readable before trigger"
 		if !jsonOutput {
 			fmt.Printf("  Running %-8s proof...\n", recipe.Canary.Type)
 		}
 		startedAt := time.Now()
-		runErr := runProofCommand(correlated.Command, 15*time.Second)
-		cleanup()
-		if err := runErr; err != nil {
+		if err := runProofCommand(recipe.Command, 15*time.Second); err != nil {
 			msg := fmt.Sprintf("trigger command failed: %v", err)
 			report.Proofs[i].Status = "failed"
 			report.Proofs[i].EventVisibility = "events API readable before trigger; callback observation skipped because trigger command failed"
@@ -630,7 +630,7 @@ With --redact:
 			continue
 		}
 
-		observed, err := waitForProofEvent(cfg, recipe.Canary.ID, proofID, false, 8*time.Second)
+		observed, err := waitForNewEvent(cfg, recipe.Canary.ID, before.Events, 8*time.Second)
 		if err != nil {
 			msg := fmt.Sprintf("callback not observed: %v", err)
 			report.Proofs[i].Status = "failed"
@@ -647,7 +647,6 @@ With --redact:
 		report.Proofs[i].Status = "passed"
 		report.Proofs[i].EventVisibility = "callback observed through events API after trigger"
 		report.Proofs[i].ObservedAt = ts
-		report.Proofs[i].EventID = observed.ID
 		report.Proofs[i].ObservedAfterMS = time.Since(startedAt).Milliseconds()
 		if !jsonOutput {
 			fmt.Printf("    ✓ callback observed at %s\n", ts)
@@ -669,7 +668,7 @@ With --redact:
 		os.Exit(1)
 	}
 	if !jsonOutput {
-		fmt.Printf("  ✓ %s. Alerts are firing as expected.\n", proofCompletionLabel(report.Mode))
+		fmt.Printf("  ✓ %s. Callbacks reached the receiver; confirm the alerts arrived in your channel.\n", proofCompletionLabel(report.Mode))
 		fmt.Println()
 	}
 }
@@ -804,9 +803,6 @@ func formatProofReport(report proofReport) string {
 		fmt.Fprintf(&b, "      path:       %s\n", proof.Path)
 		fmt.Fprintf(&b, "      command:    %s\n", proof.Command)
 		fmt.Fprintf(&b, "      expect:     %s\n", proof.Expected)
-		if proof.ExecutionMode != "" {
-			fmt.Fprintf(&b, "      execution:  %s\n", proof.ExecutionMode)
-		}
 		if proof.EventVisibility != "" {
 			fmt.Fprintf(&b, "      visibility: %s\n", proof.EventVisibility)
 		}
@@ -845,8 +841,8 @@ func proofReportProves(run bool, mode string) []string {
 	label := proofModeLabel(mode)
 	if run {
 		return []string{
-			fmt.Sprintf("Snare verified the selected active %s snippets on disk, then executed isolated copies with unique callback paths.", label),
-			"Passed proofs produced non-test callbacks matching their own proof identifiers through Snare's events API.",
+			fmt.Sprintf("Snare found active %s canaries and executed their safe trigger commands.", label),
+			"Passed proofs produced real non-test callbacks that were readable through Snare's events API.",
 		}
 	}
 	return []string{
@@ -862,8 +858,6 @@ func proofReportLimitations(run bool, mode string) []string {
 	}
 	if !run {
 		limitations = append(limitations, "It does not prove callback delivery until rerun with --run.")
-	} else {
-		limitations = append(limitations, "The proof exercises a verified snippet copy, not interactions with the rest of the original configuration; unrelated callbacks cannot satisfy it.")
 	}
 	return limitations
 }
@@ -994,6 +988,8 @@ func probeTokenEvents(cfg *config.Config, tokenID string) tokenProbeResult {
 	return probeTokenProofEvents(cfg, tokenID, "")
 }
 
+// probeTokenProofEvents asks the receiver to filter to one proof nonce.
+// Receivers that ignore the filter return the normal list.
 func probeTokenProofEvents(cfg *config.Config, tokenID, proofID string) tokenProbeResult {
 	result := tokenProbeResult{
 		TokenID:     tokenID,
@@ -1002,7 +998,7 @@ func probeTokenProofEvents(cfg *config.Config, tokenID, proofID string) tokenPro
 
 	eventsURL := cfg.APIBase() + "/api/events/" + tokenID
 	if proofID != "" {
-		eventsURL += "?proof_id=" + proofID // generated lowercase hex, no escaping needed
+		eventsURL += "?proof_id=" + proofID // lowercase hex from newProofID; no escaping needed
 	}
 	resp, err := authedGet(eventsURL, cfg)
 	if err != nil {
@@ -1015,13 +1011,17 @@ func probeTokenProofEvents(cfg *config.Config, tokenID, proofID string) tokenPro
 	body, _ := io.ReadAll(resp.Body)
 
 	var payload struct {
-		Events []apiEvent `json:"events"`
+		Events     []apiEvent `json:"events"`
+		Registered *bool      `json:"registered"` // absent on older receivers
 	}
 	if (resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusNotFound) &&
 		json.Unmarshal(body, &payload) == nil && payload.Events != nil {
 		result.OwnedReadable = true
 		result.Unavailable = false
 		result.Events = payload.Events
+		// Old events stay readable after a registration lapses, but new
+		// callbacks are dropped. Report that instead of "owned".
+		result.Unregistered = payload.Registered != nil && !*payload.Registered
 		return result
 	}
 
@@ -1060,10 +1060,10 @@ func summarizeProbes(probes []tokenProbeResult) probeSummary {
 	sum := probeSummary{Total: len(probes)}
 	for _, p := range probes {
 		switch {
-		case p.OwnedReadable:
-			sum.Readable++
 		case p.Unregistered:
 			sum.Unregistered++
+		case p.OwnedReadable:
+			sum.Readable++
 		case p.AuthFailed:
 			sum.AuthFailed++
 		default:
@@ -1075,10 +1075,10 @@ func summarizeProbes(probes []tokenProbeResult) probeSummary {
 
 func runWebhookTest(cfg *config.Config) webhookTestResult {
 	testToken := deviceTestTokenID(cfg)
+
 	res := webhookTestResult{}
 	if err := registerToken(cfg, testToken, "test", "test"); err != nil {
 		res.RegisterErr = err
-		return res
 	}
 	proofID, err := newProofID()
 	if err != nil {

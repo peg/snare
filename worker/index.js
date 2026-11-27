@@ -350,7 +350,7 @@ async function processAlert(token, metadata, env, ctx) {
     return;
   }
   if (env.SNARE_KV) {
-    await env.SNARE_KV.put(`event:${token}:${Date.now()}:${event.id}`, JSON.stringify({ ...event, delivery_mode: "best_effort" }),
+    await env.SNARE_KV.put(eventKey(token, Date.now(), event.id), JSON.stringify({ ...event, delivery_mode: "best_effort" }),
       { expirationTtl: 60 * 60 * 24 * 90 });
   }
   if (!suppression) {
@@ -359,7 +359,45 @@ async function processAlert(token, metadata, env, ctx) {
   }
 }
 
+// ─── Event keys ──────────────────────────────────────────────────────────────
+
+const MAX_TS = 9999999999999;
+
+// KV lists keys in lexicographic order. Event keys store an inverted
+// timestamp so a plain list returns the newest events first.
+export function eventKey(token, ms, id) {
+  return `evr:${token}:${String(MAX_TS - ms).padStart(13, "0")}:${id}`;
+}
+
+// Returns up to n event key names, newest first. Keys written before v0.5.1
+// used `event:{token}:{ms}:{uuid}` (oldest first); they expire within 90 days
+// and are paged in full only when the new prefix has fewer than n keys.
+export async function newestEventKeys(env, token, n) {
+  const current = await env.SNARE_KV.list({ prefix: `evr:${token}:`, limit: n });
+  const names = current.keys.map(k => k.name);
+  if (names.length >= n) return names.slice(0, n);
+
+  let legacy = [];
+  let cursor;
+  for (let pages = 0; ; pages++) {
+    if (pages >= 10) throw new PolicyError(503, "history_migration_required", "history requires indexed storage migration");
+    const page = await env.SNARE_KV.list({ prefix: `event:${token}:`, cursor });
+    legacy = legacy.concat(page.keys.map(k => k.name)).slice(-n);
+    if (page.list_complete !== false || !page.cursor) break;
+    cursor = page.cursor;
+  }
+  return names.concat(legacy.reverse()).slice(0, n);
+}
+
 // ─── Events lookup ───────────────────────────────────────────────────────────
+
+// Registrations written by older Workers carry a 365-day TTL. Rewriting the
+// record once without expirationTtl clears it; `persistent` marks the rewrite
+// so later reads cost no write. Only called after the owner authenticated.
+async function persistRegistration(env, token, reg) {
+  if (!reg || reg.persistent) return;
+  await env.SNARE_KV.put(`webhook:${token}`, JSON.stringify({ ...reg, persistent: true }));
+}
 
 async function handleEvents(token, request, env) {
   const proofId = new URL(request.url).searchParams.get("proof_id");
@@ -368,7 +406,7 @@ async function handleEvents(token, request, env) {
   let legacyEvents;
   let owner = record?.device_id;
   if (!owner && !env.SNARE_DB) {
-    legacyEvents = await readLegacyEvents(env, token);
+    legacyEvents = await recentKVEvents(env, token);
     const owners = new Set(legacyEvents.map(event => event.device_id).filter(Boolean));
     if (owners.size === 1) owner = [...owners][0];
   }
@@ -377,9 +415,11 @@ async function handleEvents(token, request, env) {
   if (!auth.ok) return json({ error: auth.error }, 401);
   await enforceDeviceRateLimit(env, owner, "events");
   const events = env.SNARE_DB ? await storeFor(env).getEvents(token, { proofId })
-    : (legacyEvents || await readLegacyEvents(env, token)).filter(event => event.device_id === owner && (proofId === null || event.proof_id === proofId)).slice(0, 10);
+    : (legacyEvents || await recentKVEvents(env, token)).filter(event => event.device_id === owner && (proofId === null || event.proof_id === proofId)).slice(0, 10);
   if (record?.revoked && proofId === null && events.length === 0) return json({ error: "token not registered" }, 401);
-  return json({ token, count: events.length, events, storage: env.SNARE_DB ? "d1" : "kv" });
+  const registered = Boolean(record && !record.revoked);
+  if (registered && !env.SNARE_DB) await persistRegistration(env, token, record);
+  return json({ token, registered, count: events.length, events, storage: env.SNARE_DB ? "d1" : "kv" });
 }
 
 // ─── Device creation ────────────────────────────────────────────────────────
@@ -430,7 +470,7 @@ async function handleRegister(request, env) {
     // Immutable tombstone in legacy mode. KV cannot serialize concurrent first
     // claims; managed deployments requiring atomic claims must enable D1.
     await env.SNARE_KV.put(`owner:${token_id}`, JSON.stringify({ device_id }));
-    await env.SNARE_KV.put(`webhook:${token_id}`, JSON.stringify(record));
+    await env.SNARE_KV.put(`webhook:${token_id}`, JSON.stringify({ ...record, persistent: true }));
   }
   return json({ status: "registered", token_id });
 }
@@ -496,28 +536,38 @@ async function getTokenRecord(token, env) {
   return record || (owner ? { ...owner, revoked: true } : null);
 }
 
+async function recentKVEvents(env, token) {
+  if (!env.SNARE_KV?.list) return [];
+  const events = [];
+  for (const name of await newestEventKeys(env, token, 20)) {
+    const event = await readKVRecord(env, name);
+    if (event) events.push({ ...event, id: event.id || name.split(":").at(-1) });
+  }
+  return events.sort((a, b) => b.timestamp.localeCompare(a.timestamp) || b.id.localeCompare(a.id));
+}
+
 async function readLegacyEvents(env, token) {
   if (!env.SNARE_KV?.list) return [];
   const events = [];
   let keysRead = 0;
-  let cursor;
   // Compatibility path only: paginate before sorting, never call the oldest
   // first page 'recent'. D1 provides the indexed path for larger histories.
-  for (let page = 0; page < 10; page++) {
-    const result = await env.SNARE_KV.list({ prefix: `event:${token}:`, limit: 1000, ...(cursor ? { cursor } : {}) });
-    if (keysRead + result.keys.length > 900) {
-      throw new PolicyError(503, "history_migration_required", "history requires indexed storage migration");
+  for (const prefix of [`evr:${token}:`, `event:${token}:`]) {
+    let cursor;
+    for (let page = 0; ; page++) {
+      const result = await env.SNARE_KV.list({ prefix, limit: 1000, ...(cursor ? { cursor } : {}) });
+      keysRead += result.keys.length;
+      if (keysRead > 900 || page >= 10) throw new PolicyError(503, "history_migration_required", "history requires indexed storage migration");
+      for (const key of result.keys) {
+        const event = await readKVRecord(env, key.name);
+        if (event) events.push({ ...event, id: event.id || key.name.split(":").at(-1) });
+      }
+      if (result.list_complete !== false) break;
+      if (!result.cursor || result.cursor === cursor) throw new PolicyError(503, "history_migration_required", "history requires indexed storage migration");
+      cursor = result.cursor;
     }
-    keysRead += result.keys.length;
-    for (const key of result.keys) {
-      const event = await readKVRecord(env, key.name);
-      if (event) events.push({ ...event, id: event.id || key.name.split(":").at(-1) });
-    }
-    if (result.list_complete !== false) return events.sort((a, b) => b.timestamp.localeCompare(a.timestamp) || b.id.localeCompare(a.id));
-    if (!result.cursor || result.cursor === cursor) break;
-    cursor = result.cursor;
   }
-  throw new PolicyError(503, "history_migration_required", "history requires indexed storage migration");
+  return events.sort((a, b) => b.timestamp.localeCompare(a.timestamp) || b.id.localeCompare(a.id));
 }
 
 // ─── Alert formatting ────────────────────────────────────────────────────────
@@ -692,14 +742,16 @@ function buildSlackPayload(event, meta, type, fromCloud) {
   };
 }
 
-function escapeHTML(value) {
-  return String(value).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+// Telegram rejects HTML-mode messages with stray < or &, and the UA is
+// attacker-controlled. Escape every interpolated value.
+export function escapeHTML(value) {
+  return String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
 function buildTelegramPayload(event, meta, type, fromCloud) {
   const isTest   = event.is_test;
-  const location = [event.city, event.country].filter(Boolean).join(", ") || "unknown";
-  const network  = event.asnOrg ? `${event.asnOrg} (AS${event.asn})` : (event.ip || "unknown");
+  const location = escapeHTML([event.city, event.country].filter(Boolean).join(", ") || "unknown");
+  const network  = escapeHTML(event.asnOrg ? `${event.asnOrg} (AS${event.asn})` : (event.ip || "unknown"));
 
   let title;
   if (isTest) {
@@ -714,10 +766,10 @@ function buildTelegramPayload(event, meta, type, fromCloud) {
     title,
     "",
     `<b>Token:</b> <code>${escapeHTML(event.token)}</code>`,
-    `<b>Time:</b> ${escapeHTML(event.timestamp.replace("T", " ").replace(/\.\d+Z$/, " UTC"))}`,
+    `<b>Time:</b> ${event.timestamp.replace("T", " ").replace(/\.\d+Z$/, " UTC")}`,
     `<b>IP:</b> ${escapeHTML(event.ip || "unknown")}`,
-    `<b>Location:</b> ${escapeHTML(location)}`,
-    `<b>Network:</b> ${escapeHTML(network)}`,
+    `<b>Location:</b> ${location}`,
+    `<b>Network:</b> ${network}`,
     `<b>Method:</b> ${escapeHTML(event.method)}`,
     `<b>UA:</b> <code>${escapeHTML((event.userAgent || "unknown").slice(0, 100))}</code>`,
   ];
@@ -802,6 +854,7 @@ export {
   CANARY_TYPES,
   SCANNER_ORGS,
   forwardAlert,
+  buildTelegramPayload,
   isAllowedWebhookURL,
   resolveWebhooks,
   shouldFilter,

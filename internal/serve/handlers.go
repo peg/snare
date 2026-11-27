@@ -12,8 +12,8 @@ import (
 
 var proofIDPattern = regexp.MustCompile(`^[a-f0-9]{32}$`)
 
-// A proof identifier correlates one intentional callback; it grants no rights
-// and does not change test classification or notification behavior.
+// callbackProofID extracts the nonce from /c/{token}/proof/{nonce}. `snare
+// prove` and `doctor --test` use it to find their own callback.
 func callbackProofID(token, path string) string {
 	prefix := "/c/" + token + "/proof/"
 	if !strings.HasPrefix(path, prefix) {

@@ -247,7 +247,7 @@ describe("integrated receiver admission and evidence", () => {
     const secretHash = Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join("");
     const data = new Map([
       ["device:legacy-owner", JSON.stringify({ secret_hash: secretHash })],
-      [`webhook:${TOKEN}`, JSON.stringify({ device_id: "legacy-owner", webhook_url: WEBHOOK })],
+      [`webhook:${TOKEN}`, JSON.stringify({ device_id: "legacy-owner", webhook_url: WEBHOOK, persistent: true })],
       [`event:${TOKEN}:1:legacy-event`, JSON.stringify({ id: "legacy-event", device_id: "legacy-owner", timestamp: new Date(NOW).toISOString() })],
     ]);
     const put = vi.fn();
@@ -260,7 +260,7 @@ describe("integrated receiver admission and evidence", () => {
     expect(env.SNARE_KV.get.mock.calls.flat().some(key => key.startsWith("rl:"))).toBe(false);
   });
 
-  it("rejects oversized legacy history before fetching values past the Free subrequest budget", async () => {
+  it("bounds legacy history reads within the Free subrequest budget", async () => {
     const bytes = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(SECRET)));
     const secretHash = Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join("");
     const data = new Map([
@@ -275,14 +275,13 @@ describe("integrated receiver admission and evidence", () => {
       })),
     } };
     const response = await invoke(env, api(`events/${TOKEN}`));
-    expect(response.status).toBe(503);
-    expect((await response.json()).code).toBe("history_migration_required");
-    expect(env.SNARE_KV.get.mock.calls.flat().some(key => key.startsWith("event:"))).toBe(false);
-    expect(env.SNARE_KV.put).not.toHaveBeenCalled();
+    expect(response.status).toBe(200);
+    expect(env.SNARE_KV.get.mock.calls.flat().filter(key => key.startsWith("event:")).length).toBeLessThanOrEqual(20);
 
     // Listed keys can disappear before get(); count those reads too.
     env.SNARE_KV.get.mockClear();
-    env.SNARE_KV.list.mockImplementation(async ({ cursor }) => {
+    env.SNARE_KV.list.mockImplementation(async ({ prefix, cursor }) => {
+      if (!prefix.startsWith("event:")) return { keys: [], list_complete: true };
       const page = Number(cursor || 0);
       return { keys: Array.from({ length: 100 }, (_, i) => ({ name: `event:${TOKEN}:${page * 100 + i}:expired` })),
         list_complete: false, cursor: String(page + 1) };

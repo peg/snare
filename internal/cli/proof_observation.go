@@ -4,14 +4,18 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/peg/snare/internal/config"
-	"github.com/peg/snare/internal/manifest"
 )
+
+// Event correlation for `snare prove`, `doctor --test` and the arm self-test.
+//
+// The events API returns a capped list, so "the count went up" stops working
+// once a token has more stored events than the cap. Correlation instead looks
+// for a specific event: one tagged with our proof nonce, or one whose identity
+// was not in the list before the trigger ran.
 
 func newProofID() (string, error) {
 	var nonce [16]byte
@@ -21,55 +25,48 @@ func newProofID() (string, error) {
 	return hex.EncodeToString(nonce[:]), nil
 }
 
-// prepareCorrelatedProof verifies the planted snippet before copying it. Only
-// the callback path changes; original files and ordinary callback traffic are
-// untouched. A copy avoids temporarily modifying live credential files.
-func prepareCorrelatedProof(cfg *config.Config, recipe proofRecipe) (proofRecipe, string, func(), error) {
-	canary := recipe.Canary
-	data, err := os.ReadFile(canary.Path)
-	if err != nil {
-		return proofRecipe{}, "", nil, fmt.Errorf("read planted file: %w", err)
+// eventIdentity is the receiver's event id, or a best-effort fingerprint for
+// receivers that predate event ids.
+func eventIdentity(e apiEvent) string {
+	if e.ID != "" {
+		return "id:" + e.ID
 	}
-	if canary.Content == "" || (canary.ContentHash != "" && manifest.HashContent(canary.Content) != canary.ContentHash) {
-		return proofRecipe{}, "", nil, fmt.Errorf("manifest content is missing or does not match its hash")
-	}
-	if !strings.Contains(string(data), canary.Content) || (canary.Mode == manifest.ModeNewFile && string(data) != canary.Content) {
-		return proofRecipe{}, "", nil, fmt.Errorf("planted content changed or is missing; inspect `snare scan` before proving")
-	}
-	callbackURL := cfg.CallbackURL(canary.ID)
-	if canary.CallbackURL != "" {
-		callbackURL = canary.CallbackURL
-	}
-	if !strings.Contains(canary.Content, callbackURL) {
-		return proofRecipe{}, "", nil, fmt.Errorf("callback URL is not present in planted content")
-	}
-	proofID, err := newProofID()
-	if err != nil {
-		return proofRecipe{}, "", nil, err
-	}
-	dir, err := os.MkdirTemp("", "snare-proof-")
-	if err != nil {
-		return proofRecipe{}, "", nil, fmt.Errorf("create proof directory: %w", err)
-	}
-	cleanup := func() { _ = os.RemoveAll(dir) }
-	canary.Path = filepath.Join(dir, "config")
-	canary.Content = strings.ReplaceAll(canary.Content, callbackURL, callbackURL+"/proof/"+proofID)
-	if err := os.WriteFile(canary.Path, []byte(canary.Content), 0600); err != nil {
-		cleanup()
-		return proofRecipe{}, "", nil, fmt.Errorf("write proof config: %w", err)
-	}
-	correlated, err := buildProofRecipe(canary)
-	if err != nil {
-		cleanup()
-		return proofRecipe{}, "", nil, err
-	}
-	return correlated, proofID, cleanup, nil
+	return "fp:" + e.Timestamp + "|" + e.IP + "|" + e.UserAgent + "|" + e.Path
 }
 
+func eventIdentities(events []apiEvent) map[string]bool {
+	seen := make(map[string]bool, len(events))
+	for _, e := range events {
+		seen[eventIdentity(e)] = true
+	}
+	return seen
+}
+
+func matchesProof(e apiEvent, proofID string) bool {
+	// Older receivers do not parse proof_id but still record the request path.
+	return e.ProofID == proofID || strings.HasSuffix(e.Path, "/proof/"+proofID)
+}
+
+// waitForProofEvent waits for the callback carrying proofID.
 func waitForProofEvent(cfg *config.Config, tokenID, proofID string, testOnly bool, timeout time.Duration) (apiEvent, error) {
 	if proofID == "" {
 		return apiEvent{}, fmt.Errorf("missing proof identifier")
 	}
+	return waitForEvent(cfg, tokenID, proofID, timeout, func(e apiEvent) bool {
+		return e.IsTest == testOnly && matchesProof(e, proofID)
+	})
+}
+
+// waitForNewEvent waits for a non-test event that was not present in before.
+// Used when the trigger runs the real planted config and so cannot carry a nonce.
+func waitForNewEvent(cfg *config.Config, tokenID string, before []apiEvent, timeout time.Duration) (apiEvent, error) {
+	seen := eventIdentities(before)
+	return waitForEvent(cfg, tokenID, "", timeout, func(e apiEvent) bool {
+		return !e.IsTest && !seen[eventIdentity(e)]
+	})
+}
+
+func waitForEvent(cfg *config.Config, tokenID, proofID string, timeout time.Duration, match func(apiEvent) bool) (apiEvent, error) {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		probe := probeTokenProofEvents(cfg, tokenID, proofID)
@@ -77,14 +74,13 @@ func waitForProofEvent(cfg *config.Config, tokenID, proofID string, testOnly boo
 			return apiEvent{}, fmt.Errorf("events API auth failed")
 		}
 		if probe.OwnedReadable {
-			for _, event := range probe.Events {
-				// Also check locally: an old server may ignore the query filter.
-				if event.ProofID == proofID && event.ID != "" && event.IsTest == testOnly {
-					return event, nil
+			for _, e := range probe.Events {
+				if match(e) {
+					return e, nil
 				}
 			}
 		}
 		time.Sleep(min(300*time.Millisecond, time.Until(deadline)))
 	}
-	return apiEvent{}, fmt.Errorf("no matching proof callback observed within %s; receiver must support proof_id and event.id", timeout.Round(time.Second))
+	return apiEvent{}, fmt.Errorf("no new callback observed within %s", timeout.Round(time.Second))
 }

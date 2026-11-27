@@ -331,6 +331,7 @@ Naming tip:
 
 	planted := 0
 	skipped := 0
+	unregistered := 0
 	for _, bt := range armTypes {
 		params, err := buildParams(bt, label, cfg)
 		if err != nil {
@@ -408,6 +409,7 @@ Naming tip:
 				fmt.Fprintf(os.Stderr, "    ⚠  %-12s planted but registration failed: %v\n", bt, err)
 				fmt.Fprintf(os.Stderr, "       Canary is active but alerts may not be delivered.\n")
 				fmt.Fprintf(os.Stderr, "       Run `snare doctor` to diagnose.\n")
+				unregistered++
 			}
 
 			fmt.Printf("    ✓ %-12s %s\n", bt, path)
@@ -417,25 +419,25 @@ Naming tip:
 
 	if dryRun {
 		fmt.Printf("\n  [dry-run] would plant %d canaries\n", planted)
-		fmt.Println("  [dry-run] no files were written and no webhook test was fired.")
+		fmt.Println("  [dry-run] no files were written and no test callback was sent.")
 		return
 	}
 
-	// Step 3: Test the full alert pipeline — register test token first, then fire callback.
+	// Step 3: Fire a test callback and confirm the receiver recorded it.
+	// The receiver cannot report whether the webhook itself accepted the
+	// alert, so the message says only what was observed.
 	fmt.Println()
 	{
-		shortID := cfg.DeviceID
-		if len(shortID) > 8 {
-			shortID = shortID[len(shortID)-8:]
-		}
-		testToken := "snare-test-" + shortID
-		if err := registerToken(cfg, testToken, "test", "test"); err != nil {
-			fmt.Fprintf(os.Stderr, "  ⚠  test webhook registration failed: %v\n", err)
-			fmt.Fprintln(os.Stderr, "     Test callback skipped because the token is not registered.")
-		} else if err := httpGet(cfg.CallbackURL(testToken)); err != nil {
-			fmt.Fprintf(os.Stderr, "  ⚠  webhook test failed: %v\n", err)
-		} else {
-			fmt.Println("  ✓ webhook test fired")
+		live := runWebhookTest(cfg)
+		switch {
+		case live.RegisterErr != nil:
+			fmt.Fprintf(os.Stderr, "  ⚠  test token registration failed: %v\n", live.RegisterErr)
+		case live.FireErr != nil:
+			fmt.Fprintf(os.Stderr, "  ⚠  test callback failed: %v\n", live.FireErr)
+		case live.ObserveErr != nil:
+			fmt.Fprintf(os.Stderr, "  ⚠  test callback sent but not recorded: %v\n", live.ObserveErr)
+		default:
+			fmt.Println("  ✓ test callback recorded — check your alert channel for the test alert")
 		}
 	}
 
@@ -449,7 +451,10 @@ Naming tip:
 		if skipped > 0 {
 			fmt.Printf(" (%d new, %d already armed)", planted, skipped)
 		}
-		fmt.Println(" This machine is protected.")
+		fmt.Println()
+		if unregistered > 0 {
+			fmt.Printf("  ⚠  %d of them are not registered and will not alert. Run `snare repair`.\n", unregistered)
+		}
 	}
 	fmt.Println()
 	if armMode == "precision" {

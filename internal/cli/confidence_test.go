@@ -24,7 +24,6 @@ type fakeTokenReg struct {
 
 type fakeEvent struct {
 	ID        string `json:"id"`
-	ProofID   string `json:"proof_id,omitempty"`
 	Token     string `json:"token"`
 	IsTest    bool   `json:"is_test"`
 	Timestamp string `json:"timestamp"`
@@ -39,7 +38,9 @@ type fakeSnareAPI struct {
 	devices map[string]string
 	tokens  map[string]fakeTokenReg
 	events  map[string][]fakeEvent
+	expired map[string]string // token -> former owner, like a lapsed Worker TTL
 	nextDev int
+	nextEvt int
 	server  *httptest.Server
 }
 
@@ -50,6 +51,7 @@ func newFakeSnareAPI(t *testing.T) *fakeSnareAPI {
 		devices: map[string]string{},
 		tokens:  map[string]fakeTokenReg{},
 		events:  map[string][]fakeEvent{},
+		expired: map[string]string{},
 	}
 
 	f.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -101,6 +103,17 @@ func (f *fakeSnareAPI) ClearRegistrations() {
 	f.tokens = map[string]fakeTokenReg{}
 }
 
+// Expire drops a registration but keeps its events readable by the former
+// owner, as the Worker does when a registration TTL lapses.
+func (f *fakeSnareAPI) Expire(tokenID string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if reg, ok := f.tokens[tokenID]; ok {
+		f.expired[tokenID] = reg.DeviceID
+		delete(f.tokens, tokenID)
+	}
+}
+
 func (f *fakeSnareAPI) TokenCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -149,6 +162,13 @@ func (f *fakeSnareAPI) handleRegister(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing fields"})
 		return
 	}
+	f.mu.Lock()
+	_, known := f.devices[body.DeviceID]
+	f.mu.Unlock()
+	if !known {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unknown device_id"})
+		return
+	}
 	if !f.validateAuth(r, body.DeviceID) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid device secret"})
 		return
@@ -161,6 +181,7 @@ func (f *fakeSnareAPI) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	f.tokens[body.TokenID] = fakeTokenReg{DeviceID: body.DeviceID}
+	delete(f.expired, body.TokenID)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "registered", "token_id": body.TokenID})
 }
 
@@ -203,6 +224,10 @@ func (f *fakeSnareAPI) handleEvents(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	reg, ok := f.tokens[tokenID]
 	events := append([]fakeEvent(nil), f.events[tokenID]...)
+	if owner, lapsed := f.expired[tokenID]; !ok && lapsed && len(events) > 0 {
+		reg, ok = fakeTokenReg{DeviceID: owner}, true
+	}
+	registered := !f.isExpired(tokenID)
 	f.mu.Unlock()
 
 	if !ok {
@@ -213,23 +238,36 @@ func (f *fakeSnareAPI) handleEvents(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid device secret"})
 		return
 	}
-	if proofID := r.URL.Query().Get("proof_id"); proofID != "" {
-		filtered := events[:0]
-		for _, event := range events {
-			if event.ProofID == proofID {
-				filtered = append(filtered, event)
-			}
-		}
-		events = filtered
-	}
-	if len(events) > 10 {
-		events = events[:10]
-	}
 	if len(events) == 0 {
-		writeJSON(w, http.StatusNotFound, map[string]interface{}{"token": tokenID, "events": []fakeEvent{}})
+		writeJSON(w, http.StatusNotFound, map[string]interface{}{"token": tokenID, "registered": registered, "events": []fakeEvent{}})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"token": tokenID, "events": events})
+	// Real receivers return a capped, newest-first list.
+	if len(events) > 20 {
+		events = events[:20]
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"token": tokenID, "registered": registered, "events": events})
+}
+
+func (f *fakeSnareAPI) isExpired(tokenID string) bool {
+	_, lapsed := f.expired[tokenID]
+	return lapsed
+}
+
+// Seed stores n prior callbacks for token, as if it had fired before.
+func (f *fakeSnareAPI) Seed(token string, n int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := 0; i < n; i++ {
+		f.nextEvt++
+		e := fakeEvent{
+			ID: fmt.Sprintf("evt-%d", f.nextEvt), Token: token,
+			IsTest:    strings.HasPrefix(token, "snare-test-"),
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+			IP:        "127.0.0.1", UserAgent: "snare-cli-test", Method: "GET", Path: "/c/" + token,
+		}
+		f.events[token] = append([]fakeEvent{e}, f.events[token]...)
+	}
 }
 
 func (f *fakeSnareAPI) handleCallback(w http.ResponseWriter, r *http.Request) {
@@ -251,12 +289,10 @@ func (f *fakeSnareAPI) handleCallback(w http.ResponseWriter, r *http.Request) {
 		Method:    r.Method,
 		Path:      r.URL.Path,
 	}
-	if suffix := strings.TrimPrefix(r.URL.Path, "/c/"+token+"/proof/"); suffix != r.URL.Path {
-		e.ProofID = strings.SplitN(suffix, "/", 2)[0]
-	}
 
 	f.mu.Lock()
-	e.ID = fmt.Sprintf("%d", len(f.events[token])+1)
+	f.nextEvt++
+	e.ID = fmt.Sprintf("evt-%d", f.nextEvt)
 	f.events[token] = append([]fakeEvent{e}, f.events[token]...)
 	f.mu.Unlock()
 
@@ -382,8 +418,8 @@ func TestConfidenceSmokeFlow(t *testing.T) {
 	if exitCode != 0 {
 		t.Fatalf("arm failed:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
 	}
-	if !strings.Contains(stdout, "webhook test fired") {
-		t.Fatalf("arm output should include webhook test, got:\n%s", stdout)
+	if !strings.Contains(stdout, "test callback recorded") {
+		t.Fatalf("arm output should include the test callback result, got:\n%s", stdout)
 	}
 	if api.TokenCount() < 4 { // precision tokens plus the callback-test token
 		t.Fatalf("expected at least 4 registered tokens after arm, got %d", api.TokenCount())
@@ -488,6 +524,91 @@ func TestDoctorDetectsUnregisteredWithoutLeakingSecrets(t *testing.T) {
 	}
 	if strings.Contains(combined, deviceSecret) {
 		t.Fatalf("doctor leaked device secret:\n%s", combined)
+	}
+}
+
+// A lapsed registration keeps old events readable while new callbacks are
+// dropped; doctor and status must not report that token as healthy.
+func TestDoctorFlagsLapsedRegistrationWithHistory(t *testing.T) {
+	home := t.TempDir()
+	api := newFakeSnareAPI(t)
+	defer api.Close()
+
+	deviceID := "dev-lapsed-reg"
+	deviceSecret := strings.Repeat("e", 64)
+	api.AddDevice(deviceID, deviceSecret)
+	writeTestConfig(t, home, api.URL()+"/c", deviceID, deviceSecret, "")
+
+	token := "lapsed-registration-token"
+	path := filepath.Join(home, "canary-lapsed.txt")
+	content := "token=" + token + "\n"
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+	writeTestManifest(t, home, manifest.Manifest{
+		Version:  2,
+		DeviceID: deviceID,
+		Canaries: []manifest.Canary{
+			{ID: token, Type: "awsproc", Path: path, Mode: manifest.ModeNewFile, Content: content, ContentHash: manifest.HashContent(content), PlantedAt: time.Now(), Active: true},
+		},
+	})
+	if _, stderr, code := runSnare(t, home, "repair"); code != 0 {
+		t.Fatalf("initial repair failed: %s", stderr)
+	}
+	api.Seed(token, 1)
+	api.Expire(token)
+
+	stdout, stderr, code := runSnare(t, home, "doctor")
+	if code == 0 || !strings.Contains(stdout+stderr, "not registered") {
+		t.Fatalf("doctor should fail on a lapsed registration, code=%d:\n%s%s", code, stdout, stderr)
+	}
+	if stdout, _, _ := runSnare(t, home, "status"); !strings.Contains(stdout, "not registered") {
+		t.Fatalf("status should flag a lapsed registration:\n%s", stdout)
+	}
+
+	if _, stderr, code := runSnare(t, home, "repair"); code != 0 {
+		t.Fatalf("repair failed: %s", stderr)
+	}
+	if stdout, stderr, code := runSnare(t, home, "doctor"); code != 0 {
+		t.Fatalf("doctor should pass after repair:\n%s%s", stdout, stderr)
+	}
+}
+
+// Older CLIs invented a local device ID when enrollment failed; the receiver
+// rejects every registration for it. repair must recover by re-enrolling.
+func TestRepairReenrollsOrphanDevice(t *testing.T) {
+	home := t.TempDir()
+	api := newFakeSnareAPI(t)
+	defer api.Close()
+
+	orphanSecret := strings.Repeat("d", 64)
+	writeTestConfig(t, home, api.URL()+"/c", "dev-local-orphan", orphanSecret, "")
+	token := "orphan-device-token-01"
+	path := filepath.Join(home, "canary-orphan.txt")
+	content := "token=" + token + "\n"
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+	writeTestManifest(t, home, manifest.Manifest{
+		Version:  2,
+		DeviceID: "dev-local-orphan",
+		Canaries: []manifest.Canary{
+			{ID: token, Type: "awsproc", Path: path, Mode: manifest.ModeNewFile, Content: content, ContentHash: manifest.HashContent(content), PlantedAt: time.Now(), Active: true},
+		},
+	})
+
+	stdout, stderr, code := runSnare(t, home, "repair")
+	if code != 0 || !strings.Contains(stdout, "device enrolled") {
+		t.Fatalf("repair should re-enroll an orphan device, code=%d:\n%s%s", code, stdout, stderr)
+	}
+	if strings.Contains(stdout+stderr, orphanSecret) {
+		t.Fatal("repair leaked the device secret")
+	}
+	if !api.HasToken(token) {
+		t.Fatal("token not registered after re-enrollment")
+	}
+	if stdout, stderr, code := runSnare(t, home, "doctor"); code != 0 {
+		t.Fatalf("doctor should pass after re-enrollment:\n%s%s", stdout, stderr)
 	}
 }
 
@@ -881,7 +1002,7 @@ Host proof-run-bastion
 	logPath := filepath.Join(home, "proof-bin.log")
 	writeExecutable(t, filepath.Join(binDir, "aws"), fmt.Sprintf(`#!/bin/sh
 echo "aws AWS_CONFIG_FILE=$AWS_CONFIG_FILE $*" >> %s
-url=$(grep -m1 -o 'http://[^"'"'"' ]*/c/%s[^"'"'"' ]*' "$AWS_CONFIG_FILE")
+url=$(grep -m1 -o 'http://[^"'"'"' ]*/c/%s' "$AWS_CONFIG_FILE")
 [ -n "$url" ] && curl -sf "$url" >/dev/null 2>&1
 exit 1
 `, shellQuoteForShellScript(logPath), awsToken))
@@ -892,7 +1013,7 @@ while [ "$#" -gt 0 ]; do
   if [ "$1" = "-F" ]; then config="$2"; shift 2; continue; fi
   shift
 done
-url=$(grep -m1 -o 'http://[^ ]*/c/%s[^ ]*' "$config")
+url=$(grep -m1 -o 'http://[^ ]*/c/%s' "$config")
 [ -n "$url" ] && curl -sf "$url" >/dev/null 2>&1
 exit 1
 `, shellQuoteForShellScript(logPath), sshToken))
@@ -906,7 +1027,7 @@ while [ "$#" -gt 0 ]; do
     *) shift ;;
   esac
 done
-url=$(grep -m1 -o 'http://[^ ]*/c/%s[^ ]*' "$config")
+url=$(grep -m1 -o 'http://[^ ]*/c/%s' "$config")
 [ -n "$url" ] && curl -sf "$url" >/dev/null 2>&1
 exit 1
 `, shellQuoteForShellScript(logPath), k8sToken))
@@ -940,22 +1061,12 @@ exit 1
 	}
 	logText := string(logData)
 	for _, want := range []string{
-		"AWS_CONFIG_FILE=",
-		"ssh -F ",
-		"kubectl --kubeconfig ",
-		"snare-proof-",
+		"AWS_CONFIG_FILE=" + awsPath,
+		"ssh -F " + sshPath,
+		"kubectl --kubeconfig " + kubePath,
 	} {
 		if !strings.Contains(logText, want) {
 			t.Fatalf("fake binary log missing %q:\n%s", want, logText)
-		}
-	}
-	for path, content := range map[string]string{awsPath: awsContent, sshPath: sshContent, kubePath: k8sContent} {
-		data, err := os.ReadFile(path)
-		if err != nil || string(data) != content {
-			t.Fatalf("proof changed original file %s: %v", path, err)
-		}
-		if strings.Contains(logText, path) {
-			t.Fatalf("proof should execute an isolated copy, got original path in %s", logText)
 		}
 	}
 }
@@ -1060,4 +1171,66 @@ func shellQuoteForTest(s string) string {
 
 func shellQuoteForShellScript(s string) string {
 	return shellQuoteForTest(s)
+}
+
+// Receivers cap the events list (10 on the Worker, 20 on serve). Proofs must
+// still pass once a token has more history than that.
+func TestProveAndDoctorSurviveFullEventHistory(t *testing.T) {
+	home := t.TempDir()
+	api := newFakeSnareAPI(t)
+	defer api.Close()
+
+	deviceID := "dev-history-full"
+	deviceSecret := strings.Repeat("f", 64)
+	api.AddDevice(deviceID, deviceSecret)
+	writeTestConfig(t, home, api.URL()+"/c", deviceID, deviceSecret, "")
+
+	k8sToken := "history-full-k8s-token"
+	kubePath := filepath.Join(home, ".kube", "snare-history.yaml")
+	if err := os.MkdirAll(filepath.Dir(kubePath), 0700); err != nil {
+		t.Fatal(err)
+	}
+	k8sContent := fmt.Sprintf("apiVersion: v1\nkind: Config\nclusters:\n- cluster:\n    server: %s/c/%s\n  name: proof\n", api.URL(), k8sToken)
+	if err := os.WriteFile(kubePath, []byte(k8sContent), 0600); err != nil {
+		t.Fatal(err)
+	}
+	writeTestManifest(t, home, manifest.Manifest{
+		Version:  2,
+		DeviceID: deviceID,
+		Canaries: []manifest.Canary{
+			{ID: k8sToken, Type: "k8s", Path: kubePath, Mode: manifest.ModeNewFile, Content: k8sContent, ContentHash: manifest.HashContent(k8sContent), PlantedAt: time.Now(), Active: true},
+		},
+	})
+	if stdout, stderr, code := runSnare(t, home, "repair"); code != 0 {
+		t.Fatalf("repair failed:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+	}
+
+	api.Seed(k8sToken, 25)
+	api.Seed("snare-test-"+deviceID[len(deviceID)-8:], 25)
+
+	binDir := filepath.Join(home, "bin")
+	if err := os.MkdirAll(binDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	writeExecutable(t, filepath.Join(binDir, "kubectl"), fmt.Sprintf(`#!/bin/sh
+config=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --kubeconfig) config="$2"; shift 2 ;;
+    --kubeconfig=*) config="${1#--kubeconfig=}"; shift ;;
+    *) shift ;;
+  esac
+done
+url=$(grep -m1 -o 'http://[^ ]*/c/%s' "$config")
+[ -n "$url" ] && curl -sf "$url" >/dev/null 2>&1
+exit 1
+`, k8sToken))
+	env := map[string]string{"PATH": binDir + string(os.PathListSeparator) + os.Getenv("PATH")}
+
+	if stdout, stderr, code := runSnareWithEnv(t, home, env, "prove", "--type", "k8s", "--run"); code != 0 {
+		t.Fatalf("prove should pass with 25 prior events:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+	}
+	if stdout, stderr, code := runSnareWithEnv(t, home, env, "doctor", "--test"); code != 0 {
+		t.Fatalf("doctor --test should pass with 25 prior test events:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+	}
 }
