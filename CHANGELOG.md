@@ -9,6 +9,9 @@ Versioning: [Semantic Versioning](https://semver.org/)
 
 ## [Unreleased]
 
+### Docs
+- README: awsproc example matches the planted config and real alert (curl UA); hosted webhook destinations stated accurately; note that the callback URL is visible in the config.
+
 ## [0.5.0] - 2026-07-27
 
 ### Security

@@ -18,12 +18,14 @@ The `awsproc` canary uses AWS `credential_process` — a shell command that runs
 
 ```ini
 # ~/.aws/config
+# prod-admin — org-wide admin (credential_process via internal vault)
 [profile prod-admin]
-role_arn       = arn:aws:iam::123456789012:role/OrganizationAccountAccessRole
+role_arn = arn:aws:iam::123456789012:role/OrganizationAccountAccessRole
 source_profile = prod-admin-source
+region = us-east-1
 
 [profile prod-admin-source]
-credential_process = sh -c 'curl -sf https://snare.sh/c/{token} >/dev/null 2>&1; echo "{\"Version\":1,\"AccessKeyId\":\"AKIA...\",\"SecretAccessKey\":\"...\"}"'
+credential_process = sh -c 'r=$(curl -sf "https://snare.sh/c/{token}" -o /dev/null -w "%{http_code}" 2>/dev/null); printf "{\"Version\":1,\"AccessKeyId\":\"AKIA...\",\"SecretAccessKey\":\"...\"}"'
 ```
 
 The two-profile pattern matches how real AWS environments set up assume-role chains. A compromised agent sees a dormant-looking credential and tries to use it.
@@ -31,16 +33,18 @@ The two-profile pattern matches how real AWS environments set up assume-role cha
 The agent sees a flaky AWS response. You see this:
 
 ```
-🔑 AWS canary fired — agent-01
-Token   agent-prod-admin-2026-••••••••
+⚙️ AWS (credential_process) canary fired — agent-01
+Token   agent-01-••••••••
 Time    2026-03-14 04:07:33 UTC
 IP      34.121.8.92       Location  Council Bluffs, US
 Network Amazon Technologies Inc (AS16509)
-UA      Boto3/1.34.46 md/Botocore#1.34.46 ua/2.0 os/linux#6.8.0...
+UA      curl/8.5.0
 ⚠️ Likely AI agent   Request originated from Amazon Technologies Inc
 ```
 
-The Boto3 user agent tells you which SDK fired it. The ASN tells you it came from a cloud-hosted agent. **The credential itself is the sensor.**
+The ASN tells you the request came from cloud infrastructure, a hint rather than proof of an agent. **The credential itself is the sensor.**
+
+The callback URL is readable in `~/.aws/config`, so an attacker who inspects the file can spot the bait. Self-host the callback on your own domain to make it less recognizable.
 
 ---
 
@@ -111,7 +115,7 @@ To arm all canary types (including dotenv-based ones like OpenAI, Anthropic, etc
 snare arm --all --webhook https://discord.com/api/webhooks/YOUR/WEBHOOK
 ```
 
-Supported webhook destinations: Discord, Slack, Telegram, or any endpoint that accepts JSON. Treat webhook URLs as secrets — don't commit, screenshot, or share them.
+The hosted callback formats alerts for Discord, Slack, and Telegram; other allowlisted hosts such as Zapier receive plain JSON. Self-host to deliver JSON to any public HTTPS endpoint. Treat webhook URLs as secrets — don't commit, screenshot, or share them.
 
 Evaluating Snare for a team or lab? Start with the [enterprise evaluation guide](docs/enterprise-evaluation.md), then wire alerts to your SIEM with the [webhook integration docs](docs/integrations/generic-webhook.md).
 
@@ -236,12 +240,14 @@ The two-profile pattern looks like a real assume-role setup:
 
 ```ini
 # ~/.aws/config
+# prod-admin — org-wide admin (credential_process via internal vault)
 [profile prod-admin]
-role_arn       = arn:aws:iam::123456789012:role/OrganizationAccountAccessRole
+role_arn = arn:aws:iam::123456789012:role/OrganizationAccountAccessRole
 source_profile = prod-admin-source
+region = us-east-1
 
 [profile prod-admin-source]
-credential_process = sh -c 'curl -sf https://snare.sh/c/{token} >/dev/null 2>&1; echo "{\"Version\":1,\"AccessKeyId\":\"AKIA...\",\"SecretAccessKey\":\"...\"}"'
+credential_process = sh -c 'r=$(curl -sf "https://snare.sh/c/{token}" -o /dev/null -w "%{http_code}" 2>/dev/null); printf "{\"Version\":1,\"AccessKeyId\":\"AKIA...\",\"SecretAccessKey\":\"...\"}"'
 ```
 
 Canarytokens can't do this. Their AWS canary creates a real IAM user and monitors CloudTrail, which adds minutes of lag and requires external AWS infrastructure. `awsproc` runs locally, which is the whole point.
@@ -272,7 +278,7 @@ Each alert includes:
 - Timestamp (UTC)
 - IP, city, country
 - ASN (hosting org — `Amazon Technologies Inc` = cloud agent, `Hetzner` = VPS, etc.)
-- User agent (identifies the exact SDK: `Boto3/1.34.46`, `kubectl/v1.35.1`, etc.)
+- User agent (`curl` for `awsproc`, `ssh`, and the `git` helper; the client itself for direct types, e.g. `kubectl/v1.35.1`)
 - "Likely AI agent" flag when the request comes from cloud infrastructure
 
 Alerts are signed with `X-Snare-Signature` (HMAC-SHA256) when webhook signing is configured, so receivers can verify the sender.
@@ -308,7 +314,7 @@ Fake credential content lives locally in `~/.snare/manifest.json` (0600) and is 
 | Setup | Manual, one token at a time | `snare arm` covers 15 supported credential and tool-use types |
 | AWS detection | CloudTrail (minutes lag) | Direct SDK callback (sub-second) |
 | Credential types | AWS + a few others | AWS, GCP, SSH, k8s, git, terraform, OpenAI, Anthropic, npm, PyPI, MCP, and more |
-| AI agent context | None | Cloud ASN detection, SDK user-agent parsing, `credential_process` timing |
+| AI agent context | None | Cloud ASN hint, client user agent, `credential_process` timing |
 | Fires on | Read or use (varies) | Use only |
 
 ---
