@@ -112,7 +112,7 @@ describe("events window", () => {
     let lists = 0;
     const list = env.SNARE_KV.list;
     env.SNARE_KV.list = (opts) => { lists++; return list(opts); };
-    for (const headers of [{}, { authorization: "Bearer guess", "x-snare-device-id": DEVICE }]) {
+    for (const headers of [{}, { authorization: `Bearer ${SECRET}` }, { authorization: "Bearer guess", "x-snare-device-id": DEVICE }]) {
       const resp = await worker.fetch(new Request(`https://snare.sh/api/events/${TOKEN}`, { headers }), env, { waitUntil() {} });
       expect(resp.status).toBe(401);
     }
