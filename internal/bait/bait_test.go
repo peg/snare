@@ -969,3 +969,59 @@ func TestPlantRemoveRoundTrip(t *testing.T) {
 		})
 	}
 }
+
+// Dotfile managers (stow, chezmoi, home-manager) symlink ~/.gitconfig and
+// friends into a repo. Disarm must clean the real file and keep the link.
+func TestRemoveAppendedThroughSymlink(t *testing.T) {
+	dir := t.TempDir()
+	repo := filepath.Join(dir, "dotfiles")
+	if err := os.MkdirAll(repo, 0700); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	target := filepath.Join(repo, "gitconfig")
+	existing := "[user]\n\tname = Test\n"
+	if err := os.WriteFile(target, []byte(existing), 0644); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	link := filepath.Join(dir, ".gitconfig")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	params := testParams(t, bait.TypeGit)
+	placed, err := bait.Plant(bait.TypeGit, params, link, false)
+	if err != nil {
+		t.Fatalf("Plant: %v", err)
+	}
+	c := manifest.Canary{
+		ID:          params.TokenID,
+		Path:        placed.Path,
+		Mode:        placed.Mode,
+		Content:     placed.Content,
+		ContentHash: manifest.HashContent(placed.Content),
+	}
+	if err := bait.Remove(c, false, false); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatalf("lstat link: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("%s was replaced by a regular file; symlink must be preserved", link)
+	}
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("reading target: %v", err)
+	}
+	if string(data) != existing {
+		t.Fatalf("target content after disarm = %q, want %q", data, existing)
+	}
+	if ti, _ := os.Stat(target); ti.Mode().Perm() != 0644 {
+		t.Fatalf("target mode = %v, want 0644", ti.Mode().Perm())
+	}
+	if _, err := os.Stat(bait.BackupPath(link)); !os.IsNotExist(err) {
+		t.Fatalf("backup should be removed after disarm, stat err = %v", err)
+	}
+}

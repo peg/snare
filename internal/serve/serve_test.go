@@ -991,3 +991,57 @@ func TestLogout_clearsCookie(t *testing.T) {
 func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
+
+func TestHandleEventsFiltersByProofID(t *testing.T) {
+	s := testServer(t)
+	const (
+		tokenID  = "proof-token-abc123"
+		deviceID = "dev-proof"
+		secret   = "proofsecret00000000000000000000001"
+		proofID  = "0123456789abcdef0123456789abcdef"
+	)
+	if err := s.db.createDevice(deviceID, secret); err != nil {
+		t.Fatalf("createDevice: %v", err)
+	}
+	if err := s.db.upsertToken(tokenReg{TokenID: tokenID, DeviceID: deviceID, CanaryType: "git", RegisteredAt: "2026-11-01T00:00:00Z"}); err != nil {
+		t.Fatalf("upsertToken: %v", err)
+	}
+	// More unrelated history than the 20-row cap, then the proof callback.
+	for i := 0; i < 25; i++ {
+		s.processAlert(tokenID, "1.2.3.4", "git/2.47", "GET", "/c/"+tokenID, "2026-11-01T00:00:00Z", false)
+	}
+	s.processAlert(tokenID, "1.2.3.4", "git/2.47", "GET", "/c/"+tokenID+"/proof/"+proofID+"/info/refs", "2026-11-01T00:00:00Z", false)
+
+	get := func(query string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/api/events/"+tokenID+query, nil)
+		req.Header.Set("Authorization", "Bearer "+secret)
+		req.Header.Set("X-Snare-Device-Id", deviceID)
+		rr := httptest.NewRecorder()
+		s.handleEvents(rr, req)
+		return rr
+	}
+
+	rr := get("?proof_id=" + proofID)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rr.Code, rr.Body.String())
+	}
+	var body struct {
+		Events []struct {
+			ID      string `json:"id"`
+			ProofID string `json:"proof_id"`
+		} `json:"events"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Events) != 1 || body.Events[0].ProofID != proofID || body.Events[0].ID == "" {
+		t.Fatalf("proof filter returned %+v", body.Events)
+	}
+
+	if rr := get("?proof_id=" + strings.Repeat("f", 32)); rr.Code != http.StatusNotFound {
+		t.Fatalf("unrelated proof_id status = %d, want 404", rr.Code)
+	}
+	if rr := get("?proof_id=nothex"); rr.Code != http.StatusBadRequest {
+		t.Fatalf("malformed proof_id status = %d, want 400", rr.Code)
+	}
+}

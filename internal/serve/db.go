@@ -81,6 +81,9 @@ func openDB(path string) (*DB, error) {
 	if _, err := db.Exec(`ALTER TABLE events ADD COLUMN device_id TEXT`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
 		return nil, fmt.Errorf("add events.device_id column: %w", err)
 	}
+	if _, err := db.Exec(`ALTER TABLE events ADD COLUMN proof_id TEXT NOT NULL DEFAULT ''`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		return nil, fmt.Errorf("add events.proof_id column: %w", err)
+	}
 
 	return &DB{db: db}, nil
 }
@@ -185,6 +188,7 @@ type event struct {
 	ID        int64
 	TokenID   string
 	DeviceID  string
+	ProofID   string
 	IsTest    bool
 	Timestamp string
 	IP        string
@@ -208,23 +212,34 @@ func (d *DB) insertEvent(e event) error {
 		isTest = 1
 	}
 	_, err := d.db.Exec(`
-		INSERT INTO events (token_id, device_id, is_test, timestamp, ip, user_agent, method, path, country, city, asn, asn_org, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, e.TokenID, e.DeviceID, isTest, e.Timestamp, e.IP, e.UserAgent, e.Method, e.Path, e.Country, e.City, e.ASN, e.ASNOrg, e.CreatedAt)
+		INSERT INTO events (token_id, device_id, is_test, timestamp, ip, user_agent, method, path, country, city, asn, asn_org, created_at, proof_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, e.TokenID, e.DeviceID, isTest, e.Timestamp, e.IP, e.UserAgent, e.Method, e.Path, e.Country, e.City, e.ASN, e.ASNOrg, e.CreatedAt, e.ProofID)
 	return err
 }
 
 // getEvents returns recent events for a token (newest first, limit 20).
 func (d *DB) getEvents(tokenID string) ([]event, error) {
+	return d.getProofEvents(tokenID, "")
+}
+
+// getProofEvents is getEvents filtered to one proof nonce when proofID is set.
+func (d *DB) getProofEvents(tokenID, proofID string) ([]event, error) {
+	filter := ""
+	args := []interface{}{tokenID}
+	if proofID != "" {
+		filter = " AND proof_id = ?"
+		args = append(args, proofID)
+	}
 	rows, err := d.db.Query(`
 		SELECT id, token_id, COALESCE(device_id,''), is_test, timestamp, COALESCE(ip,''), COALESCE(user_agent,''),
 		       COALESCE(method,''), COALESCE(path,''), COALESCE(country,''), COALESCE(city,''),
-		       COALESCE(asn,''), COALESCE(asn_org,''), created_at
+		       COALESCE(asn,''), COALESCE(asn_org,''), created_at, proof_id
 		FROM events
-		WHERE token_id = ?
-		ORDER BY timestamp DESC
+		WHERE token_id = ?`+filter+`
+		ORDER BY id DESC
 		LIMIT 20
-	`, tokenID)
+	`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -237,7 +252,7 @@ func (d *DB) recentEvents(limit int) ([]event, error) {
 	rows, err := d.db.Query(`
 		SELECT e.id, e.token_id, COALESCE(e.device_id,''), e.is_test, e.timestamp, COALESCE(e.ip,''), COALESCE(e.user_agent,''),
 		       COALESCE(e.method,''), COALESCE(e.path,''), COALESCE(e.country,''), COALESCE(e.city,''),
-		       COALESCE(e.asn,''), COALESCE(e.asn_org,''), e.created_at
+		       COALESCE(e.asn,''), COALESCE(e.asn_org,''), e.created_at, e.proof_id
 		FROM events e
 		ORDER BY e.timestamp DESC
 		LIMIT ?
@@ -257,7 +272,7 @@ func scanEvents(rows *sql.Rows) ([]event, error) {
 		if err := rows.Scan(
 			&e.ID, &e.TokenID, &e.DeviceID, &isTest, &e.Timestamp,
 			&e.IP, &e.UserAgent, &e.Method, &e.Path,
-			&e.Country, &e.City, &e.ASN, &e.ASNOrg, &e.CreatedAt,
+			&e.Country, &e.City, &e.ASN, &e.ASNOrg, &e.CreatedAt, &e.ProofID,
 		); err != nil {
 			return nil, err
 		}

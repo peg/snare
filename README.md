@@ -89,9 +89,9 @@ By default, `snare arm` uses **precision mode**: `awsproc`, `ssh`, `k8s`, `git`,
     ✓ git          ~/.gitconfig
     ✓ npm          ~/.npmrc
 
-  ✓ webhook test fired
+  ✓ test callback recorded — check your alert channel for the test alert
 
-  🪤 5 canaries armed. This machine is protected.
+  🪤 5 canaries armed.
 
   Precision mode is safe for first run: alerts require active use of the fake
   planted fake target. Passive file reads do not fire them.
@@ -169,7 +169,7 @@ After `snare arm`, the expected healthy loop is:
 
 - `snare status` shows active canaries and event state. `never fired` is normal until someone actively uses a planted fake credential.
 - `snare scan` is local-only integrity: present/modified/missing/orphaned files. It does not fire alerts.
-- `snare doctor` is the confidence screen: config, callback health, local canary files, token ownership, events API readability, and webhook test history.
+- `snare doctor` is the confidence screen: config, callback health, local canary files, token ownership, events API readability, and test callback history.
 - `snare doctor --test` runs a live callback test and verifies it is readable in the events API.
 - `snare test` sends a synthetic callback test only; check your webhook destination for the routed alert.
 - `snare events` shows real hit history; empty output on fresh installs is expected.

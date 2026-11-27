@@ -579,6 +579,6 @@ describe("callback registration boundary", () => {
     await pending;
 
     expect(response.status).toBe(200);
-    expect(writes.some(([key]) => key.startsWith(`event:${token}:`))).toBe(true);
+    expect(writes.some(([key]) => key.startsWith(`evr:${token}:`))).toBe(true);
   });
 });

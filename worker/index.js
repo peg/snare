@@ -199,6 +199,9 @@ export default {
       // ═══════════════════════════════════════════════════════════════════
       const token = match[1];
       const metadata = extractMetadata(request, url);
+      // `snare prove` / `doctor --test` append /proof/{nonce} so the CLI can
+      // find its own callback instead of counting events.
+      metadata.proof_id = (match[2] || "").match(PROOF_PATH)?.[1] || null;
 
       // Process alert asynchronously AFTER response is sent to caller
       ctx.waitUntil(
@@ -373,7 +376,10 @@ async function processAlert(token, metadata, env) {
   // Rate limit and deduplicate only registered tokens, preventing random token
   // probes from consuming KV writes.
   if (await checkRateLimit(env, `cb:${token}`, 10, 60)) return;
-  if (await isDuplicate(env, token, metadata.ip)) return;
+  // Only self-test tokens get a per-proof dedup key: on a real canary an
+  // attacker could otherwise vary the nonce to bypass per-IP dedup.
+  const dedupProof = token.startsWith("snare-test-") ? metadata.proof_id : null;
+  if (await isDuplicate(env, token, metadata.ip, dedupProof)) return;
 
   // Per-type false-positive filtering: drop scanner orgs and requests
   // that lack expected SDK signatures for high-confidence canary types.
@@ -381,7 +387,10 @@ async function processAlert(token, metadata, env) {
 
   const isTest = token.startsWith("snare-test-");
 
+  const eventId = crypto.randomUUID();
   const event = {
+    id:        eventId,
+    proof_id:  metadata.proof_id || null,
     token,
     device_id: meta.deviceId || null,
     is_test:   isTest,
@@ -412,8 +421,7 @@ async function processAlert(token, metadata, env) {
 
   // Store event (metadata only)
   if (env.SNARE_KV) {
-    const key = `event:${token}:${Date.now()}:${crypto.randomUUID()}`;
-    await env.SNARE_KV.put(key, JSON.stringify(event), {
+    await env.SNARE_KV.put(eventKey(token, Date.now(), eventId), JSON.stringify(event), {
       expirationTtl: 60 * 60 * 24 * 90,
     });
   }
@@ -428,7 +436,46 @@ async function processAlert(token, metadata, env) {
   });
 }
 
+// ─── Event keys ──────────────────────────────────────────────────────────────
+
+const PROOF_ID = /^[0-9a-f]{32}$/;
+const PROOF_PATH = /^\/proof\/([0-9a-f]{32})(?:\/|$)/;
+const MAX_TS = 9999999999999;
+
+// KV lists keys in lexicographic order. Event keys store an inverted
+// timestamp so a plain list returns the newest events first.
+export function eventKey(token, ms, id) {
+  return `evr:${token}:${String(MAX_TS - ms).padStart(13, "0")}:${id}`;
+}
+
+// Returns up to n event key names, newest first. Keys written before v0.5.1
+// used `event:{token}:{ms}:{uuid}` (oldest first); they expire within 90 days
+// and are paged in full only when the new prefix has fewer than n keys.
+export async function newestEventKeys(env, token, n) {
+  const current = await env.SNARE_KV.list({ prefix: `evr:${token}:`, limit: n });
+  const names = current.keys.map(k => k.name);
+  if (names.length >= n) return names.slice(0, n);
+
+  let legacy = [];
+  let cursor;
+  for (;;) {
+    const page = await env.SNARE_KV.list({ prefix: `event:${token}:`, cursor });
+    legacy = legacy.concat(page.keys.map(k => k.name)).slice(-n);
+    if (page.list_complete !== false || !page.cursor) break;
+    cursor = page.cursor;
+  }
+  return names.concat(legacy.reverse()).slice(0, n);
+}
+
 // ─── Events lookup ───────────────────────────────────────────────────────────
+
+// Registrations written by older Workers carry a 365-day TTL. Rewriting the
+// record once without expirationTtl clears it; `persistent` marks the rewrite
+// so later reads cost no write. Only called after the owner authenticated.
+async function persistRegistration(env, token, reg) {
+  if (!reg || reg.persistent) return;
+  await env.SNARE_KV.put(`webhook:${token}`, JSON.stringify({ ...reg, persistent: true }));
+}
 
 async function handleEvents(token, request, env) {
   if (!env.SNARE_KV) return json({ error: "KV not configured" }, 500);
@@ -437,20 +484,23 @@ async function handleEvents(token, request, env) {
   // Look up which device owns this token
   const regRaw = await env.SNARE_KV.get(`webhook:${token}`);
   let deviceId = null;
+  let reg = null;
   if (regRaw) {
     try {
-      const reg = JSON.parse(regRaw);
+      reg = JSON.parse(regRaw);
       deviceId = reg.device_id;
     } catch { /* fall through */ }
   }
+  // `registered: false` tells the owner that callbacks are being dropped even
+  // though old events are still readable (expired or revoked registration).
+  const registered = Boolean(deviceId);
 
   // If the token is no longer registered, fall back to the owner recorded on
   // the newest stored event so revoked tokens don't become readable by any
   // random valid device.
   if (!deviceId) {
-    const list = await env.SNARE_KV.list({ prefix: `event:${token}:`, limit: 20 });
-    for (const key of list.keys) {
-      const raw = await env.SNARE_KV.get(key.name);
+    for (const name of await newestEventKeys(env, token, 20)) {
+      const raw = await env.SNARE_KV.get(name);
       if (!raw) continue;
       try {
         const event = JSON.parse(raw);
@@ -473,23 +523,27 @@ async function handleEvents(token, request, env) {
     return json({ error: auth.error }, 401);
   }
 
-  const prefix = `event:${token}:`;
-  const list = await env.SNARE_KV.list({ prefix, limit: 20 });
+  const proofId = new URL(request.url).searchParams.get("proof_id");
+  if (proofId !== null && !PROOF_ID.test(proofId)) {
+    return json({ error: "invalid proof_id" }, 400);
+  }
+  if (registered) await persistRegistration(env, token, reg);
 
-  const events = [];
-  for (const key of list.keys) {
-    const raw = await env.SNARE_KV.get(key.name);
+  let events = [];
+  for (const name of await newestEventKeys(env, token, 20)) {
+    const raw = await env.SNARE_KV.get(name);
     if (raw) {
       try { events.push(JSON.parse(raw)); } catch { /* skip corrupt */ }
     }
   }
+  if (proofId !== null) events = events.filter(e => e.proof_id === proofId);
 
   if (events.length === 0) {
-    return json({ token, events: [] }, 404);
+    return json({ token, registered, events: [] }, 404);
   }
 
   events.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
-  return json({ token, events: events.slice(0, 10) });
+  return json({ token, registered, events: events.slice(0, 10) });
 }
 
 // ─── Device creation ────────────────────────────────────────────────────────
@@ -572,7 +626,8 @@ async function handleRegister(request, env) {
     canary_type:   canary_type || null,
     label:         label       || null,
     registered_at: new Date().toISOString(),
-  }), { expirationTtl: 60 * 60 * 24 * 365 }); // 1 year TTL
+    persistent:    true,
+  })); // No TTL: an expired registration silently drops callbacks.
 
   return json({ status: "registered", token_id });
 }
@@ -838,16 +893,22 @@ function buildSlackPayload(event, meta, type, fromCloud) {
   };
 }
 
+// Telegram rejects HTML-mode messages with stray < or &, and the UA is
+// attacker-controlled. Escape every interpolated value.
+export function escapeHTML(value) {
+  return String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
 function buildTelegramPayload(event, meta, type, fromCloud) {
   const isTest   = event.is_test;
-  const location = [event.city, event.country].filter(Boolean).join(", ") || "unknown";
-  const network  = event.asnOrg ? `${event.asnOrg} (AS${event.asn})` : (event.ip || "unknown");
+  const location = escapeHTML([event.city, event.country].filter(Boolean).join(", ") || "unknown");
+  const network  = escapeHTML(event.asnOrg ? `${event.asnOrg} (AS${event.asn})` : (event.ip || "unknown"));
 
   let title;
   if (isTest) {
     title = `🧪 <b>Test alert — ${type.name}</b>`;
   } else if (meta.label) {
-    title = `${type.emoji} <b>${type.name} canary fired — ${meta.label}</b>`;
+    title = `${type.emoji} <b>${type.name} canary fired — ${escapeHTML(meta.label)}</b>`;
   } else {
     title = `${type.emoji} <b>${type.name} canary fired</b>`;
   }
@@ -855,13 +916,13 @@ function buildTelegramPayload(event, meta, type, fromCloud) {
   const lines = [
     title,
     "",
-    `<b>Token:</b> <code>${event.token}</code>`,
+    `<b>Token:</b> <code>${escapeHTML(event.token)}</code>`,
     `<b>Time:</b> ${event.timestamp.replace("T", " ").replace(/\.\d+Z$/, " UTC")}`,
-    `<b>IP:</b> ${event.ip || "unknown"}`,
+    `<b>IP:</b> ${escapeHTML(event.ip || "unknown")}`,
     `<b>Location:</b> ${location}`,
     `<b>Network:</b> ${network}`,
-    `<b>Method:</b> ${event.method}`,
-    `<b>UA:</b> <code>${(event.userAgent || "unknown").slice(0, 100)}</code>`,
+    `<b>Method:</b> ${escapeHTML(event.method)}`,
+    `<b>UA:</b> <code>${escapeHTML((event.userAgent || "unknown").slice(0, 100))}</code>`,
   ];
 
   if (fromCloud && !isTest) {
@@ -926,9 +987,11 @@ async function checkRateLimit(env, key, maxRequests, windowSeconds) {
 // KV is eventually consistent — duplicate events are possible under race.
 // The 60-second window significantly reduces duplicate noise in practice.
 // Strict dedup requires Durable Objects (v2 milestone).
-async function isDuplicate(env, token, ip) {
+// Each proof nonce is its own callback, so back-to-back `arm` and
+// `doctor --test` runs are not swallowed. The per-token rate limit still applies.
+async function isDuplicate(env, token, ip, proofId = null) {
   if (!env.SNARE_KV) return false;
-  const key = `dedup:${token}:${ip}:${Math.floor(Date.now() / 60000)}`;
+  const key = `dedup:${token}:${ip}:${proofId || ""}:${Math.floor(Date.now() / 60000)}`;
   if (await env.SNARE_KV.get(key)) return true;
   await env.SNARE_KV.put(key, "1", { expirationTtl: 120 });
   return false;
@@ -967,6 +1030,7 @@ export {
   CANARY_TYPES,
   SCANNER_ORGS,
   forwardAlert,
+  buildTelegramPayload,
   isAllowedWebhookURL,
   resolveWebhooks,
   shouldFilter,
