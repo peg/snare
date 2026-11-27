@@ -278,7 +278,7 @@ Each alert includes:
 - Timestamp (UTC)
 - IP, city, country
 - ASN (hosting org — `Amazon Technologies Inc` = cloud agent, `Hetzner` = VPS, etc.)
-- User agent (`curl` for `awsproc`, `ssh`, and the `git` helper; the client itself for direct types, e.g. `kubectl/v1.35.1`)
+- User agent (`curl` for `awsproc` and the `git` helper, `curl` or `Wget` for `ssh`; the client itself for direct types, e.g. `kubectl/v1.35.1`)
 - "Likely AI agent" flag when the request comes from cloud infrastructure
 
 Alerts are signed with `X-Snare-Signature` (HMAC-SHA256) when webhook signing is configured, so receivers can verify the sender.
@@ -312,7 +312,7 @@ Fake credential content lives locally in `~/.snare/manifest.json` (0600) and is 
 | | Canarytokens | Snare |
 |---|---|---|
 | Setup | Manual, one token at a time | `snare arm` covers 15 supported credential and tool-use types |
-| AWS detection | CloudTrail (minutes lag) | Direct SDK callback (sub-second) |
+| AWS detection | CloudTrail (minutes lag) | Direct callback at credential resolution (sub-second) |
 | Credential types | AWS + a few others | AWS, GCP, SSH, k8s, git, terraform, OpenAI, Anthropic, npm, PyPI, MCP, and more |
 | AI agent context | None | Cloud ASN hint, client user agent, `credential_process` timing |
 | Fires on | Read or use (varies) | Use only |
