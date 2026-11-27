@@ -3,9 +3,27 @@ package serve
 import (
 	"log"
 	"net/http"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
+
+var proofIDPattern = regexp.MustCompile(`^[a-f0-9]{32}$`)
+
+// callbackProofID extracts the nonce from /c/{token}/proof/{nonce}. `snare
+// prove` and `doctor --test` use it to find their own callback.
+func callbackProofID(token, path string) string {
+	prefix := "/c/" + token + "/proof/"
+	if !strings.HasPrefix(path, prefix) {
+		return ""
+	}
+	id := strings.SplitN(strings.TrimPrefix(path, prefix), "/", 2)[0]
+	if !proofIDPattern.MatchString(id) {
+		return ""
+	}
+	return id
+}
 
 // ─── GET /health ─────────────────────────────────────────────────────────────
 
@@ -73,6 +91,7 @@ func (s *Server) processAlert(token, ip, ua, method, path, timestamp string, isT
 
 	e := event{
 		TokenID:   token,
+		ProofID:   callbackProofID(token, path),
 		DeviceID:  "",
 		IsTest:    isTest,
 		Timestamp: timestamp,
@@ -390,7 +409,13 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	events, err := s.db.getEvents(tokenID)
+	proofID := r.URL.Query().Get("proof_id")
+	if proofID != "" && !proofIDPattern.MatchString(proofID) {
+		jsonResp(w, http.StatusBadRequest, map[string]string{"error": "invalid proof_id"})
+		return
+	}
+
+	events, err := s.db.getProofEvents(tokenID, proofID)
 	if err != nil {
 		jsonResp(w, http.StatusInternalServerError, map[string]string{"error": "db error"})
 		return
@@ -403,6 +428,8 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 
 	// Serialise in the same shape as the Cloudflare Worker response.
 	type eventOut struct {
+		ID        string `json:"id"`
+		ProofID   string `json:"proof_id,omitempty"`
 		Token     string `json:"token"`
 		IsTest    bool   `json:"is_test"`
 		Timestamp string `json:"timestamp"`
@@ -418,6 +445,8 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	out := make([]eventOut, len(events))
 	for i, e := range events {
 		out[i] = eventOut{
+			ID:        strconv.FormatInt(e.ID, 10),
+			ProofID:   e.ProofID,
 			Token:     e.TokenID,
 			IsTest:    e.IsTest,
 			Timestamp: e.Timestamp,

@@ -36,12 +36,14 @@ cleanup() {
 
   event_keys=$(
     cd "$worker_dir"
-    npx wrangler kv key list \
-      --binding SNARE_KV \
-      --env staging \
-      --remote \
-      --prefix "event:$token_id:" 2>/dev/null \
-      | jq -r '.[].name' 2>/dev/null || true
+    for prefix in "evr:$token_id:" "event:$token_id:"; do
+      npx wrangler kv key list \
+        --binding SNARE_KV \
+        --env staging \
+        --remote \
+        --prefix "$prefix" 2>/dev/null \
+        | jq -r '.[].name' 2>/dev/null || true
+    done
   )
   for event_key in $event_keys; do
     (

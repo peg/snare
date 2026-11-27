@@ -2,11 +2,14 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -104,6 +107,41 @@ func TestLoad(t *testing.T) {
 	})
 }
 
+// fakeManagedEnrollment routes every enrollment request (including ones to
+// the default https://snare.sh) to a local server minting unique device IDs,
+// so tests never enroll devices on production.
+func fakeManagedEnrollment(t *testing.T) {
+	t.Helper()
+	var n int
+	var mu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		n++
+		id := fmt.Sprintf("dev-fake-%d", n)
+		mu.Unlock()
+		_, _ = fmt.Fprintf(w, `{"device_id":%q}`, id)
+	}))
+	t.Cleanup(srv.Close)
+	target, _ := url.Parse(srv.URL)
+	old := httpClient
+	httpClient = &http.Client{Timeout: time.Second, Transport: rewriteTransport{target}}
+	t.Cleanup(func() { httpClient = old })
+}
+
+type rewriteTransport struct{ target *url.URL }
+
+func (rt rewriteTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	r = r.Clone(r.Context())
+	r.URL.Scheme, r.URL.Host = rt.target.Scheme, rt.target.Host
+	return http.DefaultTransport.RoundTrip(r)
+}
+
+func noEnrollDelay(t *testing.T) {
+	old := enrollRetryDelay
+	enrollRetryDelay = func(int) time.Duration { return 0 }
+	t.Cleanup(func() { enrollRetryDelay = old })
+}
+
 func TestInit(t *testing.T) {
 	t.Run("uses server-assigned device ID", func(t *testing.T) {
 		home := setupHome(t)
@@ -156,6 +194,31 @@ func TestInit(t *testing.T) {
 		}
 	})
 
+	t.Run("fails closed and writes nothing when managed enrollment fails", func(t *testing.T) {
+		home := setupHome(t)
+		noEnrollDelay(t)
+		var calls int
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			calls++
+			w.WriteHeader(http.StatusTooManyRequests)
+		}))
+		defer srv.Close()
+		target, _ := url.Parse(srv.URL)
+		old := httpClient
+		httpClient = &http.Client{Timeout: time.Second, Transport: rewriteTransport{target}}
+		defer func() { httpClient = old }()
+
+		if _, err := Init("", "", false); err == nil {
+			t.Fatal("Init() error = nil, want enrollment failure instead of a local device ID")
+		}
+		if calls != enrollAttempts {
+			t.Fatalf("enrollment attempts = %d, want %d retries on 429", calls, enrollAttempts)
+		}
+		if _, err := os.Stat(filepath.Join(home, ".snare", configFile)); !os.IsNotExist(err) {
+			t.Fatalf("config written after failed enrollment: %v", err)
+		}
+	})
+
 	t.Run("fails closed when custom server enrollment fails", func(t *testing.T) {
 		setupHome(t)
 
@@ -166,6 +229,7 @@ func TestInit(t *testing.T) {
 
 	t.Run("defaults callback base when empty", func(t *testing.T) {
 		setupHome(t)
+		fakeManagedEnrollment(t)
 
 		cfg, err := Init("", "", false)
 		if err != nil {
@@ -195,6 +259,7 @@ func TestInit(t *testing.T) {
 
 	t.Run("refuses overwrite without force", func(t *testing.T) {
 		setupHome(t)
+		fakeManagedEnrollment(t)
 
 		if _, err := Init("", "", false); err != nil {
 			t.Fatalf("first Init: %v", err)
@@ -206,6 +271,7 @@ func TestInit(t *testing.T) {
 
 	t.Run("force overwrites existing config", func(t *testing.T) {
 		setupHome(t)
+		fakeManagedEnrollment(t)
 
 		first, err := Init("", "https://hooks.example.test/one", false)
 		if err != nil {
@@ -225,6 +291,7 @@ func TestInit(t *testing.T) {
 }
 
 func TestRegisterDeviceWithServerTimeout(t *testing.T) {
+	noEnrollDelay(t)
 	oldClient := httpClient
 	httpClient = &http.Client{Timeout: 25 * time.Millisecond}
 	t.Cleanup(func() { httpClient = oldClient })
@@ -360,6 +427,50 @@ func TestURLsAndSecrets(t *testing.T) {
 			t.Fatal("two generated secrets matched; want different values")
 		}
 	})
+}
+
+func TestRegisterDeviceWithServerRetries(t *testing.T) {
+	noEnrollDelay(t)
+	for _, tt := range []struct {
+		name      string
+		statuses  []int
+		wantCalls int
+		wantOK    bool
+	}{
+		{"retries 503 then succeeds", []int{503, 200}, 2, true},
+		{"does not retry 403", []int{403, 200}, 1, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			calls := 0
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				status := tt.statuses[calls]
+				calls++
+				w.WriteHeader(status)
+				_, _ = w.Write([]byte(`{"device_id":"dev-retry"}`))
+			}))
+			defer srv.Close()
+			id, err := registerDeviceWithServer(srv.URL, strings.Repeat("a", 64))
+			if calls != tt.wantCalls || (err == nil) != tt.wantOK {
+				t.Fatalf("calls=%d id=%q err=%v", calls, id, err)
+			}
+		})
+	}
+}
+
+func TestReenroll(t *testing.T) {
+	setupHome(t)
+	fakeManagedEnrollment(t)
+	c := &Config{DeviceID: "dev-local-orphan", DeviceSecret: strings.Repeat("a", 64), CallbackBase: "https://snare.sh/c"}
+	if err := c.Reenroll(); err != nil {
+		t.Fatalf("Reenroll: %v", err)
+	}
+	if c.DeviceID == "dev-local-orphan" || c.DeviceSecret == strings.Repeat("a", 64) {
+		t.Fatalf("identity not replaced: %+v", c)
+	}
+	loaded, err := Load()
+	if err != nil || loaded.DeviceID != c.DeviceID {
+		t.Fatalf("reenrolled identity not saved: %v %+v", err, loaded)
+	}
 }
 
 func TestRegisterDeviceWithServer(t *testing.T) {
