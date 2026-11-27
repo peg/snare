@@ -315,6 +315,9 @@ func removeAppended(c manifest.Canary, force bool, dryRun bool) error {
 	if err != nil {
 		return fmt.Errorf("stat %s: %w", c.Path, err)
 	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("%s: not a regular file", c.Path)
+	}
 	origMode := info.Mode()
 
 	data, err := os.ReadFile(path)
@@ -352,7 +355,7 @@ func removeAppended(c manifest.Canary, force bool, dryRun bool) error {
 		return fmt.Errorf("%s: canary ID still present after excision — duplicate entry? Use --force", c.Path)
 	}
 
-	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".snare-tmp-*")
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".snare-tmp-*")
 	if err != nil {
 		return fmt.Errorf("creating temp file: %w", err)
 	}

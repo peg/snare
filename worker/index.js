@@ -455,25 +455,25 @@ export const LEGACY_EVENT_KEYS_UNTIL = Date.UTC(2027, 2, 15);
 // used `event:{token}:{ms}:{uuid}` (oldest first) and are read, at most
 // LEGACY_PAGES list calls deep, only when the new prefix has fewer than n.
 const LEGACY_PAGES = 2;
-export async function newestEventKeys(env, token, n, now = Date.now()) {
+export async function newestEventKeys(env, token, n, now = Date.now(), legacy = true) {
   const current = await env.SNARE_KV.list({ prefix: `evr:${token}:`, limit: n });
   const names = current.keys.map(k => k.name);
-  if (names.length >= n || now >= LEGACY_EVENT_KEYS_UNTIL) return names.slice(0, n);
+  if (!legacy || names.length >= n || now >= LEGACY_EVENT_KEYS_UNTIL) return names.slice(0, n);
 
-  let legacy = [];
+  let old = [];
   let cursor;
   for (let i = 0; i < LEGACY_PAGES; i++) {
     const page = await env.SNARE_KV.list({ prefix: `event:${token}:`, cursor });
-    legacy = legacy.concat(page.keys.map(k => k.name)).slice(-n);
+    old = old.concat(page.keys.map(k => k.name)).slice(-n);
     if (page.list_complete !== false || !page.cursor) break;
     cursor = page.cursor;
   }
-  return names.concat(legacy.reverse()).slice(0, n);
+  return names.concat(old.reverse()).slice(0, n);
 }
 
-async function readEvents(env, token) {
+async function readEvents(env, token, legacy = true) {
   const events = [];
-  for (const name of await newestEventKeys(env, token, 20)) {
+  for (const name of await newestEventKeys(env, token, 20, Date.now(), legacy)) {
     const raw = await env.SNARE_KV.get(name);
     if (!raw) continue;
     try { events.push(JSON.parse(raw)); } catch { /* skip corrupt */ }
@@ -485,6 +485,9 @@ async function readEvents(env, token) {
 
 async function handleEvents(token, request, env) {
   if (!env.SNARE_KV) return json({ error: "KV not configured" }, 500);
+  if (!/^Bearer\s+\S/i.test(request.headers.get("authorization") || "")) {
+    return json({ error: "missing Authorization header" }, 401);
+  }
 
   let deviceId = null;
   const regRaw = await env.SNARE_KV.get(`webhook:${token}`);
@@ -493,7 +496,7 @@ async function handleEvents(token, request, env) {
   }
   // `registered: false` tells the owner that callbacks are being dropped even
   // though old events are still readable (expired or revoked registration).
-  const registered = Boolean(deviceId);
+  const registered = regRaw !== null;
 
   // An unregistered token is owned by the device on its newest stored event,
   // so revoked tokens don't become readable by any valid device.
@@ -519,7 +522,7 @@ async function handleEvents(token, request, env) {
     return json({ error: "invalid proof_id" }, 400);
   }
 
-  events ??= await readEvents(env, token);
+  events ??= await readEvents(env, token, proofId === null);
   if (proofId !== null) events = events.filter(e => e.proof_id === proofId);
 
   if (events.length === 0) {

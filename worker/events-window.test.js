@@ -107,6 +107,27 @@ describe("events window", () => {
     expect(lists).toBe(3);
   });
 
+  it("rejects unauthenticated reads before any list", async () => {
+    const env = await ownerEnv();
+    let lists = 0;
+    const list = env.SNARE_KV.list;
+    env.SNARE_KV.list = (opts) => { lists++; return list(opts); };
+    const resp = await worker.fetch(new Request(`https://snare.sh/api/events/random-token-0001`), env, { waitUntil() {} });
+    expect(resp.status).toBe(401);
+    expect(lists).toBe(0);
+  });
+
+  it("lists only new-format keys for a proof read", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.UTC(2026, 11, 1));
+    const env = await ownerEnv();
+    const prefixes = [];
+    const list = env.SNARE_KV.list;
+    env.SNARE_KV.list = (opts) => { prefixes.push(opts.prefix); return list(opts); };
+    await readEvents(env, "?proof_id=0123456789abcdef0123456789abcdef");
+    expect(prefixes).toEqual([`evr:${TOKEN}:`]);
+  });
+
   it("stops listing legacy keys once they have all expired", async () => {
     const legacy = `event:${TOKEN}:${Date.UTC(2026, 9, 1)}:old`;
     const env = await ownerEnv([[legacy, JSON.stringify(ev(0))]]);
