@@ -4,10 +4,10 @@ The managed callback service has an isolated Cloudflare staging environment:
 
 - Worker: `snare-callback-staging`
 - Hostname: `https://staging.snare.sh`
-- KV namespace: `snare-events-staging`
+- D1 database: `snare-state-staging`
 - GitHub environment: `snare-worker-staging`
 
-The staging Worker never binds production KV. Its runtime secrets must also be
+The staging Worker binds no KV and never touches production storage. Its runtime secrets must also be
 staging-only; do not copy production webhook destinations into staging.
 
 ## Deployment flow
@@ -58,14 +58,15 @@ Create `snare-worker-staging` in repository settings with:
 Use a dedicated staging token with:
 
 - account-scoped `Workers Scripts: Edit`;
-- account-scoped `Workers KV Storage: Edit`; and
+- account-scoped `D1: Edit`; and
 - zone-scoped `Workers Routes: Edit` restricted to `snare.sh`.
 
-KV write access is required because the smoke test deletes its synthetic
-records after verification. If staging is migrated to D1, bind `SNARE_DB` in that
-environment and give its deployment token D1 access for schema management and
-synthetic cleanup. Invite enrollment also requires a separate matching
-`SNARE_ENROLLMENT_TOKEN` secret in the staging GitHub environment. Wrangler also reconciles Worker routes during a
+D1 write access is required because each deploy applies pending migrations in
+`worker/migrations` and the smoke test deletes its synthetic records after
+verification. Staging uses invite enrollment, so the Worker needs a
+`SNARE_ENROLLMENT_TOKEN` secret and the staging GitHub environment needs the
+same value as a secret; without it enrollment fails closed and the smoke test
+fails. Wrangler also reconciles Worker routes during a
 deploy, including when the configured target is a custom domain. DNS Edit and
 broad access to other zones are not required.
 

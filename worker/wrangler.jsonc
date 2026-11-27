@@ -37,6 +37,7 @@
           "custom_domain": true
         }
       ],
+      // Empty on purpose: staging runs on D1 only and must not inherit production KV.
       "kv_namespaces": [],
       "d1_databases": [
         {
@@ -60,7 +61,8 @@
       "vars": {
         "SNARE_ENVIRONMENT": "staging",
         "STORAGE_BACKEND": "d1",
-        "RATE_LIMITS_REQUIRED": "true"
+        "RATE_LIMITS_REQUIRED": "true",
+        "ENROLLMENT_MODE": "invite"
       },
       "observability": {
         "enabled": true,
