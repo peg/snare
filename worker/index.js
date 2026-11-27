@@ -1,5 +1,5 @@
 import { PolicyError, readManagementJSON, validateManagementBody, authorizeEnrollment,
-  authorizeGlobalWebhook, sanitizeCallbackMetadata, enforceSourceRateLimit, enforceDeviceRateLimit } from "./policy.js";
+  authorizeGlobalWebhook, sanitizeCallbackMetadata, enforceRateLimit, enforceSourceRateLimit, enforceDeviceRateLimit } from "./policy.js";
 import { storeFor, storeLimits } from "./store.js";
 import { createDeliveryMessage } from "./delivery.js";
 import { dispatchOutbox, consumeQueue } from "./outbox.js";
@@ -332,10 +332,13 @@ async function processAlert(token, metadata, env, ctx) {
   const scanner = SCANNER_ORGS.some(org => (metadata.asnOrg || "").toLowerCase().includes(org));
   const classification = preview ? "preview" : scanner ? "scanner" : shouldFilter(meta.canaryType, metadata) ? "probe" : "activity";
   let suppression = classification === "activity" ? null : classification;
-  if (!suppression && env.NOTIFICATION_RATE_LIMITER) {
-    const outcome = await env.NOTIFICATION_RATE_LIMITER.limit({ key: `notify:${token}:${metadata.ip}` });
-    if (!outcome || typeof outcome.success !== "boolean") throw new Error("invalid notification limiter result");
-    if (!outcome.success) suppression = "coalesced";
+  if (!suppression) {
+    try {
+      await enforceRateLimit(env, "NOTIFICATION_RATE_LIMITER", `notify:${token}:${metadata.ip}`);
+    } catch (error) {
+      if (error?.status !== 429) throw error;
+      suppression = "coalesced";
+    }
   }
   const event = { ...metadata, id: crypto.randomUUID(), token, device_id: meta.deviceId,
     token_revision: revision, is_test: token.startsWith("snare-test-"), classification,
@@ -486,7 +489,7 @@ async function handleRevoke(request, env) {
     if (record && !await storeFor(env).revokeToken(token_id, device_id)) return json({ error: "token belongs to another device" }, 403);
   } else if (record) {
     await env.SNARE_KV.put(`owner:${token_id}`, JSON.stringify({ device_id }));
-    await env.SNARE_KV.put(`webhook:${token_id}`, JSON.stringify({ ...record, revoked: true, revision: (record.revision || 0) + 1 }));
+    await env.SNARE_KV.put(`webhook:${token_id}`, JSON.stringify({ ...record, revoked: true, persistent: true, revision: (record.revision || 0) + 1 }));
   }
   return json({ status: "revoked", token_id });
 }
@@ -766,7 +769,7 @@ function buildTelegramPayload(event, meta, type, fromCloud) {
     title,
     "",
     `<b>Token:</b> <code>${escapeHTML(event.token)}</code>`,
-    `<b>Time:</b> ${event.timestamp.replace("T", " ").replace(/\.\d+Z$/, " UTC")}`,
+    `<b>Time:</b> ${escapeHTML(event.timestamp.replace("T", " ").replace(/\.\d+Z$/, " UTC"))}`,
     `<b>IP:</b> ${escapeHTML(event.ip || "unknown")}`,
     `<b>Location:</b> ${location}`,
     `<b>Network:</b> ${network}`,

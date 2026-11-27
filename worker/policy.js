@@ -259,6 +259,7 @@ async function enforceDeviceRateLimit(env = {}, verifiedDeviceId, operation) {
 }
 
 export {
+  enforceRateLimit,
   MAX_MANAGEMENT_BYTES, PolicyError, readManagementJSON, validateManagementBody,
   validateTokenId, validateDeviceId, validateSecret, authorizeEnrollment,
   authorizeGlobalWebhook, sanitizeCallbackMetadata, enforceSourceRateLimit,

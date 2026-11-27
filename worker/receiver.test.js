@@ -27,7 +27,7 @@ function fixture(overrides = {}) {
   const env = {
     SNARE_DB: db, STORAGE_BACKEND: "d1", ENROLLMENT_MODE: "open", RATE_LIMITS_REQUIRED: "true",
     WEBHOOK_DELIVERY_QUEUE: { send: vi.fn(async message => { queued.push(message); }) },
-    ...Object.fromEntries(["ENROLLMENT_RATE_LIMITER", "API_SOURCE_RATE_LIMITER", "CALLBACK_SOURCE_RATE_LIMITER", "API_DEVICE_RATE_LIMITER"]
+    ...Object.fromEntries(["ENROLLMENT_RATE_LIMITER", "API_SOURCE_RATE_LIMITER", "CALLBACK_SOURCE_RATE_LIMITER", "API_DEVICE_RATE_LIMITER", "NOTIFICATION_RATE_LIMITER"]
       .map(name => [name, { limit: vi.fn(async () => ({ success: true })) }])),
     ...overrides,
   };
@@ -269,8 +269,8 @@ describe("integrated receiver admission and evidence", () => {
     ]);
     const env = { SNARE_KV: {
       get: vi.fn(async key => data.get(key) ?? null), put: vi.fn(),
-      list: vi.fn(async () => ({
-        keys: Array.from({ length: 901 }, (_, i) => ({ name: `event:${TOKEN}:${i}:legacy-event` })),
+      list: vi.fn(async ({ prefix }) => ({
+        keys: prefix.startsWith("event:") ? Array.from({ length: 901 }, (_, i) => ({ name: `event:${TOKEN}:${i}:legacy-event` })) : [],
         list_complete: true,
       })),
     } };

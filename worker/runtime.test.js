@@ -79,7 +79,7 @@ beforeEach(async () => {
     d1Databases: ["SNARE_DB"],
     bindings: { STORAGE_BACKEND: "d1", ENROLLMENT_MODE: "open", RATE_LIMITS_REQUIRED: "true" },
     ratelimits: Object.fromEntries([
-      "ENROLLMENT_RATE_LIMITER", "API_SOURCE_RATE_LIMITER", "API_DEVICE_RATE_LIMITER", "CALLBACK_SOURCE_RATE_LIMITER",
+      "ENROLLMENT_RATE_LIMITER", "API_SOURCE_RATE_LIMITER", "API_DEVICE_RATE_LIMITER", "CALLBACK_SOURCE_RATE_LIMITER", "NOTIFICATION_RATE_LIMITER",
     ].map((name, index) => [name, { namespace_id: String(index + 1), simple: { limit: 1000, period: 60 } }])),
     outboundService: async request => {
       outbound.push({ url: request.url, body: await request.text(), headers: Object.fromEntries(request.headers) });

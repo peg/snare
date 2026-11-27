@@ -91,7 +91,8 @@ and choose different IDs for staging. This is a configuration fragment only:
     { "name": "ENROLLMENT_RATE_LIMITER", "namespace_id": "1101", "simple": { "limit": 3, "period": 60 } },
     { "name": "API_SOURCE_RATE_LIMITER", "namespace_id": "1102", "simple": { "limit": 120, "period": 60 } },
     { "name": "CALLBACK_SOURCE_RATE_LIMITER", "namespace_id": "1103", "simple": { "limit": 600, "period": 60 } },
-    { "name": "API_DEVICE_RATE_LIMITER", "namespace_id": "1104", "simple": { "limit": 120, "period": 60 } }
+    { "name": "API_DEVICE_RATE_LIMITER", "namespace_id": "1104", "simple": { "limit": 120, "period": 60 } },
+    { "name": "NOTIFICATION_RATE_LIMITER", "namespace_id": "1105", "simple": { "limit": 1, "period": 60 } }
   ]
 }
 ```

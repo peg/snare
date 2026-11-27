@@ -146,6 +146,26 @@ describe("proof correlation", () => {
     expect(stored.sort()).toEqual(["coalesced", null].sort());
   });
 
+  it("fails closed without a notification limiter when limits are required", async () => {
+    const env = await ownerEnv();
+    env.RATE_LIMITS_REQUIRED = "true";
+    env.CALLBACK_SOURCE_RATE_LIMITER = { limit: async () => ({ success: true }) };
+    let pending;
+    await worker.fetch(new Request(`https://snare.sh/c/${TOKEN}`, { headers: { "cf-connecting-ip": "198.51.100.9" } }), env, { waitUntil(p) { pending = p; } });
+    await pending;
+    expect((await env.SNARE_KV.list({ prefix: `evr:${TOKEN}:` })).keys).toHaveLength(0);
+  });
+
+  it("refuses a first claim when only evr: history shows another owner", async () => {
+    const env = await ownerEnv([[eventKey(TOKEN + "x", Date.now(), "e"), JSON.stringify({ ...ev(1), token: TOKEN + "x", device_id: "dev-other" })]]);
+    const resp = await worker.fetch(new Request("https://snare.sh/api/register", {
+      method: "POST", headers: { authorization: `Bearer ${SECRET}`, "content-type": "application/json" },
+      body: JSON.stringify({ token_id: TOKEN + "x", webhook_url: "use-global", device_id: DEVICE, canary_type: "git" }),
+    }), env, { waitUntil() {} });
+    expect(resp.status).toBe(403);
+    expect(env.SNARE_KV.map.has(`webhook:${TOKEN}x`)).toBe(false);
+  });
+
   it("rejects a malformed proof_id", async () => {
     expect((await readEvents(await ownerEnv(), "?proof_id=nothex")).status).toBe(400);
   });

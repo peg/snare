@@ -124,7 +124,7 @@ beforeAll(async () => {
     ],
     d1Databases: ["SNARE_DB"],
     bindings: { STORAGE_BACKEND: "d1", ENROLLMENT_MODE: "open", RATE_LIMITS_REQUIRED: "true", WEBHOOK_URLS: "https://hooks.slack.com/services/SYNTHETIC/GLOBAL" },
-    ratelimits: Object.fromEntries(["ENROLLMENT_RATE_LIMITER", "API_SOURCE_RATE_LIMITER", "API_DEVICE_RATE_LIMITER", "CALLBACK_SOURCE_RATE_LIMITER"]
+    ratelimits: Object.fromEntries(["ENROLLMENT_RATE_LIMITER", "API_SOURCE_RATE_LIMITER", "API_DEVICE_RATE_LIMITER", "CALLBACK_SOURCE_RATE_LIMITER", "NOTIFICATION_RATE_LIMITER"]
       .map((name, i) => [name, { namespace_id: String(i + 1), simple: { limit: 10000, period: 60 } }])),
     outboundService: async request => { outbound.push(request.url); return new Response(null, { status: 204 }); },
   }));
