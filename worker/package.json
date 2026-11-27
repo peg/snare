@@ -10,6 +10,7 @@
     "cf:deploy:staging": "wrangler deploy --env staging --keep-vars --strict"
   },
   "devDependencies": {
+    "miniflare": "5.20261023.1-beta",
     "vitest": "4.1.12",
     "wrangler": "4.154.0"
   },

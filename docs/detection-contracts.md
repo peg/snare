@@ -34,6 +34,25 @@ The CI canary lab runs in strict mode: missing AWS CLI, OpenSSH, kubectl, Git,
 npm, or google-auth dependencies fail the job instead of silently skipping the
 corresponding real-client proof.
 
+## Correlation in CLI proof reports
+
+`snare prove --run` first verifies that the recorded planted snippet is still
+present and unchanged. It then invokes the selected client against an isolated
+temporary copy of that snippet, adding a random 128-bit identifier to the
+callback path. The original configuration is not edited. A passing report must
+contain a stable event ID and the exact proof identifier from that invocation;
+an unrelated callback or a full recent-event page cannot satisfy the proof.
+The receiver filters by proof identifier before limiting the returned history.
+`snare doctor --test` and `snare repair` use the same correlation for their
+synthetic callback checks. Older receivers without this contract must be
+upgraded before these checks can pass.
+
+This validates the selected snippet's client behavior and callback persistence.
+It does not validate interactions with the rest of the original configuration,
+establish the caller's intent, or confirm downstream webhook delivery. A proof
+identifier is only correlation metadata: it does not authorize requests or
+suppress alerts. Callback bodies remain unread.
+
 ## Retired types
 
 `azure`, `docker`, `github`, and `stripe` are no longer plantable:

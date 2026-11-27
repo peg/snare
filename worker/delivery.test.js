@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createDeliveryMessage, DELIVERY_SCHEMA } from "./delivery.js";
+import { createDeliveryMessage, validateDeliveryMessage, DELIVERY_SCHEMA } from "./delivery.js";
 
 describe("durable webhook delivery contract", () => {
   it("creates a deterministic v1 envelope without serializing the destination", async () => {
@@ -94,5 +94,35 @@ describe("durable webhook delivery contract", () => {
     await expect(
       createDeliveryMessage("https://user:secret@example.com/webhook", {}),
     ).rejects.toThrow("webhook destination must use https without credentials");
+  });
+});
+
+
+describe("delivery validation boundaries", () => {
+  async function valid() {
+    return createDeliveryMessage("https://example.com/secret", {
+      id: crypto.randomUUID(), token: "token-123456", device_id: "device-123",
+      timestamp: new Date().toISOString(), is_test: false,
+      sdkHints: { hasAwsSig: true, isPost: true },
+    }, { label: "fixture" }, { tokenRevision: 1 });
+  }
+  it("rejects typed-field substitution instead of treating every scalar as safe", async () => {
+    const message = await valid();
+    message.event.userAgent = true;
+    expect(() => validateDeliveryMessage(message)).toThrow();
+    delete message.event.userAgent;
+    message.event.sdkHints.hasAwsSig = "true";
+    expect(() => validateDeliveryMessage(message)).toThrow();
+  });
+  it("applies byte limits to Unicode metadata", async () => {
+    const message = await valid();
+    message.meta.label = "😀".repeat(200);
+    expect(() => validateDeliveryMessage(message)).toThrow();
+  });
+  it("does not serialize nested material through allowlisted fields", async () => {
+    const message = await createDeliveryMessage("https://example.com/secret", {
+      userAgent: { secret: "PRIVATE-PAYLOAD" }, sdkHints: { amzTarget: ["PRIVATE-PAYLOAD"] },
+    }, { label: { secret: "PRIVATE-PAYLOAD" } });
+    expect(JSON.stringify(message)).not.toContain("PRIVATE-PAYLOAD");
   });
 });
