@@ -70,6 +70,12 @@ fails. Wrangler also reconciles Worker routes during a
 deploy, including when the configured target is a custom domain. DNS Edit and
 broad access to other zones are not required.
 
+Deploys use `wrangler deploy --strict`, which aborts when the live Worker
+configuration differs from `wrangler.jsonc`. When a merged change intends that
+difference (new vars or removed bindings), run the workflow manually from `main`
+with `allow_config_change` checked. Automatic deploys always stay strict and
+pass again once the live configuration matches.
+
 Configure `snare-worker-production` separately with its production-scoped
 Cloudflare token and account ID, restrict deployments to `main`, and require an
 environment reviewer when the repository has a second trusted maintainer. The

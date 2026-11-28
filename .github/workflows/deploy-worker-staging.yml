@@ -5,6 +5,11 @@ on:
     workflows: [CI]
     types: [completed]
   workflow_dispatch:
+    inputs:
+      allow_config_change:
+        description: Deploy without --strict to apply an intended Worker config change
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -69,13 +74,19 @@ jobs:
         working-directory: worker
         env:
           WRANGLER_OUTPUT_FILE_PATH: ${{ runner.temp }}/wrangler-output.jsonl
+          ALLOW_CONFIG_CHANGE: ${{ github.event_name == 'workflow_dispatch' && inputs.allow_config_change }}
         run: |
           set -euo pipefail
           : > "$WRANGLER_OUTPUT_FILE_PATH"
+          strict=(--strict)
+          if [[ "$ALLOW_CONFIG_CHANGE" == "true" ]]; then
+            strict=()
+            echo "::warning::Deploying without --strict; remote Worker configuration will be overwritten."
+          fi
           npx wrangler deploy \
             --env staging \
             --keep-vars \
-            --strict \
+            "${strict[@]}" \
             --message "GitHub Actions staging deploy of ${{ github.event.workflow_run.head_sha || github.sha }}"
 
           version_id="$(
