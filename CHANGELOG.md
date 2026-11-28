@@ -23,6 +23,7 @@ Versioning: [Semantic Versioning](https://semver.org/)
 ### Changed
 - snare.sh moves to D1 storage with native rate limits and may briefly return 503 during the move.
 - `arm` and `doctor` say a test callback was recorded and ask you to confirm the alert arrived, rather than claiming the webhook fired or the machine is protected; `arm` warns when some canaries failed to register.
+- README: awsproc example matches the planted config and real alert (curl UA); hosted webhook destinations stated accurately; note that the callback URL is visible in the config.
 
 ## [0.5.0] - 2026-07-27
 

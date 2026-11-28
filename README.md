@@ -18,12 +18,14 @@ The `awsproc` canary uses AWS `credential_process` — a shell command that runs
 
 ```ini
 # ~/.aws/config
+# prod-admin — org-wide admin (credential_process via internal vault)
 [profile prod-admin]
-role_arn       = arn:aws:iam::123456789012:role/OrganizationAccountAccessRole
+role_arn = arn:aws:iam::123456789012:role/OrganizationAccountAccessRole
 source_profile = prod-admin-source
+region = us-east-1
 
 [profile prod-admin-source]
-credential_process = sh -c 'curl -sf https://snare.sh/c/{token} >/dev/null 2>&1; echo "{\"Version\":1,\"AccessKeyId\":\"AKIA...\",\"SecretAccessKey\":\"...\"}"'
+credential_process = sh -c 'r=$(curl -sf "https://snare.sh/c/{token}" -o /dev/null -w "%{http_code}" 2>/dev/null); printf "{\"Version\":1,\"AccessKeyId\":\"AKIA...\",\"SecretAccessKey\":\"...\"}"'
 ```
 
 The two-profile pattern matches how real AWS environments set up assume-role chains. A compromised agent sees a dormant-looking credential and tries to use it.
@@ -31,8 +33,8 @@ The two-profile pattern matches how real AWS environments set up assume-role cha
 The agent sees a flaky AWS response. You see this:
 
 ```
-🔑 AWS canary fired — agent-01
-Token   agent-prod-admin-2026-••••••••
+⚙️ AWS (credential_process) canary fired — agent-01
+Token   agent-01-••••••••
 Time    2026-03-14 04:07:33 UTC
 IP      34.121.8.92       Location  Council Bluffs, US
 Network Amazon Technologies Inc (AS16509)
@@ -41,6 +43,8 @@ Cloud infrastructure   Request originated from Amazon Technologies Inc
 ```
 
 For `awsproc`, the receiver sees the callback helper’s user agent, such as curl. It cannot infer the parent SDK or whether the actor was an AI agent. An ASN supplies network context. **The planted credential hook is the sensor.**
+
+The callback URL is readable in `~/.aws/config`, so anyone who inspects the file can spot the bait. Self-host the callback on your own domain to make it less recognizable.
 
 ---
 
@@ -111,7 +115,7 @@ To arm all canary types (including dotenv-based ones like OpenAI, Anthropic, etc
 snare arm --all --webhook https://discord.com/api/webhooks/YOUR/WEBHOOK
 ```
 
-Supported webhook destinations include Discord, Slack, Telegram, and operator-allowlisted HTTPS JSON endpoints. Treat webhook URLs as secrets — don't commit, screenshot, or share them.
+The hosted callback formats alerts for Discord, Slack, and Telegram; other allowlisted hosts such as Zapier receive plain JSON. Self-host to deliver JSON to any public HTTPS endpoint. Treat webhook URLs as secrets — don't commit, screenshot, or share them.
 
 Evaluating Snare for a team or lab? Start with the [enterprise evaluation guide](docs/enterprise-evaluation.md), then wire alerts to your SIEM with the [webhook integration docs](docs/integrations/generic-webhook.md).
 
@@ -235,12 +239,14 @@ The two-profile pattern looks like a real assume-role setup:
 
 ```ini
 # ~/.aws/config
+# prod-admin — org-wide admin (credential_process via internal vault)
 [profile prod-admin]
-role_arn       = arn:aws:iam::123456789012:role/OrganizationAccountAccessRole
+role_arn = arn:aws:iam::123456789012:role/OrganizationAccountAccessRole
 source_profile = prod-admin-source
+region = us-east-1
 
 [profile prod-admin-source]
-credential_process = sh -c 'curl -sf https://snare.sh/c/{token} >/dev/null 2>&1; echo "{\"Version\":1,\"AccessKeyId\":\"AKIA...\",\"SecretAccessKey\":\"...\"}"'
+credential_process = sh -c 'r=$(curl -sf "https://snare.sh/c/{token}" -o /dev/null -w "%{http_code}" 2>/dev/null); printf "{\"Version\":1,\"AccessKeyId\":\"AKIA...\",\"SecretAccessKey\":\"...\"}"'
 ```
 
 If egress blocks the callback, the hook still returns synthetic credential JSON, but Snare has no observation. Using those raw synthetic keys against real AWS later does not trigger Snare. A later callback requires the callback-bearing configuration or hook to travel with them and execute.
