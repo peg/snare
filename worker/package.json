@@ -11,7 +11,7 @@
   },
   "devDependencies": {
     "miniflare": "5.20261023.1-beta",
-    "vitest": "4.1.12",
+    "vitest": "5.1.1",
     "wrangler": "4.154.0"
   },
   "overrides": {
