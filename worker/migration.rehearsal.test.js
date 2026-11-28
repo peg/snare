@@ -105,10 +105,10 @@ async function sql(batch) {
   return body;
 }
 const rows = async (query, params = []) => (await sql([{ sql: query, params }]))[0].results;
-function api(path, body, secret) {
+function api(path, body, secret, device) {
   return runtime.dispatchFetch(`${ORIGIN}${path}`, {
     method: body === undefined ? "GET" : "POST",
-    headers: { "content-type": "application/json", authorization: `Bearer ${secret}` },
+    headers: { "content-type": "application/json", authorization: `Bearer ${secret}`, ...(device ? { "x-snare-device-id": device } : {}) },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
 }
@@ -173,7 +173,7 @@ describe("KV -> D1 migration rehearsal", () => {
   });
 
   it("serves imported history and admits, stores, and delivers a new callback", async () => {
-    const history = await (await api("/api/events/tok_rehearsal_017", undefined, secretFor(4))).json();
+    const history = await (await api("/api/events/tok_rehearsal_017", undefined, secretFor(4), deviceFor(4))).json();
     expect(history.events.map(e => e.id)).toContain("evt_rehearsal_imported");
     const hit = await runtime.dispatchFetch(`${ORIGIN}/c/tok_rehearsal_017`, { method: "POST", headers: { "user-agent": "curl/rehearsal" } });
     await hit.arrayBuffer();

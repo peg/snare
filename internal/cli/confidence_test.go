@@ -42,6 +42,8 @@ type fakeSnareAPI struct {
 	nextDev int
 	nextEvt int
 	server  *httptest.Server
+
+	registerMisses int // next N registrations report unknown device_id, like a stale KV read
 }
 
 func newFakeSnareAPI(t *testing.T) *fakeSnareAPI {
@@ -164,6 +166,10 @@ func (f *fakeSnareAPI) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	f.mu.Lock()
 	_, known := f.devices[body.DeviceID]
+	if f.registerMisses > 0 {
+		f.registerMisses--
+		known = false
+	}
 	f.mu.Unlock()
 	if !known {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unknown device_id"})
@@ -609,6 +615,44 @@ func TestRepairReenrollsOrphanDevice(t *testing.T) {
 	}
 	if stdout, stderr, code := runSnare(t, home, "doctor"); code != 0 {
 		t.Fatalf("doctor should pass after re-enrollment:\n%s%s", stdout, stderr)
+	}
+}
+
+func TestRepairKeepsKnownDeviceOnTransientUnknownDevice(t *testing.T) {
+	home := t.TempDir()
+	api := newFakeSnareAPI(t)
+	defer api.Close()
+
+	deviceID := "dev-known"
+	secret := strings.Repeat("e", 64)
+	api.AddDevice(deviceID, secret)
+	writeTestConfig(t, home, api.URL()+"/c", deviceID, secret, "")
+	token := "known-device-token-01"
+	path := filepath.Join(home, "canary-known.txt")
+	content := "token=" + token + "\n"
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+	writeTestManifest(t, home, manifest.Manifest{
+		Version:  2,
+		DeviceID: deviceID,
+		Canaries: []manifest.Canary{
+			{ID: token, Type: "awsproc", Path: path, Mode: manifest.ModeNewFile, Content: content, ContentHash: manifest.HashContent(content), PlantedAt: time.Now(), Active: true},
+		},
+	})
+	api.mu.Lock()
+	api.tokens[token] = fakeTokenReg{DeviceID: deviceID}
+	api.registerMisses = 1
+	api.mu.Unlock()
+	api.Seed(token, 1)
+
+	stdout, stderr, _ := runSnare(t, home, "repair")
+	if strings.Contains(stdout, "device enrolled") {
+		t.Fatalf("repair replaced a device the receiver knows:\n%s%s", stdout, stderr)
+	}
+	data, err := os.ReadFile(filepath.Join(home, ".snare", "config.json"))
+	if err != nil || !strings.Contains(string(data), deviceID) {
+		t.Fatalf("device identity changed: %v\n%s", err, data)
 	}
 }
 
