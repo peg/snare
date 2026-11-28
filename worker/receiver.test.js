@@ -10,6 +10,7 @@ const SECRET = "synthetic-device-secret-for-receiver-fixtures";
 const databases = [];
 
 beforeEach(() => {
+  deviceBySecret.clear();
   vi.useFakeTimers();
   vi.setSystemTime(NOW);
   vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("unexpected external request in receiver fixture"); }));
@@ -41,10 +42,14 @@ async function invoke(env, request) {
   return response;
 }
 
+const deviceBySecret = new Map();
+
 function api(path, body, secret = SECRET) {
+  const device = deviceBySecret.get(secret);
   return new Request(`https://snare.invalid/api/${path}`, {
     method: body === undefined ? "GET" : "POST",
-    headers: { "content-type": "application/json", "cf-connecting-ip": "192.0.2.1", ...(secret ? { authorization: `Bearer ${secret}` } : {}) },
+    headers: { "content-type": "application/json", "cf-connecting-ip": "192.0.2.1",
+      ...(secret ? { authorization: `Bearer ${secret}` } : {}), ...(device ? { "x-snare-device-id": device } : {}) },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
 }
@@ -52,7 +57,9 @@ function api(path, body, secret = SECRET) {
 async function enroll(env, secret = SECRET) {
   const response = await invoke(env, api("devices", { device_secret: secret }, null));
   expect(response.status).toBe(200);
-  return (await response.json()).device_id;
+  const { device_id } = await response.json();
+  deviceBySecret.set(secret, device_id);
+  return device_id;
 }
 
 async function register(env, deviceId, options = {}, secret = SECRET) {
@@ -243,6 +250,7 @@ describe("integrated receiver admission and evidence", () => {
   });
 
   it("keeps repeated legacy event reads free of KV counter writes", async () => {
+    deviceBySecret.set(SECRET, "legacy-owner");
     const bytes = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(SECRET)));
     const secretHash = Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join("");
     const data = new Map([
@@ -260,7 +268,17 @@ describe("integrated receiver admission and evidence", () => {
     expect(env.SNARE_KV.get.mock.calls.flat().some(key => key.startsWith("rl:"))).toBe(false);
   });
 
+  it("authenticates the caller before any token lookup", async () => {
+    const get = vi.fn(async () => null);
+    const env = { SNARE_KV: { get, put: vi.fn(), list: vi.fn() } };
+    deviceBySecret.delete(SECRET);
+    expect((await invoke(env, api(`events/${TOKEN}`))).status).toBe(401);
+    expect(get.mock.calls.flat().some(key => key.startsWith("webhook:") || key.startsWith("event:"))).toBe(false);
+    expect(env.SNARE_KV.list).not.toHaveBeenCalled();
+  });
+
   it("bounds legacy history reads within the Free subrequest budget", async () => {
+    deviceBySecret.set(SECRET, "legacy-owner");
     const bytes = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(SECRET)));
     const secretHash = Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join("");
     const data = new Map([

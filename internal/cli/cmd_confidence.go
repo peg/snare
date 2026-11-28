@@ -366,12 +366,12 @@ Safety:
 	reenrolled := false
 	for _, c := range active {
 		err := registerToken(cfg, c.ID, c.Type, c.Label)
-		if err != nil && !reenrolled && strings.Contains(err.Error(), "unknown device") {
+		if err != nil && !reenrolled && regOK == 0 && !anyOwned(pre) && strings.Contains(err.Error(), "unknown device") {
 			// The receiver never minted this device ID (older CLIs invented
 			// one locally when enrollment failed), so no registration can
 			// succeed with it. Enroll a fresh identity once and retry.
 			reenrolled = true
-			fmt.Println("  This device is not known to the receiver; enrolling a new device identity...")
+			fmt.Printf("  Device %s is not known to the receiver; enrolling a new device identity...\n", cfg.DeviceID)
 			if rerr := cfg.Reenroll(); rerr != nil {
 				fatal(rerr)
 			}
@@ -1039,7 +1039,7 @@ func probeTokenProofEvents(cfg *config.Config, tokenID, proofID string) tokenPro
 			result.Unavailable = false
 			return result
 		}
-		if containsAny(lowerErr, "invalid device secret", "unknown device", "missing authorization", "missing device_id") {
+		if containsAny(lowerErr, "invalid device secret", "unknown device", "invalid device_id", "authorization header", "missing device_id") {
 			result.AuthFailed = true
 			result.Unavailable = false
 			return result
@@ -1054,6 +1054,15 @@ func probeTokenProofEvents(cfg *config.Config, tokenID, proofID string) tokenPro
 	}
 
 	return result
+}
+
+func anyOwned(probes []tokenProbeResult) bool {
+	for _, p := range probes {
+		if p.OwnedReadable {
+			return true
+		}
+	}
+	return false
 }
 
 func summarizeProbes(probes []tokenProbeResult) probeSummary {

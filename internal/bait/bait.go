@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"text/template"
 
 	"github.com/peg/snare/internal/manifest"
@@ -301,18 +302,26 @@ func dirEmptyAfterRemoval(dir, removedPath string) (bool, error) {
 }
 
 func removeAppended(c manifest.Canary, force bool, dryRun bool) error {
-	// Capture original file info before touching anything
-	info, err := os.Stat(c.Path)
+	// Resolve once and edit the target, so a dotfile-manager symlink survives
+	// and a retargeted link cannot redirect the write.
+	path, err := filepath.EvalSymlinks(c.Path)
 	if os.IsNotExist(err) {
 		fmt.Printf("  %s: already removed (file not found)\n", c.Path)
 		return nil
 	}
 	if err != nil {
+		return fmt.Errorf("resolving %s: %w", c.Path, err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
 		return fmt.Errorf("stat %s: %w", c.Path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("%s: not a regular file", c.Path)
 	}
 	origMode := info.Mode()
 
-	data, err := os.ReadFile(c.Path)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("reading %s: %w", c.Path, err)
 	}
@@ -347,26 +356,22 @@ func removeAppended(c manifest.Canary, force bool, dryRun bool) error {
 		return fmt.Errorf("%s: canary ID still present after excision — duplicate entry? Use --force", c.Path)
 	}
 
-	// Rewrite the real file, not the path we were given. Dotfile managers
-	// symlink ~/.gitconfig etc. into a repo; renaming over the link would
-	// replace it with a regular file and leave the canary in the repo copy.
-	writePath, err := filepath.EvalSymlinks(c.Path)
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+strings.TrimPrefix(filepath.Base(path), ".")+".snare-tmp-*")
 	if err != nil {
-		return fmt.Errorf("resolving %s: %w", c.Path, err)
+		return fmt.Errorf("creating temp file: %w", err)
 	}
-
-	// Write back atomically, preserving original file permissions
-	tmp := writePath + ".snare-tmp"
-	if err := os.WriteFile(tmp, []byte(newContent), origMode); err != nil {
-		return fmt.Errorf("writing temp file: %w", err)
+	_, err = tmp.WriteString(newContent)
+	if cerr := tmp.Close(); err == nil {
+		err = cerr
 	}
-	// Ensure mode matches exactly (WriteFile uses umask, Chmod doesn't)
-	if err := os.Chmod(tmp, origMode); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("setting permissions on temp file: %w", err)
+	if err == nil {
+		err = os.Chmod(tmp.Name(), origMode)
 	}
-	if err := os.Rename(tmp, writePath); err != nil {
-		_ = os.Remove(tmp)
+	if err == nil {
+		err = os.Rename(tmp.Name(), path)
+	}
+	if err != nil {
+		_ = os.Remove(tmp.Name())
 		return fmt.Errorf("replacing %s: %w", c.Path, err)
 	}
 

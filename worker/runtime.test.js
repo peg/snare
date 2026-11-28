@@ -92,10 +92,14 @@ beforeEach(async () => {
 
 afterEach(async () => { await runtime?.dispose(); }, 20000);
 
+const deviceBySecret = new Map();
+
 function request(path, body, secret = SECRET) {
+  const device = deviceBySecret.get(secret);
   return runtime.dispatchFetch(`${ORIGIN}${path}`, {
     method: body === undefined ? "GET" : "POST",
-    headers: { "content-type": "application/json", ...(secret ? { authorization: `Bearer ${secret}` } : {}) },
+    headers: { "content-type": "application/json",
+      ...(secret ? { authorization: `Bearer ${secret}` } : {}), ...(device ? { "x-snare-device-id": device } : {}) },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
 }
@@ -112,7 +116,9 @@ async function rows(sql, params = []) { return (await sqlBatch([{ sql, params }]
 async function enroll(secret = SECRET) {
   const response = await request("/api/devices", { device_secret: secret }, null);
   expect(response.status).toBe(200);
-  return (await response.json()).device_id;
+  const { device_id } = await response.json();
+  deviceBySecret.set(secret, device_id);
+  return device_id;
 }
 
 function register(deviceId, secret = SECRET, token = TOKEN) {

@@ -406,6 +406,9 @@ async function persistRegistration(env, token, reg) {
 async function handleEvents(token, request, env) {
   const proofId = new URL(request.url).searchParams.get("proof_id");
   if (proofId !== null && !/^[0-9a-f]{32}$/.test(proofId)) return json({ error: "invalid proof_id" }, 400);
+  const auth = await validateAuth(request, env, request.headers.get("x-snare-device-id"));
+  if (!auth.ok) return json({ error: auth.error }, 401);
+  await enforceDeviceRateLimit(env, auth.deviceId, "events");
   const record = await getTokenRecord(token, env);
   let legacyEvents;
   let owner = record?.device_id;
@@ -415,9 +418,7 @@ async function handleEvents(token, request, env) {
     if (owners.size === 1) owner = [...owners][0];
   }
   if (!owner) return json({ error: "token not registered" }, 401);
-  const auth = await validateAuth(request, env, owner);
-  if (!auth.ok) return json({ error: auth.error }, 401);
-  await enforceDeviceRateLimit(env, owner, "events");
+  if (owner !== auth.deviceId) return json({ error: "invalid device secret" }, 401);
   const events = env.SNARE_DB ? await storeFor(env).getEvents(token, { proofId })
     : (legacyEvents || await recentKVEvents(env, token)).filter(event => event.device_id === owner && (proofId === null || event.proof_id === proofId)).slice(0, 10);
   if (record?.revoked && proofId === null && events.length === 0) return json({ error: "token not registered" }, 401);
