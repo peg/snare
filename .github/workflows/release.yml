@@ -92,23 +92,33 @@ jobs:
             "linux/arm64"
             "darwin/amd64"
             "darwin/arm64"
+            "windows/amd64"
+            "windows/arm64"
           )
           for target in "${targets[@]}"; do
             GOOS="${target%/*}"
             GOARCH="${target#*/}"
             SUFFIX="${GOOS}_${GOARCH}"
             echo "Building $SUFFIX..."
+            BIN="snare"
+            [[ "$GOOS" == "windows" ]] && BIN="snare.exe"
             CGO_ENABLED=0 GOOS=$GOOS GOARCH=$GOARCH go build \
               -ldflags="-s -w -X main.version=${RELEASE_VERSION}" \
-              -o "dist/snare" \
+              -o "dist/${BIN}" \
               ./cmd/snare
             if [[ "$target" == "linux/amd64" ]]; then
               test "$(dist/snare --version)" = "snare ${RELEASE_VERSION}"
             fi
             cd dist
-            tar -czf "snare_${SUFFIX}.tar.gz" "snare"
-            sha256sum "snare_${SUFFIX}.tar.gz" >> checksums.txt
-            rm "snare"
+            if [[ "$GOOS" == "windows" ]]; then
+              ARCHIVE="snare_${SUFFIX}.zip"
+              zip -q -X "$ARCHIVE" "$BIN"
+            else
+              ARCHIVE="snare_${SUFFIX}.tar.gz"
+              tar -czf "$ARCHIVE" "$BIN"
+            fi
+            sha256sum "$ARCHIVE" >> checksums.txt
+            rm "$BIN"
             cd ..
           done
           echo "=== checksums.txt ==="
@@ -121,6 +131,9 @@ jobs:
             tar -xzf "$archive" -C "$tmp"
             test -x "$tmp/snare"
             rm -rf "$tmp"
+          done
+          for archive in dist/snare_windows_*.zip; do
+            test "$(unzip -Z1 "$archive")" = snare.exe
           done
 
       - name: Sign checksums with cosign
@@ -139,6 +152,7 @@ jobs:
         with:
           files: |
             dist/*.tar.gz
+            dist/*.zip
             dist/checksums.txt
             dist/checksums.txt.bundle
           generate_release_notes: true
