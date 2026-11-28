@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"runtime"
 	"strings"
 	"time"
 
@@ -736,7 +737,9 @@ func cmdUninstall(args []string) {
 
 	// Step 3: Remove the binary itself
 	binPath, _ := os.Executable()
-	if binPath != "" {
+	if binPath != "" && runtime.GOOS == "windows" && !dryRun {
+		fmt.Printf("  Delete %s after this command exits; Windows cannot remove a running program.\n", binPath)
+	} else if binPath != "" {
 		if dryRun {
 			fmt.Printf("  [dry-run] would delete %s\n", binPath)
 		} else {
@@ -748,7 +751,7 @@ func cmdUninstall(args []string) {
 		}
 	}
 
-	if !dryRun {
+	if !dryRun && runtime.GOOS != "windows" {
 		fmt.Println()
 		fmt.Println("  ✓ snare completely uninstalled. No traces left.")
 	}

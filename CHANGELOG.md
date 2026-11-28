@@ -9,6 +9,13 @@ Versioning: [Semantic Versioning](https://semver.org/)
 
 ## [Unreleased]
 
+### Added
+- Windows release builds and a PowerShell installer (`irm https://snare.sh/install.ps1 | iex`).
+- Windows `awsproc` and `ssh` canaries use `curl.exe` instead of `sh`; Terraform, pip and gcloud canaries use their `%APPDATA%` locations.
+
+### Security
+- Refuse to plant canaries when the callback URL contains characters that are unsafe in shell or `cmd.exe` hooks.
+
 ### Changed
 - `snare arm` ends with two next steps (`prove --run`, `doctor`) instead of six; the README leads with guided setup and explains how to get a webhook.
 

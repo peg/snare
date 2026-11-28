@@ -60,9 +60,15 @@ Or with Homebrew:
 brew install peg/tap/snare
 ```
 
+On Windows (PowerShell):
+
+```powershell
+irm https://snare.sh/install.ps1 | iex
+```
+
 Or download a binary from [releases](https://github.com/peg/snare/releases).
 
-Requires Linux or macOS. No other dependencies.
+Runs on Linux, macOS and Windows 10 (1803) or later. No other dependencies. On Windows, the `awsproc` and `ssh` canaries call the built-in `curl.exe`; the Windows `awsproc` hook returns no credentials, so the AWS client fails right after the callback instead of making a fake API call. The `git` canary needs Git for Windows, `snare prove --run` needs Git Bash, and `arm --select` needs a Linux or macOS terminal for now.
 
 ---
 
