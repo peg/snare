@@ -34,14 +34,14 @@ async function call(fetchImpl, token, path, init = {}) {
   }
 }
 
-export async function exportNamespace({ accountId, namespaceId, token, fetchImpl = fetch }) {
+export async function exportNamespace({ accountId, namespaceId, token, prefix = "", fetchImpl = fetch }) {
   if (!/^[0-9a-f]{32}$/.test(accountId ?? "") || !NAMESPACE.test(namespaceId ?? "") || !token) fail("INVALID_CONFIGURATION");
   const base = `/accounts/${accountId}/storage/kv/namespaces/${namespaceId}`;
   const names = [];
   const expiry = new Map();
   let cursor = "";
   do {
-    const query = new URLSearchParams({ limit: "1000", ...(cursor ? { cursor } : {}) });
+    const query = new URLSearchParams({ limit: "1000", ...(prefix ? { prefix } : {}), ...(cursor ? { cursor } : {}) });
     const page = await call(fetchImpl, token, `${base}/keys?${query}`);
     for (const key of page.result) {
       names.push(key.name);

@@ -79,10 +79,10 @@ jobs:
           snapshot="production-$(date -u +%Y%m%dT%H%M%SZ)"
           api="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/storage/kv/namespaces"
           auth=(--header "Authorization: Bearer $CLOUDFLARE_API_TOKEN")
-          lookup() { curl --fail --silent "${auth[@]}" "$api?per_page=100" | jq -r --arg t "$BACKUP_NAMESPACE" '.result[] | select(.title == $t) | .id'; }
+          lookup() { curl --fail --silent --show-error "${auth[@]}" "$api?per_page=100" | jq -r --arg t "$BACKUP_NAMESPACE" '.result[] | select(.title == $t) | .id'; }
           ns="$(lookup)"
           if [[ -z "$ns" ]]; then
-            curl --fail --silent "${auth[@]}" --header "content-type: application/json" \
+            curl --fail --silent --show-error "${auth[@]}" --header "content-type: application/json" \
               --data "$(jq -n --arg t "$BACKUP_NAMESPACE" '{title: $t}')" "$api" > /dev/null
             ns="$(lookup)"
           fi
@@ -90,11 +90,18 @@ jobs:
           jq --arg p "$snapshot/" '[.[] | {key: ($p + .name), value}]' "$dir/backup.json" > "$dir/bulk.json"
           npx wrangler kv bulk put "$dir/bulk.json" --namespace-id "$ns" --remote > /dev/null 2>&1 \
             || { echo "Backup write failed." >&2; exit 1; }
-          BACKUP_NS="$ns" SNAPSHOT="$snapshot/" EXPECTED="$(jq length "$dir/backup.json")" node --input-type=module -e '
+          BACKUP_NS="$ns" SNAPSHOT="$snapshot/" BACKUP_FILE="$dir/backup.json" node --input-type=module -e '
+            import { readFile } from "node:fs/promises";
             import { exportNamespace } from "./scripts/export-kv.mjs";
-            const { entries } = await exportNamespace({ accountId: process.env.CLOUDFLARE_ACCOUNT_ID, namespaceId: process.env.BACKUP_NS, token: process.env.CLOUDFLARE_API_TOKEN });
-            const stored = entries.filter(e => e.name.startsWith(process.env.SNAPSHOT)).length;
-            if (String(stored) !== process.env.EXPECTED) { console.error("Backup is incomplete."); process.exit(1); }
+            const { CLOUDFLARE_ACCOUNT_ID: accountId, CLOUDFLARE_API_TOKEN: token, BACKUP_NS: namespaceId, SNAPSHOT: prefix } = process.env;
+            const digest = entries => JSON.stringify(entries.map(({ name, value }) => [name, value]).sort());
+            const expected = digest(JSON.parse(await readFile(process.env.BACKUP_FILE, "utf8")));
+            for (let attempt = 1; ; attempt++) {
+              const { entries } = await exportNamespace({ accountId, namespaceId, token, prefix });
+              if (digest(entries.map(e => ({ name: e.name.slice(prefix.length), value: e.value }))) === expected) break;
+              if (attempt === 6) { console.error("Backup does not match the export."); process.exit(1); }
+              await new Promise(done => setTimeout(done, 5000));
+            }
           '
           echo "Backup stored in KV namespace $BACKUP_NAMESPACE under $snapshot/" | tee -a "$GITHUB_STEP_SUMMARY"
 

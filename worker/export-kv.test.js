@@ -23,6 +23,9 @@ describe("KV export", () => {
     const ok = api(values);
     expect((await exportNamespace({ ...OPTIONS, fetchImpl: ok.fetchImpl })).counts).toEqual({ total: 2, byPrefix: { device: 1, webhook: 1 } });
     expect(new Set(ok.calls)).toEqual(new Set(["GET", "POST"]));
+    let listed;
+    await exportNamespace({ ...OPTIONS, prefix: "snap/", fetchImpl: async (url, init) => { if (url.includes("/keys")) listed = new URL(url); return ok.fetchImpl(url, init); } });
+    expect(listed.searchParams.get("prefix")).toBe("snap/");
     await expect(exportNamespace({ ...OPTIONS, fetchImpl: api(values, { drop: ["device:a"] }).fetchImpl }))
       .rejects.toMatchObject({ code: "INCONSISTENT_SNAPSHOT" });
     const past = Math.floor(Date.now() / 1000) - 1;
