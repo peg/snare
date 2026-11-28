@@ -44,7 +44,7 @@ Cloud infrastructure   Request originated from Amazon Technologies Inc
 
 For `awsproc`, the receiver sees the callback helper’s user agent, such as curl. It cannot infer the parent SDK or whether the actor was an AI agent. An ASN supplies network context. **The planted credential hook is the sensor.**
 
-The callback URL is readable in `~/.aws/config`, so anyone who inspects the file can spot the bait. Self-host the callback on your own domain to make it less recognizable.
+The callback URL is readable in `~/.aws/config`, so anyone who inspects the file can spot the bait, and anyone who calls it raises an alert. Self-host the callback on your own domain to make it less recognizable.
 
 ---
 
@@ -60,23 +60,31 @@ Or with Homebrew:
 brew install peg/tap/snare
 ```
 
+On Windows (PowerShell):
+
+```powershell
+irm https://snare.sh/install.ps1 | iex
+```
+
 Or download a binary from [releases](https://github.com/peg/snare/releases).
 
-Requires Linux or macOS. No other dependencies.
+Runs on Linux, macOS and Windows 10 (1803) or later. No other dependencies. On Windows, the `awsproc` and `ssh` canaries call the built-in `curl.exe`; the Windows `awsproc` hook returns no credentials, so the AWS client fails right after the callback instead of making a fake API call. The `git` canary needs Git for Windows, `snare prove --run` needs Git Bash, and `arm --select` needs a Linux or macOS terminal for now.
 
 ---
 
 ## Quick start
 
 ```sh
+snare arm
+```
+
+The first run asks where alerts should go (Discord, Slack or Telegram), walks you through getting the URL, then plants the canaries and sends a test alert. If you already have a webhook URL, skip the questions:
+
+```sh
 snare arm --webhook https://discord.com/api/webhooks/YOUR/WEBHOOK
 ```
 
-That's it. Snare initializes, plants the highest-signal canaries, fires a test alert to confirm the webhook works, and tells you what's armed.
-
-By default, `snare arm` uses **precision mode**: `awsproc`, `ssh`, `k8s`, `git`, and `npm` canaries are planted. Each is scoped to a planted fake target and has an automated real-client contract test.
-
-**Running AI agents on this machine?** Precision mode stays quiet during normal work unless a planted fake profile, host, cluster, repository, or package scope is actively used. Use `--select` for an interactive picker, or `--all` to arm every supported canary type.
+Output with `--webhook`:
 
 ```
   ✓ initialized (device: dev-2146102a5849a7b3)
@@ -94,28 +102,26 @@ By default, `snare arm` uses **precision mode**: `awsproc`, `ssh`, `k8s`, `git`,
   🪤 5 canaries armed.
 
   Precision mode is safe for first run: alerts require active use of the fake
-  planted fake target. Passive file reads do not fire them.
+  profile, host, cluster, repository, or package scope. Passive reads do not fire them.
 
-  Next checks:
-    snare status   show event state; `never fired` is normal at first
-    snare scan     verify planted files are present and unchanged
-    snare doctor   confidence screen: config, API, ownership, and test health
-    snare repair   re-sync registrations safely if doctor finds drift
-    snare prove --run --report   safely trigger precision canaries and print a proof report
-    snare prove --format json --redact --output proof.json   write a share-safe proof artifact
-    snare prove --pack mcp --run --report   prove MCP canaries after `--all` or `plant --type mcp`
-    snare events   view real hits when one arrives
+  Next:
+    snare prove --run   safely trip each precision canary and confirm snare recorded it
+    snare doctor        check health any time; it says what to fix
+  Remove everything with `snare disarm`.
 ```
 
-Immediately after arming, `snare status` will usually show `never fired`. That is expected: it means Snare has not recorded a real callback for that canary yet. Use `snare scan` for local file integrity, `snare doctor` for setup health, and `snare prove --run --report` when you want to safely trigger the precision canaries and produce a first-success report. Add `--redact --output proof.json --format json` when you need a share-safe artifact for a teammate or issue.
+By default `snare arm` uses **precision mode**: the `awsproc`, `ssh`, `k8s`, `git` and `npm` canaries, which stay quiet unless their fake profile, host, cluster, repository or package scope is actively used. Use `--select` to pick canaries, or `--all` for every type, including the noisier dotenv ones.
 
-To arm all canary types (including dotenv-based ones like OpenAI, Anthropic, etc.):
+`snare status` shows `never fired` until something uses a canary. That is the normal state.
 
-```sh
-snare arm --all --webhook https://discord.com/api/webhooks/YOUR/WEBHOOK
-```
+### Get a webhook
 
-The hosted callback formats alerts for Discord, Slack, and Telegram; other allowlisted hosts such as Zapier receive plain JSON. Self-host to deliver JSON to any public HTTPS endpoint. Treat webhook URLs as secrets — don't commit, screenshot, or share them.
+- **Discord:** Server Settings → Integrations → Webhooks → New Webhook → pick a channel → Copy Webhook URL.
+- **Slack:** [api.slack.com/apps](https://api.slack.com/apps) → Create New App → From scratch → Incoming Webhooks → turn on Activate Incoming Webhooks → Add New Webhook to Workspace → pick a channel → copy the URL.
+- **Telegram:** create a bot with @BotFather and send it a message. Find your chat ID in `https://api.telegram.org/bot<TOKEN>/getUpdates`, then use `https://api.telegram.org/bot<TOKEN>/sendMessage?chat_id=<CHAT_ID>`.
+- **Anything else:** snare.sh sends formatted alerts to Discord, Slack and Telegram, and its generic JSON payload to Zapier catch hooks. For any other HTTPS endpoint, [self-host](docs/self-hosting.md): `snare serve` accepts any public HTTPS URL, and a self-hosted Worker needs the endpoint's domain in `WEBHOOK_ALLOWED_DOMAINS`.
+
+Treat webhook URLs as secrets: don't commit, screenshot, or share them. Change it later with `snare config set webhook <url>`.
 
 Evaluating Snare for a team or lab? Start with the [enterprise evaluation guide](docs/enterprise-evaluation.md), then wire alerts to your SIEM with the [webhook integration docs](docs/integrations/generic-webhook.md).
 
@@ -123,66 +129,42 @@ Evaluating Snare for a team or lab? Start with the [enterprise evaluation guide]
 
 ## Commands
 
+Everyday:
+
 ```sh
-snare arm [--webhook <url>]  # precision mode: plant awsproc, ssh, k8s, git, npm + test
-snare arm --select           # interactive picker: choose which canaries to arm
-snare arm --all              # plant all 15 supported canary types
+snare arm [--webhook <url>]  # plant precision canaries and send a test alert
+snare prove --run            # safely trip each precision canary and confirm the hit was recorded
+snare doctor                 # health check; says what to fix
+snare status                 # canaries and when each last fired
+snare events                 # alert history
 snare disarm                 # remove all canaries (keep config)
-snare disarm --purge         # remove canaries + ~/.snare/ config
-snare status                 # show active canaries + event state
-snare repair                 # re-register active tokens + run a live test check
-snare sync                   # alias for snare repair
-snare prove [--type <t>]     # guided precision triggers (awsproc/ssh/k8s/git/npm)
-snare prove --pack mcp       # guided MCP initialize proof for planted MCP canaries
-snare prove --run --report   # execute safe triggers and print a proof report
-snare prove --pack all --run --report  # prove precision + MCP canaries together
-snare prove --format json    # machine-readable proof report output
-snare prove --redact --output proof.json --format json  # share-safe proof artifact
-snare events                 # fetch recent alert history from snare.sh
-snare events --summary       # ASN/UA distribution across all canaries
-snare scan                   # check canary integrity on disk
-snare test                   # fire a test alert to verify your webhook
-snare doctor [--test]        # confidence screen; add --test for live callback proof
-snare config                 # show current config
-snare config set webhook <url>  # update webhook URL
-snare rotate                 # rotate device secret (if config.json was exposed)
-snare serve [--dashboard-token <token>]  # run self-hosted callback server
-snare uninstall              # remove everything including the binary
 ```
 
 `snare arm` is idempotent. Running it again skips canaries that are already planted and adds any that are missing.
 
-For more control:
+More:
 
 ```sh
-snare plant --type aws       # plant a single canary type
-snare plant --type k8s --label prod-cluster
-snare teardown --token <id>  # remove a specific canary
-snare teardown --dry-run     # preview what would be removed
+snare arm --select | --all   # pick canaries, or plant all 15 types
+snare plant --type k8s --label prod-cluster  # plant one canary
+snare teardown --token <id>  # remove one canary (--dry-run to preview)
+snare repair                 # re-register canaries when doctor reports drift (alias: sync)
+snare scan                   # check planted files on disk, offline
+snare test                   # send a test alert only
+snare doctor --test          # health check plus a live callback test
+snare prove --pack mcp|all   # include MCP canaries in the proof
+snare prove --format json --redact --output proof.json  # share-safe proof report
+snare events --summary       # ASN and user-agent breakdown
+snare config set webhook <url>  # change where alerts go
+snare rotate                 # rotate the device secret if config.json leaked
+snare serve                  # run the self-hosted receiver
+snare disarm --purge         # remove canaries and ~/.snare
+snare uninstall              # remove everything, including the binary
 ```
 
----
+`snare prove --run` plants nothing new: it runs isolated temporary copies of your canaries with unique callback paths, checks the matching events arrive, and leaves your files unchanged. It proves the snippet fires, not how it interacts with the rest of your configuration or whether your webhook delivered; see [detection contracts](docs/detection-contracts.md#correlation-in-cli-proof-reports).
 
-## Confidence loop (first 10 minutes)
-
-After `snare arm`, the expected healthy loop is:
-
-- `snare status` shows active canaries and event state. `never fired` is normal until someone actively uses a planted fake credential.
-- `snare scan` is local-only integrity: present/modified/missing/orphaned files. It does not fire alerts.
-- `snare doctor` is the confidence screen: config, callback health, local canary files, token ownership, events API readability, and test callback history.
-- `snare doctor --test` runs a live callback test and verifies it is readable in the events API.
-- `snare test` sends a synthetic callback test only; check your webhook destination for the routed alert.
-- `snare events` shows real hit history; empty output on fresh installs is expected.
-- `snare repair` (or `snare sync`) safely re-registers active tokens and re-tests callback/event readability when drift is detected.
-- `snare prove` prints safe precision trigger commands so you can intentionally prove alerts fire for `awsproc`, `ssh`, `k8s`, `git`, and `npm`.
-- `snare prove --pack mcp` prints a safe MCP Streamable HTTP initialize probe for planted `mcp` canaries without modifying active MCP client configs.
-- `snare prove --run --report` verifies the planted snippets on disk, executes isolated temporary copies with unique callback paths, and requires matching proof/event IDs through the events API. It leaves original files unchanged and prints cleanup commands, event visibility, observed latency, and proof limitations. This checks the selected snippet, not its interaction with the rest of your configuration or downstream notification delivery; see [detection contracts](docs/detection-contracts.md#correlation-in-cli-proof-reports).
-- `snare prove --format json --redact --output proof.json` writes a machine-readable artifact with device IDs, token IDs, labels, cleanup tokens, and absolute local paths redacted.
-
-Important state distinction:
-
-- `never fired` means token is registered/readable and no real callback has happened yet.
-- `events unavailable` means API/auth/readability failed for that token; run `snare doctor`, then `snare repair` if needed.
+In `snare status`, `never fired` means the canary is registered and waiting. `events unavailable` means Snare could not read its events; run `snare doctor`, then `snare repair` if it suggests it.
 
 ---
 

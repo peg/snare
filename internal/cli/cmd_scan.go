@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/peg/snare/internal/manifest"
@@ -110,6 +111,11 @@ func ScanForOrphans(m *manifest.Manifest) ([]OrphanResult, error) {
 		filepath.Join(home, ".env"),
 		filepath.Join(home, ".env.local"),
 		filepath.Join(home, ".env.production"),
+	}
+	if runtime.GOOS == "windows" {
+		if appData, err := os.UserConfigDir(); err == nil {
+			scanDirs = append(scanDirs, filepath.Join(appData, "gcloud"), filepath.Join(appData, "pip"), filepath.Join(appData, "terraform.rc"))
+		}
 	}
 
 	var orphans []OrphanResult

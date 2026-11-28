@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"runtime"
 	"strings"
 	"text/template"
 
@@ -80,9 +82,12 @@ type PlacedFile struct {
 // Returns PlacedFile with exact Content — caller must persist this to the manifest.
 func Plant(t Type, params Params, targetPath string, dryRun bool, opts ...bool) (*PlacedFile, error) {
 	silent := len(opts) > 0 && opts[0]
-	tmpl, ok := templates[t]
+	tmpl, ok := templateFor(t)
 	if !ok {
 		return nil, fmt.Errorf("unknown bait type: %s", t)
+	}
+	if err := CheckCallbackURL(params.CallbackURL); err != nil {
+		return nil, err
 	}
 
 	// Render template to exact content
@@ -420,7 +425,13 @@ func DefaultPaths(t Type) ([]string, error) {
 		// supported by the AWS CLI and avoids silently dropping the redirect.
 		return []string{filepath.Join(home, ".aws", "config")}, nil
 	case TypeGCP:
-		return []string{filepath.Join(home, ".config", "gcloud", "sa-prod-backup.json")}, nil
+		dir := filepath.Join(home, ".config")
+		if goos == "windows" {
+			if dir, err = os.UserConfigDir(); err != nil {
+				return nil, err
+			}
+		}
+		return []string{filepath.Join(dir, "gcloud", "sa-prod-backup.json")}, nil
 	case TypeOpenAI:
 		// .env in home dir — picked up by dotenv loaders and scanned by agents
 		return []string{filepath.Join(home, ".env")}, nil
@@ -448,7 +459,14 @@ func DefaultPaths(t Type) ([]string, error) {
 	case TypePyPI:
 		// Add an extra-index-url to pip config.
 		// Fires when pip/uv tries to install from the fake internal package index.
-		return pypiConfigPaths(home), nil
+		if goos == "windows" {
+			appData, err := os.UserConfigDir()
+			if err != nil {
+				return nil, err
+			}
+			return firstExisting(filepath.Join(appData, "pip", "pip.ini"), filepath.Join(home, "pip", "pip.ini")), nil
+		}
+		return firstExisting(filepath.Join(home, ".config", "pip", "pip.conf"), filepath.Join(home, ".pip", "pip.conf")), nil
 	case TypePyPIUpload:
 		// A valid Twine/Flit config whose default remains the real PyPI service.
 		// The named internal repository must be selected explicitly, keeping this
@@ -473,29 +491,27 @@ func DefaultPaths(t Type) ([]string, error) {
 	case TypeTerraform:
 		// Append a network_mirror block to ~/.terraformrc
 		// Redirects provider downloads to snare.sh
+		if goos == "windows" {
+			appData, err := os.UserConfigDir()
+			if err != nil {
+				return nil, err
+			}
+			return []string{filepath.Join(appData, "terraform.rc")}, nil
+		}
 		return []string{filepath.Join(home, ".terraformrc")}, nil
 	default:
 		return nil, fmt.Errorf("no default paths for type %s", t)
 	}
 }
 
-// pypiConfigPaths returns candidate paths for pip/uv config.
-// Prefers the XDG-standard location, falls back to legacy.
-func pypiConfigPaths(home string) []string {
-	// pip reads: ~/.config/pip/pip.conf (XDG), ~/.pip/pip.conf (legacy)
-	// uv reads: ~/.config/uv/uv.toml (XDG)
-	// We use pip.conf since pip + uv both respect it via PIP_EXTRA_INDEX_URL
-	candidates := []string{
-		filepath.Join(home, ".config", "pip", "pip.conf"),
-		filepath.Join(home, ".pip", "pip.conf"),
-	}
+// firstExisting returns the first candidate that exists, so an existing pip
+// config is appended to, otherwise the first (preferred) candidate.
+func firstExisting(candidates ...string) []string {
 	for _, p := range candidates {
 		if _, err := os.Stat(p); err == nil {
-			// File exists — append to it
 			return []string{p}
 		}
 	}
-	// Neither exists — create the XDG one
 	return []string{candidates[0]}
 }
 
@@ -558,6 +574,72 @@ func kubeConfigPaths(home string) []string {
 	}
 	// All exist — return first, let O_EXCL fail with a clear error
 	return []string{filepath.Join(kubeDir, candidates[0])}
+}
+
+var goos = runtime.GOOS
+
+// Callback URLs are interpolated into sh, cmd.exe and config syntaxes, so
+// they are limited to characters that are inert in all of them.
+var callbackURLPattern = regexp.MustCompile(`^https?://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[A-Za-z0-9._~-]+)*/?$`)
+
+// CheckCallbackURL rejects callback URLs that are unsafe to plant.
+func CheckCallbackURL(u string) error {
+	if !callbackURLPattern.MatchString(u) {
+		return fmt.Errorf("callback URL %q contains characters that are unsafe in planted shell hooks", u)
+	}
+	return nil
+}
+
+// windowsCurl is an absolute path so a curl.exe in the working directory
+// cannot shadow it when an SDK spawns credential_process without a shell.
+func windowsCurl() string {
+	root := os.Getenv("SystemRoot")
+	if root == "" {
+		root = `C:\Windows`
+	}
+	return root + `\System32\curl.exe`
+}
+
+func templateFor(t Type) (*template.Template, bool) {
+	if goos == "windows" {
+		if tmpl, ok := windowsTemplates[t]; ok {
+			return tmpl, true
+		}
+	}
+	tmpl, ok := templates[t]
+	return tmpl, ok
+}
+
+// windowsTemplates replace templates whose hooks run through sh, which
+// Windows lacks. curl.exe ships with Windows 10 1803 and later. The commands
+// contain no quotes or cmd.exe metacharacters: AWS SDK for Go v2 runs
+// credential_process through cmd /C with MSVC escaping, which corrupts quotes
+// (aws/aws-sdk-go-v2#2879). The awsproc hook therefore prints no credentials
+// and the SDK fails after the callback fires.
+var windowsTemplates = map[Type]*template.Template{
+	TypeSSH: template.Must(template.New("ssh-windows").Parse(
+		`
+# {{.ProfileName}} — internal bastion (legacy, do not remove)
+Host {{.ProfileName}}
+    HostName {{.ProfileName}}.internal
+    User deploy
+    IdentityFile ~/.ssh/id_ed25519
+    ProxyCommand curl.exe -s -o NUL --max-time 5 {{.CallbackURL}}/ssh
+    ServerAliveInterval 60
+    StrictHostKeyChecking no
+`)),
+
+	TypeAWSProc: template.Must(template.New("awsproc-windows").Funcs(template.FuncMap{"curl": windowsCurl}).Parse(
+		`
+# {{.ProfileName}} — org-wide admin (credential_process via internal vault)
+[profile {{.ProfileName}}]
+role_arn = arn:aws:iam::{{.FakeSecret}}:role/OrganizationAccountAccessRole
+source_profile = {{.ProfileName}}-source
+region = us-east-1
+
+[profile {{.ProfileName}}-source]
+credential_process = {{curl}} -s -o NUL --max-time 5 {{.CallbackURL}}
+`)),
 }
 
 // templates holds the Go text/template for each bait type.
@@ -764,7 +846,6 @@ password = {{.FakeToken}}
 	//   - Two-profile pattern: visible assume-role profile chains to hidden
 	//     source profile with credential_process for maximum realism
 	//   - Named profiles only — never touches default profile
-	//   - GPT-5.4 confirmed this is the best AWS canary mechanism
 	TypeAWSProc: template.Must(template.New("awsproc").Parse(
 		`
 # {{.ProfileName}} — org-wide admin (credential_process via internal vault)

@@ -380,7 +380,7 @@ func runSnareWithEnv(t *testing.T, homeDir string, extraEnv map[string]string, a
 	t.Helper()
 	bin := snareBinary(t)
 	cmd := exec.Command(bin, args...)
-	cmd.Env = append(os.Environ(), "HOME="+homeDir)
+	cmd.Env = append(os.Environ(), "HOME="+homeDir, "USERPROFILE="+homeDir, "APPDATA="+filepath.Join(homeDir, "AppData", "Roaming"), "LOCALAPPDATA="+filepath.Join(homeDir, "AppData", "Local"))
 	for k, v := range extraEnv {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}

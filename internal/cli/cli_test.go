@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -41,6 +42,9 @@ func snareBinary(t *testing.T) string {
 		t.Fatalf("MkdirTemp: %v", err)
 	}
 	out := filepath.Join(dir, "snare")
+	if runtime.GOOS == "windows" {
+		out += ".exe"
+	}
 	// Navigate up to repo root from internal/cli
 	cmd := exec.Command("go", "build", "-o", out, "github.com/peg/snare/cmd/snare")
 	cmd.Dir = filepath.Join(os.Getenv("GOPATH"), "..") // fallback
@@ -84,7 +88,7 @@ func runSnare(t *testing.T, homeDir string, args ...string) (stdout, stderr stri
 	t.Helper()
 	bin := snareBinary(t)
 	cmd := exec.Command(bin, args...)
-	cmd.Env = append(os.Environ(), "HOME="+homeDir)
+	cmd.Env = append(os.Environ(), "HOME="+homeDir, "USERPROFILE="+homeDir, "APPDATA="+filepath.Join(homeDir, "AppData", "Roaming"), "LOCALAPPDATA="+filepath.Join(homeDir, "AppData", "Local"))
 
 	var outBuf, errBuf bytes.Buffer
 	cmd.Stdout = &outBuf

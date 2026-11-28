@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"runtime"
 	"strings"
 	"time"
 
@@ -215,10 +216,11 @@ func cmdInit(args []string) {
 	}
 
 	// Interactive guided setup
-	guidedInit(force)
+	guidedInit(force, false)
 }
 
-func guidedInit(force bool) {
+// fromArm skips the standalone test alert and next steps, which arm does itself.
+func guidedInit(force, fromArm bool) {
 	scanner := bufio.NewScanner(os.Stdin)
 
 	fmt.Println()
@@ -282,7 +284,8 @@ func guidedInit(force bool) {
 	case "4", "custom":
 		fmt.Println("  Custom webhook:")
 		fmt.Println("  Snare will POST a JSON payload to your URL when a canary fires.")
-		fmt.Println("  See ARCHITECTURE.md for the event schema.")
+		fmt.Println("  The hosted snare.sh only delivers to Discord, Slack, Telegram and Zapier;")
+		fmt.Println("  other endpoints need a self-hosted receiver. See ARCHITECTURE.md for the schema.")
 	default:
 		fmt.Println("  Custom webhook:")
 	}
@@ -314,6 +317,9 @@ func guidedInit(force bool) {
 	cfg.WebhookURL = webhookURL
 	if err := cfg.Save(); err != nil {
 		fatal(fmt.Errorf("saving config: %w", err))
+	}
+	if fromArm {
+		return
 	}
 
 	// Fire test alert
@@ -353,7 +359,7 @@ func guidedInit(force bool) {
 				}
 				fmt.Println()
 				fmt.Println("  You can update your webhook later:")
-				fmt.Println("  snare init --webhook <new-url> --force")
+				fmt.Println("  snare config set webhook <new-url>")
 				fmt.Println()
 			}
 		}
@@ -731,7 +737,9 @@ func cmdUninstall(args []string) {
 
 	// Step 3: Remove the binary itself
 	binPath, _ := os.Executable()
-	if binPath != "" {
+	if binPath != "" && runtime.GOOS == "windows" && !dryRun {
+		fmt.Printf("  Delete %s after this command exits; Windows cannot remove a running program.\n", binPath)
+	} else if binPath != "" {
 		if dryRun {
 			fmt.Printf("  [dry-run] would delete %s\n", binPath)
 		} else {
@@ -743,7 +751,7 @@ func cmdUninstall(args []string) {
 		}
 	}
 
-	if !dryRun {
+	if !dryRun && runtime.GOOS != "windows" {
 		fmt.Println()
 		fmt.Println("  ✓ snare completely uninstalled. No traces left.")
 	}
