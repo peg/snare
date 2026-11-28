@@ -38,23 +38,31 @@ export async function exportNamespace({ accountId, namespaceId, token, fetchImpl
   if (!/^[0-9a-f]{32}$/.test(accountId ?? "") || !NAMESPACE.test(namespaceId ?? "") || !token) fail("INVALID_CONFIGURATION");
   const base = `/accounts/${accountId}/storage/kv/namespaces/${namespaceId}`;
   const names = [];
+  const expiry = new Map();
   let cursor = "";
   do {
     const query = new URLSearchParams({ limit: "1000", ...(cursor ? { cursor } : {}) });
     const page = await call(fetchImpl, token, `${base}/keys?${query}`);
-    for (const key of page.result) names.push(key.name);
+    for (const key of page.result) {
+      names.push(key.name);
+      if (key.expiration) expiry.set(key.name, key.expiration * 1000);
+    }
     if (names.length > MAX_KEYS) fail("TOO_MANY_KEYS");
     cursor = page.result_info?.cursor || "";
   } while (cursor);
 
   const entries = [];
   let bytes = 0;
+  let expired = 0;
   for (let i = 0; i < names.length; i += BULK) {
     const keys = names.slice(i, i + BULK);
     const page = await call(fetchImpl, token, `${base}/bulk/get`, { method: "POST", body: JSON.stringify({ keys, type: "text" }) });
     for (const name of keys) {
       const value = page.result?.values?.[name];
-      if (typeof value !== "string") fail("INCONSISTENT_SNAPSHOT");
+      if (typeof value !== "string") {
+        if ((expiry.get(name) ?? Infinity) <= Date.now()) { expired++; continue; }
+        fail("INCONSISTENT_SNAPSHOT");
+      }
       bytes += Buffer.byteLength(name) + Buffer.byteLength(value);
       if (bytes > MAX_BYTES) fail("BACKUP_TOO_LARGE");
       entries.push({ name, value });
@@ -66,7 +74,7 @@ export async function exportNamespace({ accountId, namespaceId, token, fetchImpl
     const prefix = PREFIXES.has(head) ? head : "other";
     counts[prefix] = (counts[prefix] ?? 0) + 1;
   }
-  return { entries, counts: { total: entries.length, byPrefix: counts } };
+  return { entries, counts: { total: entries.length, byPrefix: counts, ...(expired ? { expired } : {}) } };
 }
 
 export async function exportToFile(options, outputPath) {
