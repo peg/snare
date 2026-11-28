@@ -445,7 +445,7 @@ async function handleCreateDevice(request, env) {
     if (!env.SNARE_KV) return json({ error: "storage not configured" }, 503);
     await env.SNARE_KV.put(`device:${deviceId}`, JSON.stringify({ secret_hash: secretHash, created_at: new Date().toISOString() }));
   }
-  // CALLBACK_BASE is a secret so the planted host stays out of the source.
+  // CALLBACK_BASE is set at deploy so the planted host stays out of the source.
   return json({ status: "created", device_id: deviceId, ...(env.CALLBACK_BASE && { callback_base: env.CALLBACK_BASE }) });
 }
 

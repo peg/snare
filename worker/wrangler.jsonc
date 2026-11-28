@@ -92,8 +92,8 @@
       }
     }
   }
-  // The callback host is attached at deploy from a GitHub secret, and
-  // CALLBACK_BASE is a Worker secret, so neither appears in this repository.
+  // Callback hosts and CALLBACK_BASE come from the SNARE_CALLBACK_HOSTS
+  // GitHub secret at deploy, so they never appear in this repository.
   // WEBHOOK_URLS remains a remote Worker secret and is never committed. If
   // configured for staging, it must point to a dedicated non-production sink.
 }

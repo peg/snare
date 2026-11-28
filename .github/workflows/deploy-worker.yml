@@ -129,18 +129,25 @@ jobs:
         working-directory: worker
         run: npm run cf:check
 
-      - name: Verify Cloudflare access and production secret
+      - name: Verify Cloudflare access and production secrets
         working-directory: worker
         shell: bash
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_WORKER_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CALLBACK_HOSTS: ${{ secrets.SNARE_CALLBACK_HOSTS }}
         run: |
           set -euo pipefail
           secrets="$(npx wrangler secret list --env="" --format json)"
           jq -e 'any(.[]; .name == "WEBHOOK_URLS")' <<<"$secrets" >/dev/null
-          jq -e 'any(.[]; .name == "CALLBACK_BASE")' <<<"$secrets" >/dev/null
-          echo "Cloudflare access, WEBHOOK_URLS and CALLBACK_BASE configuration verified."
+          mapfile -t hosts <<<"$CALLBACK_HOSTS"
+          for host in "${hosts[@]}"; do
+            if [[ ! "$host" =~ ^[a-z0-9-]+(\.[a-z0-9-]+){2,}$ ]]; then
+              echo "SNARE_CALLBACK_HOSTS must list one subdomain per line." >&2
+              exit 1
+            fi
+          done
+          echo "Cloudflare access, WEBHOOK_URLS and SNARE_CALLBACK_HOSTS verified."
 
       - name: Record current deployment
         working-directory: worker
@@ -178,21 +185,22 @@ jobs:
           DEPLOY_SHA: ${{ steps.qualify.outputs.deploy_sha }}
           WRANGLER_OUTPUT_FILE_PATH: ${{ runner.temp }}/wrangler-output.jsonl
           ALLOW_CONFIG_CHANGE: ${{ inputs.allow_config_change }}
-          # Kept out of the repository; wrangler detaches custom domains it is not given.
-          CALLBACK_HOST: ${{ secrets.SNARE_CALLBACK_HOST }}
+          # One host per line so GitHub masks each; the first is assigned to new
+          # devices. Keep retired hosts listed: wrangler detaches any custom
+          # domain it is not given, and their canaries would stop reporting.
+          CALLBACK_HOSTS: ${{ secrets.SNARE_CALLBACK_HOSTS }}
         run: |
           set -euo pipefail
-          if [[ ! "$CALLBACK_HOST" =~ ^[a-z0-9.-]+$ ]]; then
-            echo "SNARE_CALLBACK_HOST secret is missing or invalid." >&2
-            exit 1
-          fi
+          mapfile -t hosts <<<"$CALLBACK_HOSTS"
+          domains=()
+          for host in "${hosts[@]}"; do domains+=(--domain "$host"); done
           : > "$WRANGLER_OUTPUT_FILE_PATH"
           strict=(--strict)
           if [[ "$ALLOW_CONFIG_CHANGE" == "true" ]]; then
             strict=()
             echo "::warning::Deploying without --strict; remote Worker configuration will be overwritten."
           fi
-          npx wrangler deploy --env= --keep-vars "${strict[@]}" --domain "$CALLBACK_HOST" --message "GitHub Actions deploy of ${DEPLOY_SHA}"
+          npx wrangler deploy --env= --keep-vars "${strict[@]}" "${domains[@]}" --var "CALLBACK_BASE:https://${hosts[0]}/c" --message "GitHub Actions deploy of ${DEPLOY_SHA}"
 
           version_id="$(
             jq -r 'select(.type == "deploy") | .version_id // empty' \

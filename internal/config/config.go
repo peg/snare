@@ -14,6 +14,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/peg/snare/internal/bait"
 )
 
 var httpClient = &http.Client{Timeout: 15 * time.Second}
@@ -119,7 +121,7 @@ func Init(callbackBase, webhookURL string, force bool) (*Config, error) {
 	}
 	if callbackBase == "" {
 		callbackBase = apiBase + "/c"
-		if strings.HasPrefix(assigned, "https://") && validBase(assigned) {
+		if strings.HasPrefix(assigned, "https://") && strings.HasSuffix(assigned, "/c") && bait.CheckCallbackURL(assigned) == nil {
 			callbackBase = assigned
 		}
 	}

@@ -15,8 +15,8 @@ everything else, so probing it reveals nothing about the receiver behind it.
 You have three choices, from least to most effort:
 
 1. **Shared neutral host (default).** Nothing to set up. The hosted receiver
-   assigns it when the machine enrolls, so it is not in Snare's source, and it
-   can change without a CLI release. Every hosted user shares it, so anyone who
+   assigns it when the machine enrolls, so it is not in Snare's source, and new
+   enrollments can move to another host without a CLI release. Every hosted user shares it, so anyone who
    enrolls can learn it.
 2. **Your own domain on your own Cloudflare Worker** (free plan). Nobody else
    uses your host, so there is nothing public to match. See [Option A](#option-a-your-own-cloudflare-worker).

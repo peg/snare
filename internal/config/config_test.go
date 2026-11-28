@@ -245,6 +245,8 @@ func TestInit(t *testing.T) {
 			`{"device_id":"d","callback_base":"https://edge.example.net/c"}`: "https://edge.example.net/c",
 			`{"device_id":"d","callback_base":"http://edge.example.net/c"}`:  DefaultAPIBase + "/c",
 			`{"device_id":"d","callback_base":"https://u:p@x/c"}`:            DefaultAPIBase + "/c",
+			`{"device_id":"d","callback_base":"https://x/c$(id)"}`:           DefaultAPIBase + "/c",
+			`{"device_id":"d","callback_base":"https://x/hooks"}`:            DefaultAPIBase + "/c",
 		} {
 			setupHome(t)
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(body)) }))
