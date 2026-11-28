@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -55,7 +56,7 @@ func TestCanaryLabProofsPrecisionAndHigh(t *testing.T) {
 		env := localOnlyEnv(home)
 		env["AWS_EC2_METADATA_DISABLED"] = "true"
 		env["AWS_CONFIG_FILE"] = c.Path
-		env["AWS_SHARED_CREDENTIALS_FILE"] = "/dev/null"
+		env["AWS_SHARED_CREDENTIALS_FILE"] = os.DevNull
 		env["AWS_DEFAULT_REGION"] = "us-east-1"
 		stdout, stderr, _ := runCommandAllowFailure(t, 20*time.Second, env, "aws", "sts", "get-caller-identity",
 			"--profile", profile,
@@ -70,6 +71,27 @@ func TestCanaryLabProofsPrecisionAndHigh(t *testing.T) {
 		}
 		if !strings.HasPrefix(event.Path, "/c/"+c.ID) {
 			t.Fatalf("awsproc callback path %q does not match token %s", event.Path, c.ID)
+		}
+	})
+
+	t.Run("awsproc-cmd", func(t *testing.T) {
+		if runtime.GOOS != "windows" {
+			t.Skip("AWS SDK for Go v2 runs credential_process through cmd.exe only on Windows")
+		}
+		c := mustLatestActiveCanaryByType(t, m, "awsproc")
+		var line string
+		for _, l := range strings.Split(c.Content, "\n") {
+			if v, ok := strings.CutPrefix(l, "credential_process = "); ok {
+				line = strings.TrimSpace(v)
+			}
+		}
+		if line == "" {
+			t.Fatalf("no credential_process in planted content:\n%s", c.Content)
+		}
+		baseline := realEventCount(api, c.ID)
+		stdout, stderr, _ := runCommandAllowFailure(t, 20*time.Second, localOnlyEnv(home), "cmd.exe", "/C", line)
+		if _, ok := waitForRealEvent(api, c.ID, baseline, 8*time.Second); !ok {
+			t.Fatalf("awsproc callback not observed via cmd.exe /C %s\nstdout:\n%s\nstderr:\n%s", line, stdout, stderr)
 		}
 	})
 
@@ -168,7 +190,7 @@ func TestCanaryLabProofsPrecisionAndHigh(t *testing.T) {
 		env := localOnlyEnv(home)
 		env["AWS_EC2_METADATA_DISABLED"] = "true"
 		env["AWS_CONFIG_FILE"] = c.Path
-		env["AWS_SHARED_CREDENTIALS_FILE"] = "/dev/null"
+		env["AWS_SHARED_CREDENTIALS_FILE"] = os.DevNull
 		env["AWS_DEFAULT_REGION"] = "us-east-1"
 		stdout, stderr, _ := runCommandAllowFailure(t, 20*time.Second, env, "aws", "sts", "get-caller-identity",
 			"--profile", profile,
@@ -252,15 +274,18 @@ creds.refresh(Request())
 
 func localOnlyEnv(home string) map[string]string {
 	return map[string]string{
-		"HOME":        home,
-		"NO_PROXY":    "127.0.0.1,localhost",
-		"no_proxy":    "127.0.0.1,localhost",
-		"HTTP_PROXY":  "",
-		"http_proxy":  "",
-		"HTTPS_PROXY": "",
-		"https_proxy": "",
-		"ALL_PROXY":   "",
-		"all_proxy":   "",
+		"HOME":         home,
+		"USERPROFILE":  home,
+		"APPDATA":      filepath.Join(home, "AppData", "Roaming"),
+		"LOCALAPPDATA": filepath.Join(home, "AppData", "Local"),
+		"NO_PROXY":     "127.0.0.1,localhost",
+		"no_proxy":     "127.0.0.1,localhost",
+		"HTTP_PROXY":   "",
+		"http_proxy":   "",
+		"HTTPS_PROXY":  "",
+		"https_proxy":  "",
+		"ALL_PROXY":    "",
+		"all_proxy":    "",
 	}
 }
 

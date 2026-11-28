@@ -102,3 +102,38 @@ jobs:
         with:
           version: "2026.1"
           install-go: false
+
+  windows:
+    name: Windows canaries
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Parse installer (PowerShell 7)
+        shell: pwsh
+        run: "[void][scriptblock]::Create((Get-Content -Raw install.ps1))"
+
+      - name: Parse installer (Windows PowerShell 5.1)
+        shell: powershell
+        run: "[void][scriptblock]::Create((Get-Content -Raw install.ps1))"
+
+      - name: Windows template tests
+        shell: bash
+        run: go test ./internal/bait -run 'TestWindows|TestPlantRejectsUnsafeCallbackURL' -count=1
+
+      - name: Real-client precision canaries
+        shell: bash
+        env:
+          SNARE_CANARY_LAB_STRICT: "1"
+        run: go test ./internal/cli -run 'TestCanaryLabProofsPrecisionAndHigh/(awsproc|awsproc-cmd|ssh|k8s|git|npm)$' -v -count=1

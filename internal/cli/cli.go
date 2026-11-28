@@ -276,6 +276,9 @@ func buildParams(bt bait.Type, label string, cfg *config.Config) (bait.Params, e
 	}
 
 	callbackURL := cfg.CallbackURL(tokenID)
+	if err := bait.CheckCallbackURL(callbackURL); err != nil {
+		return bait.Params{}, err
+	}
 	callbackNoProto := strings.TrimPrefix(callbackURL, "https://")
 	callbackNoProto = strings.TrimPrefix(callbackNoProto, "http://")
 

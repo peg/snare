@@ -574,6 +574,10 @@ With --redact:
 		return
 	}
 
+	if _, err := exec.LookPath("sh"); err != nil {
+		fatal(fmt.Errorf("--run needs sh; on Windows run it from Git Bash"))
+	}
+
 	failures := 0
 	for i, recipe := range recipes {
 		before := probeTokenEvents(cfg, recipe.Canary.ID)
