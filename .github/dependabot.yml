@@ -4,16 +4,33 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      go:
+        update-types: [minor, patch]
     open-pull-requests-limit: 5
 
   - package-ecosystem: npm
     directory: /worker
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      cloudflare:
+        patterns: [wrangler, miniflare]
+      npm:
+        update-types: [minor, patch]
     open-pull-requests-limit: 5
 
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        update-types: [minor, patch]
     open-pull-requests-limit: 5
