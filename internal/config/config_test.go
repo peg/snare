@@ -104,9 +104,6 @@ func TestLoad(t *testing.T) {
 		if persisted.DeviceSecret != cfg.DeviceSecret {
 			t.Fatalf("persisted DeviceSecret = %q, want %q", persisted.DeviceSecret, cfg.DeviceSecret)
 		}
-		if persisted.CallbackBase != DefaultCallbackBase || persisted.APIBaseURL != DefaultAPIBase {
-			t.Fatalf("legacy bases not migrated: %q, %q", persisted.CallbackBase, persisted.APIBaseURL)
-		}
 	})
 }
 
@@ -238,8 +235,28 @@ func TestInit(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Init: %v", err)
 		}
-		if cfg.CallbackBase != DefaultCallbackBase || cfg.APIBase() != DefaultAPIBase {
-			t.Fatalf("bases = %q, %q, want defaults", cfg.CallbackBase, cfg.APIBase())
+		if cfg.CallbackBase != DefaultAPIBase+"/c" || cfg.APIBase() != DefaultAPIBase {
+			t.Fatalf("bases = %q, %q, want fallback when none is assigned", cfg.CallbackBase, cfg.APIBase())
+		}
+	})
+
+	t.Run("uses the callback base the hosted receiver assigns", func(t *testing.T) {
+		for body, want := range map[string]string{
+			`{"device_id":"d","callback_base":"https://edge.example.net/c"}`: "https://edge.example.net/c",
+			`{"device_id":"d","callback_base":"http://edge.example.net/c"}`:  DefaultAPIBase + "/c",
+			`{"device_id":"d","callback_base":"https://u:p@x/c"}`:            DefaultAPIBase + "/c",
+		} {
+			setupHome(t)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(body)) }))
+			target, _ := url.Parse(srv.URL)
+			old := httpClient
+			httpClient = &http.Client{Timeout: time.Second, Transport: rewriteTransport{target}}
+			cfg, err := Init("", "", false)
+			httpClient = old
+			srv.Close()
+			if err != nil || cfg.CallbackBase != want || cfg.APIBase() != DefaultAPIBase {
+				t.Fatalf("%s: cfg=%+v err=%v, want callback %q", body, cfg, err, want)
+			}
 		}
 	})
 
@@ -265,7 +282,6 @@ func TestInit(t *testing.T) {
 			{"https://canary.example.com/c", "", "https://canary.example.com/c", "https://canary.example.com"},
 			{"https://canary.example.com/c/", "", "https://canary.example.com/c", "https://canary.example.com"},
 			{"https://edge.example.com/c", "https://ops.example.com/", "https://edge.example.com/c", "https://ops.example.com"},
-			{DefaultCallbackBase, "", DefaultCallbackBase, DefaultAPIBase},
 		} {
 			setupHome(t)
 			fakeManagedEnrollment(t)
@@ -281,7 +297,7 @@ func TestInit(t *testing.T) {
 		}
 		for _, bad := range [][2]string{
 			{"ftp://x/c", ""}, {"https:///c", ""}, {"https://u:p@x/c", ""}, {"https://x/c?q=1", ""},
-			{"", "https://ops.example.com"}, {"https://edge.example.com/c", DefaultAPIBase}, {DefaultCallbackBase, "https://ops.example.com"},
+			{"", "https://ops.example.com"}, {"https://edge.example.com/c", DefaultAPIBase},
 		} {
 			setupHome(t)
 			t.Setenv("SNARE_CALLBACK_BASE", bad[0])
@@ -338,7 +354,7 @@ func TestRegisterDeviceWithServerTimeout(t *testing.T) {
 	defer srv.Close()
 
 	start := time.Now()
-	got, err := registerDeviceWithServer(srv.URL, strings.Repeat("a", 64))
+	got, _, err := registerDeviceWithServer(srv.URL, strings.Repeat("a", 64))
 	if got != "" || err == nil {
 		t.Fatalf("device ID = %q, want fallback", got)
 	}
@@ -484,7 +500,7 @@ func TestRegisterDeviceWithServerRetries(t *testing.T) {
 				_, _ = w.Write([]byte(`{"device_id":"dev-retry"}`))
 			}))
 			defer srv.Close()
-			id, err := registerDeviceWithServer(srv.URL, strings.Repeat("a", 64))
+			id, _, err := registerDeviceWithServer(srv.URL, strings.Repeat("a", 64))
 			if calls != tt.wantCalls || (err == nil) != tt.wantOK {
 				t.Fatalf("calls=%d id=%q err=%v", calls, id, err)
 			}
@@ -531,7 +547,7 @@ func TestRegisterDeviceWithServer(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			got, err := registerDeviceWithServer(srv.URL, strings.Repeat("a", 64))
+			got, _, err := registerDeviceWithServer(srv.URL, strings.Repeat("a", 64))
 			if got != tt.wantID {
 				t.Fatalf("registerDeviceWithServer() = %q, want %q", got, tt.wantID)
 			}

@@ -25,7 +25,7 @@ source_profile = prod-admin-source
 region = us-east-1
 
 [profile prod-admin-source]
-credential_process = sh -c 'r=$(curl -sf "https://edge.knowitsdown.com/c/{token}" -o /dev/null -w "%{http_code}" 2>/dev/null); printf "{\"Version\":1,\"AccessKeyId\":\"AKIA...\",\"SecretAccessKey\":\"...\"}"'
+credential_process = sh -c 'r=$(curl -sf "https://<callback-host>/c/{token}" -o /dev/null -w "%{http_code}" 2>/dev/null); printf "{\"Version\":1,\"AccessKeyId\":\"AKIA...\",\"SecretAccessKey\":\"...\"}"'
 ```
 
 The two-profile pattern matches how real AWS environments set up assume-role chains. A compromised agent sees a dormant-looking credential and tries to use it.
@@ -228,7 +228,7 @@ source_profile = prod-admin-source
 region = us-east-1
 
 [profile prod-admin-source]
-credential_process = sh -c 'r=$(curl -sf "https://edge.knowitsdown.com/c/{token}" -o /dev/null -w "%{http_code}" 2>/dev/null); printf "{\"Version\":1,\"AccessKeyId\":\"AKIA...\",\"SecretAccessKey\":\"...\"}"'
+credential_process = sh -c 'r=$(curl -sf "https://<callback-host>/c/{token}" -o /dev/null -w "%{http_code}" 2>/dev/null); printf "{\"Version\":1,\"AccessKeyId\":\"AKIA...\",\"SecretAccessKey\":\"...\"}"'
 ```
 
 If egress blocks the callback, the hook still returns synthetic credential JSON, but Snare has no observation. Using those raw synthetic keys against real AWS later does not trigger Snare. A later callback requires the callback-bearing configuration or hook to travel with them and execute.

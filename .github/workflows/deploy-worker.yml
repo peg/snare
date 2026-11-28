@@ -139,7 +139,8 @@ jobs:
           set -euo pipefail
           secrets="$(npx wrangler secret list --env="" --format json)"
           jq -e 'any(.[]; .name == "WEBHOOK_URLS")' <<<"$secrets" >/dev/null
-          echo "Cloudflare access and WEBHOOK_URLS configuration verified."
+          jq -e 'any(.[]; .name == "CALLBACK_BASE")' <<<"$secrets" >/dev/null
+          echo "Cloudflare access, WEBHOOK_URLS and CALLBACK_BASE configuration verified."
 
       - name: Record current deployment
         working-directory: worker
@@ -177,15 +178,21 @@ jobs:
           DEPLOY_SHA: ${{ steps.qualify.outputs.deploy_sha }}
           WRANGLER_OUTPUT_FILE_PATH: ${{ runner.temp }}/wrangler-output.jsonl
           ALLOW_CONFIG_CHANGE: ${{ inputs.allow_config_change }}
+          # Kept out of the repository; wrangler detaches custom domains it is not given.
+          CALLBACK_HOST: ${{ secrets.SNARE_CALLBACK_HOST }}
         run: |
           set -euo pipefail
+          if [[ ! "$CALLBACK_HOST" =~ ^[a-z0-9.-]+$ ]]; then
+            echo "SNARE_CALLBACK_HOST secret is missing or invalid." >&2
+            exit 1
+          fi
           : > "$WRANGLER_OUTPUT_FILE_PATH"
           strict=(--strict)
           if [[ "$ALLOW_CONFIG_CHANGE" == "true" ]]; then
             strict=()
             echo "::warning::Deploying without --strict; remote Worker configuration will be overwritten."
           fi
-          npx wrangler deploy --env= --keep-vars "${strict[@]}" --message "GitHub Actions deploy of ${DEPLOY_SHA}"
+          npx wrangler deploy --env= --keep-vars "${strict[@]}" --domain "$CALLBACK_HOST" --message "GitHub Actions deploy of ${DEPLOY_SHA}"
 
           version_id="$(
             jq -r 'select(.type == "deploy") | .version_id // empty' \

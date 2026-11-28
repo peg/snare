@@ -15,7 +15,7 @@ Versioning: [Semantic Versioning](https://semver.org/)
 - Windows `awsproc` and `ssh` canaries use `curl.exe` instead of `sh`; Terraform, pip and gcloud canaries use their `%APPDATA%` locations.
 
 ### Security
-- Hosted canaries call back to a neutral host (`edge.knowitsdown.com`) instead of `snare.sh`; the API stays on `snare.sh`. Existing configs switch automatically; planted canaries keep working and move on `snare disarm && snare arm`.
+- Hosted canaries call back to a neutral host that the receiver assigns at enrollment, instead of `snare.sh`; the API stays on `snare.sh`. Existing configs and canaries keep working; see [Callback domains](docs/custom-domain.md) to move them.
 - The hosted Worker answers only `/c/` paths on callback hosts, so probing one reveals nothing.
 - Planted comments, account and server names vary per install, and the fallback label is no longer `snare`. Dropped `StrictHostKeyChecking no` (ssh), MCP `description` fields and the duplicate `verify:` line (generic).
 - k8s canaries no longer set `insecure-skip-tls-verify`; self-hosted receivers need a publicly trusted certificate for them to fire.

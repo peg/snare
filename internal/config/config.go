@@ -20,19 +20,15 @@ var httpClient = &http.Client{Timeout: 15 * time.Second}
 
 const configFile = "config.json"
 
-// The hosted receiver serves its API on snare.sh and canary callbacks on a
-// neutral host, so planted files do not name the project.
-const (
-	DefaultAPIBase      = "https://snare.sh"
-	DefaultCallbackBase = "https://edge.knowitsdown.com/c"
-	legacyCallbackBase  = "https://snare.sh/c"
-)
+// DefaultAPIBase is the hosted receiver. It assigns a neutral callback base
+// at enrollment, so the planted host is not part of this source.
+const DefaultAPIBase = "https://snare.sh"
 
 // Config holds device-level snare configuration.
 type Config struct {
 	DeviceID     string `json:"device_id"`               // unique ID for this machine
 	DeviceSecret string `json:"device_secret,omitempty"` // secret for API auth (only its hash leaves this machine)
-	CallbackBase string `json:"callback_base"`           // base of planted callback URLs, e.g. https://edge.knowitsdown.com/c
+	CallbackBase string `json:"callback_base"`           // base of planted callback URLs
 	APIBaseURL   string `json:"api_base,omitempty"`      // receiver API; derived from CallbackBase when empty
 	WebhookURL   string `json:"webhook_url,omitempty"`   // optional local override
 }
@@ -55,12 +51,6 @@ func Load() (*Config, error) {
 	var c Config
 	if err := json.Unmarshal(data, &c); err != nil {
 		return nil, fmt.Errorf("parsing config: %w", err)
-	}
-
-	// Same Worker and database on both hosts, so only new plants change.
-	if c.CallbackBase == legacyCallbackBase && c.APIBaseURL == "" {
-		c.CallbackBase, c.APIBaseURL = DefaultCallbackBase, DefaultAPIBase
-		_ = c.Save()
 	}
 
 	// Migrate: generate device secret if missing (pre-auth configs)
@@ -123,9 +113,15 @@ func Init(callbackBase, webhookURL string, force bool) (*Config, error) {
 	// The receiver mints the device ID (prevents squatting). Fail closed: a
 	// locally invented ID is unknown to the receiver, so every later
 	// registration would be rejected and no canary could ever alert.
-	deviceID, err := registerDeviceWithServer(apiBase, deviceSecret)
+	deviceID, assigned, err := registerDeviceWithServer(apiBase, deviceSecret)
 	if err != nil {
 		return nil, fmt.Errorf("enrolling this device with %s: %w — nothing was written; try again when the receiver is reachable", apiBase, err)
+	}
+	if callbackBase == "" {
+		callbackBase = apiBase + "/c"
+		if strings.HasPrefix(assigned, "https://") && validBase(assigned) {
+			callbackBase = assigned
+		}
 	}
 
 	c := &Config{
@@ -192,8 +188,9 @@ func (c *Config) APIBase() string {
 }
 
 // resolveBases picks the callback and API bases from the argument,
-// SNARE_CALLBACK_BASE and SNARE_API_BASE. A custom callback base without an
-// API base is a self-hosted receiver that serves both on one host.
+// SNARE_CALLBACK_BASE and SNARE_API_BASE. An empty callback base means the
+// hosted receiver assigns one. A custom callback base without an API base is
+// a self-hosted receiver that serves both on one host.
 func resolveBases(callbackBase string) (string, string, error) {
 	if callbackBase == "" {
 		callbackBase = os.Getenv("SNARE_CALLBACK_BASE")
@@ -203,22 +200,24 @@ func resolveBases(callbackBase string) (string, string, error) {
 	switch {
 	case callbackBase == "" && apiBase != "":
 		return "", "", fmt.Errorf("SNARE_API_BASE needs SNARE_CALLBACK_BASE: canaries must call back to the receiver that registers them")
-	case callbackBase == "" || callbackBase == DefaultCallbackBase:
-		if apiBase != "" && apiBase != DefaultAPIBase {
-			return "", "", fmt.Errorf("the hosted callback base only works with %s", DefaultAPIBase)
-		}
-		callbackBase, apiBase = DefaultCallbackBase, DefaultAPIBase
+	case callbackBase == "":
+		return "", DefaultAPIBase, nil
 	case apiBase == DefaultAPIBase:
 		return "", "", fmt.Errorf("custom callback domains need your own receiver; see docs/custom-domain.md")
 	case apiBase == "":
 		apiBase = strings.TrimSuffix(callbackBase, "/c")
 	}
 	for _, u := range []string{callbackBase, apiBase} {
-		if p, err := url.Parse(u); err != nil || (p.Scheme != "https" && p.Scheme != "http") || p.Host == "" || p.User != nil || p.RawQuery != "" || p.Fragment != "" {
+		if !validBase(u) {
 			return "", "", fmt.Errorf("invalid receiver URL %q: use http(s)://host[/path]", u)
 		}
 	}
 	return callbackBase, apiBase, nil
+}
+
+func validBase(u string) bool {
+	p, err := url.Parse(u)
+	return err == nil && (p.Scheme == "https" || p.Scheme == "http") && p.Host != "" && p.User == nil && p.RawQuery == "" && p.Fragment == ""
 }
 
 // Reenroll replaces the device identity with a fresh server-minted one. It is
@@ -229,7 +228,7 @@ func (c *Config) Reenroll() error {
 	if err != nil {
 		return err
 	}
-	id, err := registerDeviceWithServer(c.APIBase(), secret)
+	id, _, err := registerDeviceWithServer(c.APIBase(), secret)
 	if err != nil {
 		return fmt.Errorf("enrolling this device with %s: %w", c.APIBase(), err)
 	}
@@ -244,12 +243,12 @@ const enrollAttempts = 3
 
 // registerDeviceWithServer calls POST /api/devices to get a server-minted
 // device ID, retrying network errors, 429 and 5xx responses.
-func registerDeviceWithServer(apiBase, deviceSecret string) (string, error) {
+func registerDeviceWithServer(apiBase, deviceSecret string) (id, callbackBase string, err error) {
 	var lastErr error
 	for attempt := 1; attempt <= enrollAttempts; attempt++ {
-		id, retry, err := enrollOnce(apiBase, deviceSecret)
+		id, callbackBase, retry, err := enrollOnce(apiBase, deviceSecret)
 		if err == nil {
-			return id, nil
+			return id, callbackBase, nil
 		}
 		lastErr = err
 		if !retry || attempt == enrollAttempts {
@@ -257,16 +256,16 @@ func registerDeviceWithServer(apiBase, deviceSecret string) (string, error) {
 		}
 		time.Sleep(enrollRetryDelay(attempt))
 	}
-	return "", lastErr
+	return "", "", lastErr
 }
 
 // enrollOnce makes one enrollment request. SNARE_ENROLLMENT_TOKEN is sent only
 // for this request and is never persisted.
-func enrollOnce(apiBase, deviceSecret string) (id string, retry bool, err error) {
+func enrollOnce(apiBase, deviceSecret string) (id, callbackBase string, retry bool, err error) {
 	payload, _ := json.Marshal(map[string]string{"device_secret": deviceSecret})
 	req, err := http.NewRequest(http.MethodPost, apiBase+"/api/devices", bytes.NewReader(payload))
 	if err != nil {
-		return "", false, err
+		return "", "", false, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if enrollmentToken := strings.TrimSpace(os.Getenv("SNARE_ENROLLMENT_TOKEN")); enrollmentToken != "" {
@@ -274,25 +273,26 @@ func enrollOnce(apiBase, deviceSecret string) (id string, retry bool, err error)
 	}
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return "", true, err
+		return "", "", true, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		retry := resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500
-		return "", retry, fmt.Errorf("device enrollment returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
+		return "", "", retry, fmt.Errorf("device enrollment returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
 	}
 	var result struct {
-		DeviceID string `json:"device_id"`
+		DeviceID     string `json:"device_id"`
+		CallbackBase string `json:"callback_base"`
 	}
-	data, _ := io.ReadAll(resp.Body)
+	data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	if err := json.Unmarshal(data, &result); err != nil {
-		return "", false, fmt.Errorf("decoding device enrollment response: %w", err)
+		return "", "", false, fmt.Errorf("decoding device enrollment response: %w", err)
 	}
 	if result.DeviceID == "" {
-		return "", false, fmt.Errorf("device enrollment response omitted device_id")
+		return "", "", false, fmt.Errorf("device enrollment response omitted device_id")
 	}
-	return result.DeviceID, false, nil
+	return result.DeviceID, result.CallbackBase, false, nil
 }
 
 func configPath() (string, error) {

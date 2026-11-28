@@ -57,7 +57,7 @@ Teardown is content-matched: Snare removes the exact bytes it wrote and does not
 ### Managed `snare.sh`
 
 1. The CLI creates a local device secret and registers token metadata with `snare.sh`.
-2. A planted canary contains a callback URL such as `https://edge.knowitsdown.com/c/<token>`.
+2. A planted canary contains a callback URL such as `https://<callback-host>/c/<token>`.
 3. If the fake credential/tool path is used, the SDK or tool requests the callback URL.
 4. The callback service stores metadata and optionally forwards an alert to your webhook destination.
 5. The CLI reads recent events with the local device secret.

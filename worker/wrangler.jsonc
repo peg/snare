@@ -17,10 +17,6 @@
     {
       "pattern": "snare.sh/health",
       "zone_name": "snare.sh"
-    },
-    {
-      "pattern": "edge.knowitsdown.com",
-      "custom_domain": true
     }
   ],
   "kv_namespaces": [
@@ -96,6 +92,8 @@
       }
     }
   }
+  // The callback host is attached at deploy from a GitHub secret, and
+  // CALLBACK_BASE is a Worker secret, so neither appears in this repository.
   // WEBHOOK_URLS remains a remote Worker secret and is never committed. If
   // configured for staging, it must point to a dedicated non-production sink.
 }

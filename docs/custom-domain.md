@@ -6,7 +6,7 @@ keeps two receiver addresses apart:
 
 | Setting | Used for | Hosted default |
 |---|---|---|
-| Callback base (`callback_base`) | The URL written into planted files | `https://edge.knowitsdown.com/c` |
+| Callback base (`callback_base`) | The URL written into planted files | A neutral host, assigned at enrollment |
 | API base (`api_base`) | Enrollment, registration, events | `https://snare.sh` |
 
 The callback host answers only `/c/...` requests and returns a plain `404` for
@@ -14,9 +14,10 @@ everything else, so probing it reveals nothing about the receiver behind it.
 
 You have three choices, from least to most effort:
 
-1. **Shared neutral host (default).** Nothing to set up. Because Snare is open
-   source, the default host is public too. It beats a project-named domain,
-   but a determined attacker can still look for it.
+1. **Shared neutral host (default).** Nothing to set up. The hosted receiver
+   assigns it when the machine enrolls, so it is not in Snare's source, and it
+   can change without a CLI release. Every hosted user shares it, so anyone who
+   enrolls can learn it.
 2. **Your own domain on your own Cloudflare Worker** (free plan). Nobody else
    uses your host, so there is nothing public to match. See [Option A](#option-a-your-own-cloudflare-worker).
 3. **Your own domain with `snare serve`** on a server you run. See [Option B](#option-b-snare-serve-on-your-own-server).
@@ -29,9 +30,9 @@ Pointing your own domain at the hosted receiver is not available yet.
 snare config
 ```
 
-`Callback base` is what new canaries will contain. Configs that used
-`https://snare.sh/c` switch to the neutral host automatically; canaries already
-planted keep their old URL, which still works, until you re-arm.
+`Callback base` is what new canaries will contain. Configs enrolled before the
+receiver assigned hosts show `https://snare.sh/c`. Those canaries keep working;
+to move them, see [Moving existing canaries](#moving-existing-canaries).
 
 ## Choosing a hostname
 
@@ -180,8 +181,9 @@ snare arm
 snare doctor --test
 ```
 
-To move hosted canaries from `snare.sh/c` to the neutral host, run
-`snare disarm` and then `snare arm`. No re-enrollment is needed.
+To move hosted canaries from `snare.sh/c` to the neutral host, run the same
+commands without any of the environment variables. Re-enrolling gives the
+machine a new device ID.
 
 `snare scan` finds leftover canaries on any host whose callback base ends in
 `/c`, so it still works after a move.
@@ -196,7 +198,7 @@ not a search for that pattern.
 
 | Variable | Effect at `snare init` and first `snare arm` |
 |---|---|
-| `SNARE_CALLBACK_BASE` | Callback base written into canaries. Must be `http(s)://host[/path]`. |
+| `SNARE_CALLBACK_BASE` | Callback base written into canaries. Must be `http(s)://host[/path]`. Unset, the hosted receiver assigns one. |
 | `SNARE_API_BASE` | API base. If unset with a custom callback base, the callback base without `/c` is used. |
 | `SNARE_ENROLLMENT_TOKEN` | Sent once to `POST /api/devices` on receivers with invite enrollment. Never saved. |
 

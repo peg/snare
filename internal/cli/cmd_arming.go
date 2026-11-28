@@ -259,7 +259,7 @@ Naming tip:
 			// Create a temporary in-memory config for dry-run rendering
 			cfg = &config.Config{
 				DeviceID:     "dry-run",
-				CallbackBase: config.DefaultCallbackBase,
+				CallbackBase: config.DefaultAPIBase + "/c",
 				WebhookURL:   webhookURL,
 			}
 		} else {
