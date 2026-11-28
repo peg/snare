@@ -9,6 +9,9 @@ Versioning: [Semantic Versioning](https://semver.org/)
 
 ## [Unreleased]
 
+### Changed
+- `snare arm` ends with two next steps (`prove --run`, `doctor`) instead of six; the README leads with guided setup and explains how to get a webhook.
+
 ## [0.5.1] - 2026-11-28
 
 ### Fixed
