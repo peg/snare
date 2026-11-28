@@ -242,7 +242,7 @@ Naming tip:
 		if h, err := os.Hostname(); err == nil {
 			label = normalizeAutoLabel(h)
 		} else {
-			label = "snare"
+			label = "dev"
 		}
 	}
 

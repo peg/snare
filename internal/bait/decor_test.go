@@ -36,7 +36,9 @@ func TestDecorVaries(t *testing.T) {
 	if len(seen) < 3 {
 		t.Fatalf("NewDecor produced %d distinct values in 50 draws", len(seen))
 	}
-	if d := NewDecor(TypeGeneric, ""); strings.Contains(d.Comment, "  ") {
-		t.Fatalf("empty name left a gap: %q", d.Comment)
+	for i := 0; i < 50; i++ {
+		if d := NewDecor(TypeAWS, ""); strings.HasPrefix(d.Comment, " ") {
+			t.Fatalf("empty name left a gap: %q", d.Comment)
+		}
 	}
 }

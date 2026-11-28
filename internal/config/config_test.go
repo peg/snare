@@ -104,6 +104,9 @@ func TestLoad(t *testing.T) {
 		if persisted.DeviceSecret != cfg.DeviceSecret {
 			t.Fatalf("persisted DeviceSecret = %q, want %q", persisted.DeviceSecret, cfg.DeviceSecret)
 		}
+		if persisted.CallbackBase != DefaultCallbackBase || persisted.APIBaseURL != DefaultAPIBase {
+			t.Fatalf("legacy bases not migrated: %q, %q", persisted.CallbackBase, persisted.APIBaseURL)
+		}
 	})
 }
 
@@ -260,8 +263,9 @@ func TestInit(t *testing.T) {
 	t.Run("resolves callback and API bases", func(t *testing.T) {
 		for _, tt := range []struct{ callback, api, wantCallback, wantAPI string }{
 			{"https://canary.example.com/c", "", "https://canary.example.com/c", "https://canary.example.com"},
-			{"https://canary.example.com/c/", "https://snare.sh/", "https://canary.example.com/c", "https://snare.sh"},
-			{"", "https://api.example.com", DefaultCallbackBase, "https://api.example.com"},
+			{"https://canary.example.com/c/", "", "https://canary.example.com/c", "https://canary.example.com"},
+			{"https://edge.example.com/c", "https://ops.example.com/", "https://edge.example.com/c", "https://ops.example.com"},
+			{DefaultCallbackBase, "", DefaultCallbackBase, DefaultAPIBase},
 		} {
 			setupHome(t)
 			fakeManagedEnrollment(t)
@@ -275,11 +279,15 @@ func TestInit(t *testing.T) {
 				t.Fatalf("Init(%q, %q) = %q, %q", tt.callback, tt.api, cfg.CallbackBase, cfg.APIBase())
 			}
 		}
-		for _, bad := range []string{"ftp://x/c", "https:///c", "https://u:p@x/c", "https://x/c?q=1"} {
+		for _, bad := range [][2]string{
+			{"ftp://x/c", ""}, {"https:///c", ""}, {"https://u:p@x/c", ""}, {"https://x/c?q=1", ""},
+			{"", "https://ops.example.com"}, {"https://edge.example.com/c", DefaultAPIBase}, {DefaultCallbackBase, "https://ops.example.com"},
+		} {
 			setupHome(t)
-			t.Setenv("SNARE_CALLBACK_BASE", bad)
+			t.Setenv("SNARE_CALLBACK_BASE", bad[0])
+			t.Setenv("SNARE_API_BASE", bad[1])
 			if _, err := Init("", "", false); err == nil {
-				t.Fatalf("Init(%q) error = nil", bad)
+				t.Fatalf("Init(%q, %q) error = nil", bad[0], bad[1])
 			}
 		}
 	})

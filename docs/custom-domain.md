@@ -29,9 +29,9 @@ Pointing your own domain at the hosted receiver is not available yet.
 snare config
 ```
 
-`Callback base` is what your canaries contain. Configs created before neutral
-hosts existed show `https://snare.sh/c`. To move them, see
-[Moving existing canaries](#moving-existing-canaries).
+`Callback base` is what new canaries will contain. Configs that used
+`https://snare.sh/c` switch to the neutral host automatically; canaries already
+planted keep their old URL, which still works, until you re-arm.
 
 ## Choosing a hostname
 
@@ -39,8 +39,8 @@ hosts existed show `https://snare.sh/c`. To move them, see
   newly registered domain stands out more.
 - Pick a dull name such as `edge`, `api`, `cdn`, `registry` or `sso`. Avoid
   `canary`, `honey`, `trap`, `decoy`, `snare` and your security team's name.
-- Use a separate hostname for the API, or keep the API on `snare.sh`. Planted
-  files should never contain the host that serves `/api` or `/health`.
+- On your own Worker, use a separate hostname for the API. Planted files
+  should never contain the host that serves `/api` or `/health`.
 - The host needs a publicly trusted TLS certificate. Some canaries, such as
   `k8s`, verify TLS and send nothing when the certificate is untrusted.
 - Certificates are published in Certificate Transparency logs, so the hostname
@@ -77,7 +77,8 @@ uses `edge.example.com` for callbacks and `ops.example.com` for the API.
 
    In `wrangler.private.jsonc`:
 
-   - set `name` to a neutral Worker name and `database_id` to the ID from step 2;
+   - set `name` to a neutral Worker name, `database_name` to `snare-state` and
+     `database_id` to the ID from step 2;
    - add both hosts as custom domains, which also creates their DNS records
      and certificates:
 
@@ -98,15 +99,7 @@ uses `edge.example.com` for callbacks and `ops.example.com` for the API.
    npx wrangler d1 migrations apply snare-state --remote -c wrangler.private.jsonc
    ```
 
-5. **Add secrets.** Generate an enrollment token and keep it somewhere safe.
-
-   ```sh
-   openssl rand -hex 32 | npx wrangler secret put SNARE_ENROLLMENT_TOKEN -c wrangler.private.jsonc
-   npx wrangler secret put WEBHOOK_SIGNING_SECRET -c wrangler.private.jsonc   # optional
-   npx wrangler secret put WEBHOOK_ALLOWED_DOMAINS -c wrangler.private.jsonc  # optional, extra webhook domains
-   ```
-
-6. **Deploy and check.**
+5. **Deploy and check.**
 
    ```sh
    npx wrangler deploy -c wrangler.private.jsonc
@@ -117,12 +110,22 @@ uses `edge.example.com` for callbacks and `ops.example.com` for the API.
    The first request to a new custom domain can take a minute while the
    certificate is issued.
 
+6. **Add secrets.** Invite enrollment refuses every new device until the
+   enrollment token exists. Save the printed token in your password manager.
+
+   ```sh
+   SNARE_ENROLLMENT_TOKEN="$(openssl rand -hex 32)"; echo "$SNARE_ENROLLMENT_TOKEN"
+   printf %s "$SNARE_ENROLLMENT_TOKEN" | npx wrangler secret put SNARE_ENROLLMENT_TOKEN -c wrangler.private.jsonc
+   npx wrangler secret put WEBHOOK_SIGNING_SECRET -c wrangler.private.jsonc   # optional
+   npx wrangler secret put WEBHOOK_ALLOWED_DOMAINS -c wrangler.private.jsonc  # optional, extra webhook domains
+   ```
+
 7. **Enroll each machine.**
 
    ```sh
    SNARE_CALLBACK_BASE=https://edge.example.com/c \
    SNARE_API_BASE=https://ops.example.com \
-   SNARE_ENROLLMENT_TOKEN=<token from step 5> \
+   SNARE_ENROLLMENT_TOKEN=<token from step 6> \
      snare arm --webhook <your Discord, Slack or Telegram webhook>
    snare doctor --test
    ```
@@ -177,11 +180,17 @@ snare arm
 snare doctor --test
 ```
 
-To move from `snare.sh/c` to the hosted neutral host, run the same commands
-without any of the environment variables.
+To move hosted canaries from `snare.sh/c` to the neutral host, run
+`snare disarm` and then `snare arm`. No re-enrollment is needed.
 
-`snare scan` finds leftover canaries on any receiver host, so it still works
-after a move.
+`snare scan` finds leftover canaries on any host whose callback base ends in
+`/c`, so it still works after a move.
+
+## What a custom domain does not hide
+
+Callback URLs still share a shape: `/c/` followed by a label and 32 hex
+characters. A neutral or private host defeats a search for a known host name,
+not a search for that pattern.
 
 ## Environment variables
 

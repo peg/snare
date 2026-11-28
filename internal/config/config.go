@@ -25,6 +25,7 @@ const configFile = "config.json"
 const (
 	DefaultAPIBase      = "https://snare.sh"
 	DefaultCallbackBase = "https://edge.knowitsdown.com/c"
+	legacyCallbackBase  = "https://snare.sh/c"
 )
 
 // Config holds device-level snare configuration.
@@ -54,6 +55,12 @@ func Load() (*Config, error) {
 	var c Config
 	if err := json.Unmarshal(data, &c); err != nil {
 		return nil, fmt.Errorf("parsing config: %w", err)
+	}
+
+	// Same Worker and database on both hosts, so only new plants change.
+	if c.CallbackBase == legacyCallbackBase && c.APIBaseURL == "" {
+		c.CallbackBase, c.APIBaseURL = DefaultCallbackBase, DefaultAPIBase
+		_ = c.Save()
 	}
 
 	// Migrate: generate device secret if missing (pre-auth configs)
@@ -189,20 +196,23 @@ func (c *Config) APIBase() string {
 // API base is a self-hosted receiver that serves both on one host.
 func resolveBases(callbackBase string) (string, string, error) {
 	if callbackBase == "" {
-		callbackBase = strings.TrimSpace(os.Getenv("SNARE_CALLBACK_BASE"))
+		callbackBase = os.Getenv("SNARE_CALLBACK_BASE")
 	}
-	apiBase := strings.TrimSpace(os.Getenv("SNARE_API_BASE"))
+	callbackBase = strings.TrimSuffix(strings.TrimSpace(callbackBase), "/")
+	apiBase := strings.TrimSuffix(strings.TrimSpace(os.Getenv("SNARE_API_BASE")), "/")
 	switch {
-	case callbackBase == "":
-		callbackBase = DefaultCallbackBase
-		if apiBase == "" {
-			apiBase = DefaultAPIBase
+	case callbackBase == "" && apiBase != "":
+		return "", "", fmt.Errorf("SNARE_API_BASE needs SNARE_CALLBACK_BASE: canaries must call back to the receiver that registers them")
+	case callbackBase == "" || callbackBase == DefaultCallbackBase:
+		if apiBase != "" && apiBase != DefaultAPIBase {
+			return "", "", fmt.Errorf("the hosted callback base only works with %s", DefaultAPIBase)
 		}
+		callbackBase, apiBase = DefaultCallbackBase, DefaultAPIBase
+	case apiBase == DefaultAPIBase:
+		return "", "", fmt.Errorf("custom callback domains need your own receiver; see docs/custom-domain.md")
 	case apiBase == "":
 		apiBase = strings.TrimSuffix(callbackBase, "/c")
 	}
-	callbackBase = strings.TrimSuffix(callbackBase, "/")
-	apiBase = strings.TrimSuffix(apiBase, "/")
 	for _, u := range []string{callbackBase, apiBase} {
 		if p, err := url.Parse(u); err != nil || (p.Scheme != "https" && p.Scheme != "http") || p.Host == "" || p.User != nil || p.RawQuery != "" || p.Fragment != "" {
 			return "", "", fmt.Errorf("invalid receiver URL %q: use http(s)://host[/path]", u)

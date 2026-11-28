@@ -124,7 +124,7 @@ func normalizeAutoLabel(value string) string {
 	}
 	label := strings.Trim(b.String(), "-")
 	if label == "" {
-		return "snare"
+		return "dev"
 	}
 	return label
 }
@@ -443,7 +443,7 @@ func buildParams(bt bait.Type, label string, cfg *config.Config) (bait.Params, e
 
 	case bait.TypeGit:
 		// ProfileName is the fake git server domain component
-		// e.g. git.acme-internal.io becomes ProfileName = acme-internal
+		// e.g. git.corp-internal.io becomes ProfileName = corp-internal
 		corps := []string{"corp", "eng", "src", "build", "platform"}
 		c := corps[token.MustRandInt(len(corps))]
 		if label != "" {
@@ -456,9 +456,10 @@ func buildParams(bt bait.Type, label string, cfg *config.Config) (bait.Params, e
 		// ProfileName is the fake provider namespace prefix
 		// e.g. registry.terraform.io/{{.ProfileName}}-internal/* looks like an internal namespace
 		if label != "" {
-			p.ProfileName = label + "-internal"
+			p.ProfileName = label
 		} else {
-			p.ProfileName = []string{"infra", "platform", "corp", "ops"}[token.MustRandInt(4)] + "-internal"
+			teams := []string{"infra", "platform", "corp", "ops"}
+			p.ProfileName = teams[token.MustRandInt(len(teams))]
 		}
 	}
 
