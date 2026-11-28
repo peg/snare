@@ -135,7 +135,7 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_WORKER_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
-          CALLBACK_HOSTS: ${{ secrets.SNARE_CALLBACK_HOSTS }}
+          CALLBACK_HOSTS: ${{ secrets.SNARE_CALLBACK_HOST }}
         run: |
           set -euo pipefail
           secrets="$(npx wrangler secret list --env="" --format json)"
@@ -143,11 +143,11 @@ jobs:
           mapfile -t hosts <<<"$CALLBACK_HOSTS"
           for host in "${hosts[@]}"; do
             if [[ ! "$host" =~ ^[a-z0-9-]+(\.[a-z0-9-]+){2,}$ ]]; then
-              echo "SNARE_CALLBACK_HOSTS must list one subdomain per line." >&2
+              echo "SNARE_CALLBACK_HOST must list one subdomain per line." >&2
               exit 1
             fi
           done
-          echo "Cloudflare access, WEBHOOK_URLS and SNARE_CALLBACK_HOSTS verified."
+          echo "Cloudflare access, WEBHOOK_URLS and SNARE_CALLBACK_HOST verified."
 
       - name: Record current deployment
         working-directory: worker
@@ -188,7 +188,7 @@ jobs:
           # One host per line so GitHub masks each; the first is assigned to new
           # devices. Keep retired hosts listed: wrangler detaches any custom
           # domain it is not given, and their canaries would stop reporting.
-          CALLBACK_HOSTS: ${{ secrets.SNARE_CALLBACK_HOSTS }}
+          CALLBACK_HOSTS: ${{ secrets.SNARE_CALLBACK_HOST }}
         run: |
           set -euo pipefail
           mapfile -t hosts <<<"$CALLBACK_HOSTS"
