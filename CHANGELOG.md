@@ -9,6 +9,8 @@ Versioning: [Semantic Versioning](https://semver.org/)
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-11-28
+
 ### Fixed
 - `snare events` on the managed Worker now returns the newest events; event keys sort newest-first and older keys are still read.
 - `snare prove` and `doctor --test` no longer fail once a token has 20 or more stored events: test callbacks carry a proof nonce and `prove` matches the new event by identity instead of counting.
@@ -19,6 +21,7 @@ Versioning: [Semantic Versioning](https://semver.org/)
 - First-run enrollment with snare.sh retries transient failures and then fails without writing a config, instead of inventing a local device ID the receiver rejects forever. `snare repair` re-enrolls configs left in that state.
 
 ### Changed
+- snare.sh moves to D1 storage with native rate limits and may briefly return 503 during the move.
 - `arm` and `doctor` say a test callback was recorded and ask you to confirm the alert arrived, rather than claiming the webhook fired or the machine is protected; `arm` warns when some canaries failed to register.
 
 ## [0.5.0] - 2026-07-27

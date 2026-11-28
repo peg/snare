@@ -15,6 +15,10 @@ on:
         description: Exact 40-character commit SHA from main
         required: true
         type: string
+      allow_config_change:
+        description: Deploy without --strict to apply an intended Worker config change
+        type: boolean
+        default: false
 
 permissions:
   actions: read
@@ -172,10 +176,16 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           DEPLOY_SHA: ${{ steps.qualify.outputs.deploy_sha }}
           WRANGLER_OUTPUT_FILE_PATH: ${{ runner.temp }}/wrangler-output.jsonl
+          ALLOW_CONFIG_CHANGE: ${{ inputs.allow_config_change }}
         run: |
           set -euo pipefail
           : > "$WRANGLER_OUTPUT_FILE_PATH"
-          npm run cf:deploy -- --message "GitHub Actions deploy of ${DEPLOY_SHA}"
+          strict=(--strict)
+          if [[ "$ALLOW_CONFIG_CHANGE" == "true" ]]; then
+            strict=()
+            echo "::warning::Deploying without --strict; remote Worker configuration will be overwritten."
+          fi
+          npx wrangler deploy --env= --keep-vars "${strict[@]}" --message "GitHub Actions deploy of ${DEPLOY_SHA}"
 
           version_id="$(
             jq -r 'select(.type == "deploy") | .version_id // empty' \

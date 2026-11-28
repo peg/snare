@@ -6,11 +6,11 @@ import { exportNamespace, exportToFile } from "./scripts/export-kv.mjs";
 
 const OPTIONS = { accountId: "a".repeat(32), namespaceId: "b".repeat(32), token: "synthetic" };
 
-function api(values, { drop = [] } = {}) {
+function api(values, { drop = [], expiration = {} } = {}) {
   const calls = [];
   const fetchImpl = async (url, init = {}) => {
     calls.push(init.method ?? "GET");
-    if (url.includes("/keys")) return Response.json({ success: true, result: Object.keys(values).map(name => ({ name })), result_info: {} });
+    if (url.includes("/keys")) return Response.json({ success: true, result: Object.keys(values).map(name => ({ name, ...(expiration[name] ? { expiration: expiration[name] } : {}) })), result_info: {} });
     const { keys } = JSON.parse(init.body);
     return Response.json({ success: true, result: { values: Object.fromEntries(keys.filter(k => !drop.includes(k)).map(k => [k, values[k]])) } });
   };
@@ -23,7 +23,15 @@ describe("KV export", () => {
     const ok = api(values);
     expect((await exportNamespace({ ...OPTIONS, fetchImpl: ok.fetchImpl })).counts).toEqual({ total: 2, byPrefix: { device: 1, webhook: 1 } });
     expect(new Set(ok.calls)).toEqual(new Set(["GET", "POST"]));
+    let listed;
+    await exportNamespace({ ...OPTIONS, prefix: "snap/", fetchImpl: async (url, init) => { if (url.includes("/keys")) listed = new URL(url); return ok.fetchImpl(url, init); } });
+    expect(listed.searchParams.get("prefix")).toBe("snap/");
     await expect(exportNamespace({ ...OPTIONS, fetchImpl: api(values, { drop: ["device:a"] }).fetchImpl }))
+      .rejects.toMatchObject({ code: "INCONSISTENT_SNAPSHOT" });
+    const past = Math.floor(Date.now() / 1000) - 1;
+    const lapsed = await exportNamespace({ ...OPTIONS, fetchImpl: api(values, { drop: ["device:a"], expiration: { "device:a": past } }).fetchImpl });
+    expect(lapsed.counts).toEqual({ total: 1, byPrefix: { webhook: 1 }, expired: 1 });
+    await expect(exportNamespace({ ...OPTIONS, fetchImpl: api(values, { drop: ["device:a"], expiration: { "device:a": past + 3600 } }).fetchImpl }))
       .rejects.toMatchObject({ code: "INCONSISTENT_SNAPSHOT" });
     await expect(exportNamespace({ ...OPTIONS, accountId: "nope", fetchImpl: ok.fetchImpl })).rejects.toMatchObject({ code: "INVALID_CONFIGURATION" });
   });

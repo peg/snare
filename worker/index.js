@@ -150,8 +150,9 @@ export default {
         return json({ status: "ok", environment: env.SNARE_ENVIRONMENT || "production",
           version: env.CF_VERSION_METADATA || {}, storage: env.SNARE_DB ? "d1" : "kv",
           delivery: env.SNARE_DB ? (env.WEBHOOK_DELIVERY_QUEUE ? "queue" : "outbox") : "best_effort",
-          enrollment: env.ENROLLMENT_MODE || "open", ts: new Date().toISOString() });
+          enrollment: env.ENROLLMENT_MODE || "open", maintenance: env.MAINTENANCE === "1", ts: new Date().toISOString() });
       }
+      if (env.MAINTENANCE === "1") throw new PolicyError(503, "maintenance", "receiver is in maintenance; retry later", 300);
       if (url.pathname.startsWith("/api/")) {
         await enforceSourceRateLimit(request, env, url.pathname === "/api/devices" ? "enrollment" : "api");
         const routes = { "/api/devices": handleCreateDevice, "/api/register": handleRegister,

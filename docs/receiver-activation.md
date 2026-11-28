@@ -130,6 +130,26 @@ reverting to the old KV backend would abandon newer ownership and evidence.
 Rollback across the storage boundary requires a reconciled backup, not only an
 older Worker version.
 
+## Managed production cutover
+
+Deploy a production version that includes `MAINTENANCE` support first.
+
+1. Create an empty D1 database. Merge a commit that adds the D1 binding,
+   `STORAGE_BACKEND=d1` and `triggers.crons` (as staging) while keeping
+   `kv_namespaces`. Let staging qualify it; do not deploy production yet, and
+   deploy nothing to production until step 3 passes.
+2. Set the Worker secret `MAINTENANCE=1`. `/health` reports `maintenance: true`
+   and every API and callback request returns 503. Canary callbacks during the
+   window are not recorded, so keep it short.
+3. Run **Migrate Production Worker KV to D1** from `main`. It exports KV, copies
+   the export into the KV namespace `snare-kv-backup` under a timestamped prefix, imports into the database and fails unless the
+   imported counts match. Only counts reach the log. If it fails after the
+   import started, delete and recreate the database before retrying.
+4. Deploy the qualified commit to production with `allow_config_change`.
+5. Delete the `MAINTENANCE` secret and verify `/health` reports `storage: "d1"`.
+
+Keep both KV namespaces until D1 has run cleanly for 30 days.
+
 ## Hosted global webhook routing
 
 New `use-global` registrations require the authenticated device ID in

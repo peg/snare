@@ -28,6 +28,22 @@ describe("log hygiene", () => {
   });
 });
 
+describe("maintenance", () => {
+  it("refuses API and callback writes but keeps health up", async () => {
+    const env = { MAINTENANCE: "1" };
+    for (const path of ["/api/devices", "/c/tok_maintenance01"]) {
+      const response = await worker.fetch(new Request(`https://snare.sh${path}`, { method: "POST" }), env, { waitUntil() {} });
+      expect(response.status).toBe(503);
+      expect(response.headers.get("retry-after")).toBe("300");
+      expect(await response.json()).toMatchObject({ code: "maintenance" });
+    }
+    const health = await worker.fetch(new Request("https://snare.sh/health"), env, { waitUntil() {} });
+    expect(await health.json()).toMatchObject({ status: "ok", maintenance: true });
+    const other = await worker.fetch(new Request("https://snare.sh/api/events/tok_maintenance01"), { MAINTENANCE: "true" }, { waitUntil() {} });
+    expect(other.status).not.toBe(503);
+  });
+});
+
 describe("health", () => {
   it("reports the active Cloudflare Worker version", async () => {
     const version = {

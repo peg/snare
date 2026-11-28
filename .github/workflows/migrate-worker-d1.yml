@@ -1,0 +1,142 @@
+name: Migrate Production Worker KV to D1
+
+on:
+  workflow_dispatch:
+    inputs:
+      kv_namespace_id:
+        description: Production KV namespace ID (must match worker/wrangler.jsonc)
+        required: true
+        type: string
+      d1_database:
+        description: Name of the new, empty production D1 database
+        required: true
+        type: string
+      d1_database_id:
+        description: ID of that D1 database
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: snare-worker-production
+  cancel-in-progress: false
+
+jobs:
+  migrate:
+    name: Back up KV and import into D1
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment:
+      name: snare-worker-production
+    env:
+      KV_NAMESPACE_ID: ${{ inputs.kv_namespace_id }}
+      D1_DATABASE: ${{ inputs.d1_database }}
+      D1_DATABASE_ID: ${{ inputs.d1_database_id }}
+      BACKUP_NAMESPACE: snare-kv-backup
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check inputs and maintenance mode
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+            echo "Run from main." >&2; exit 1
+          fi
+          [[ "$KV_NAMESPACE_ID" =~ ^[0-9a-f]{32}$ ]] || { echo "Invalid KV namespace ID." >&2; exit 1; }
+          [[ "$D1_DATABASE_ID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || { echo "Invalid D1 ID." >&2; exit 1; }
+          [[ "$D1_DATABASE" =~ ^[a-z0-9-]{1,64}$ ]] || { echo "Invalid D1 name." >&2; exit 1; }
+          grep -qF "\"id\": \"$KV_NAMESPACE_ID\"" worker/wrangler.jsonc || { echo "KV namespace is not the configured one." >&2; exit 1; }
+          curl --fail --silent --show-error https://snare.sh/health | jq -e '.maintenance == true and .storage == "kv"' >/dev/null \
+            || { echo "Production must be on KV with MAINTENANCE=1 before export." >&2; exit 1; }
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: worker/package-lock.json
+
+      - name: Install Worker dependencies
+        working-directory: worker
+        run: npm ci
+
+      - name: Export KV and store backup copy
+        id: backup
+        working-directory: worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_WORKER_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          umask 077
+          dir="$RUNNER_TEMP/migrate"
+          mkdir -p "$dir"
+          node scripts/export-kv.mjs "$KV_NAMESPACE_ID" "$dir/backup.json"
+          snapshot="production-$(date -u +%Y%m%dT%H%M%SZ)"
+          api="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/storage/kv/namespaces"
+          auth=(--header "Authorization: Bearer $CLOUDFLARE_API_TOKEN")
+          lookup() { curl --fail --silent --show-error "${auth[@]}" "$api?per_page=100" | jq -r --arg t "$BACKUP_NAMESPACE" '.result[] | select(.title == $t) | .id'; }
+          ns="$(lookup)"
+          if [[ -z "$ns" ]]; then
+            curl --fail --silent --show-error "${auth[@]}" --header "content-type: application/json" \
+              --data "$(jq -n --arg t "$BACKUP_NAMESPACE" '{title: $t}')" "$api" > /dev/null
+            ns="$(lookup)"
+          fi
+          [[ "$ns" =~ ^[0-9a-f]{32}$ ]] || { echo "Backup namespace unavailable." >&2; exit 1; }
+          jq --arg p "$snapshot/" '[.[] | {key: ($p + .name), value}]' "$dir/backup.json" > "$dir/bulk.json"
+          npx wrangler kv bulk put "$dir/bulk.json" --namespace-id "$ns" --remote > /dev/null 2>&1 \
+            || { echo "Backup write failed." >&2; exit 1; }
+          BACKUP_NS="$ns" SNAPSHOT="$snapshot/" BACKUP_FILE="$dir/backup.json" node --input-type=module -e '
+            import { readFile } from "node:fs/promises";
+            import { exportNamespace } from "./scripts/export-kv.mjs";
+            const { CLOUDFLARE_ACCOUNT_ID: accountId, CLOUDFLARE_API_TOKEN: token, BACKUP_NS: namespaceId, SNAPSHOT: prefix } = process.env;
+            const digest = entries => JSON.stringify(entries.map(({ name, value }) => [name, value]).sort());
+            const expected = digest(JSON.parse(await readFile(process.env.BACKUP_FILE, "utf8")));
+            for (let attempt = 1; ; attempt++) {
+              const { entries } = await exportNamespace({ accountId, namespaceId, token, prefix });
+              if (digest(entries.map(e => ({ name: e.name.slice(prefix.length), value: e.value }))) === expected) break;
+              if (attempt === 6) { console.error("Backup does not match the export."); process.exit(1); }
+              await new Promise(done => setTimeout(done, 5000));
+            }
+          '
+          echo "Backup stored in KV namespace $BACKUP_NAMESPACE under $snapshot/" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Convert, apply schema and import
+        working-directory: worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_WORKER_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          umask 077
+          dir="$RUNNER_TEMP/migrate"
+          node scripts/migrate-kv-to-d1.mjs "$dir/backup.json" "$dir/import.sql" > "$dir/expected.json"
+          jq -n --arg name "$D1_DATABASE" --arg id "$D1_DATABASE_ID" --arg migrations "$PWD/migrations" \
+            '{name: "snare-migrate", compatibility_date: "2026-07-24",
+              d1_databases: [{binding: "SNARE_DB", database_name: $name, database_id: $id, migrations_dir: $migrations}]}' \
+            > "$dir/wrangler.json"
+          npx wrangler d1 migrations apply "$D1_DATABASE" --remote -c "$dir/wrangler.json"
+          npx wrangler d1 execute "$D1_DATABASE" --remote --yes -c "$dir/wrangler.json" --file "$dir/import.sql" > /dev/null 2>&1 \
+            || { echo "Import failed. Delete and recreate the D1 database before retrying." >&2; exit 1; }
+          npx wrangler d1 execute "$D1_DATABASE" --remote --json -c "$dir/wrangler.json" \
+            --command "SELECT name, n FROM counts WHERE day = -1" | sed -n '/^\[/,$p' > "$dir/actual.json"
+          jq -e --slurpfile expected "$dir/expected.json" '
+            (.[0].results | map({(.name): .n}) | add // {}) as $c
+            | $expected[0] as $e
+            | ($c.devices // 0) == $e.devices
+              and ($c.tokens_active // 0) == $e.activeTokens
+              and (($c.tokens // 0) - ($c.tokens_active // 0)) == $e.revokedTokens
+              and ($c.events // 0) == $e.events
+          ' "$dir/actual.json" > /dev/null || { echo "Imported counts do not match the export." >&2; exit 1; }
+          {
+            echo "## Import verified"
+            jq -r '"- Devices: \(.devices)\n- Active tokens: \(.activeTokens)\n- Revoked tokens: \(.revokedTokens)\n- Events: \(.events)"' "$dir/expected.json"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remove local copies
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/migrate"
