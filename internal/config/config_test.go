@@ -235,8 +235,30 @@ func TestInit(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Init: %v", err)
 		}
-		if cfg.CallbackBase != "https://snare.sh/c" {
-			t.Fatalf("CallbackBase = %q, want default", cfg.CallbackBase)
+		if cfg.CallbackBase != DefaultAPIBase+"/c" || cfg.APIBase() != DefaultAPIBase {
+			t.Fatalf("bases = %q, %q, want fallback when none is assigned", cfg.CallbackBase, cfg.APIBase())
+		}
+	})
+
+	t.Run("uses the callback base the hosted receiver assigns", func(t *testing.T) {
+		for body, want := range map[string]string{
+			`{"device_id":"d","callback_base":"https://edge.example.net/c"}`: "https://edge.example.net/c",
+			`{"device_id":"d","callback_base":"http://edge.example.net/c"}`:  DefaultAPIBase + "/c",
+			`{"device_id":"d","callback_base":"https://u:p@x/c"}`:            DefaultAPIBase + "/c",
+			`{"device_id":"d","callback_base":"https://x/c$(id)"}`:           DefaultAPIBase + "/c",
+			`{"device_id":"d","callback_base":"https://x/hooks"}`:            DefaultAPIBase + "/c",
+		} {
+			setupHome(t)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(body)) }))
+			target, _ := url.Parse(srv.URL)
+			old := httpClient
+			httpClient = &http.Client{Timeout: time.Second, Transport: rewriteTransport{target}}
+			cfg, err := Init("", "", false)
+			httpClient = old
+			srv.Close()
+			if err != nil || cfg.CallbackBase != want || cfg.APIBase() != DefaultAPIBase {
+				t.Fatalf("%s: cfg=%+v err=%v, want callback %q", body, cfg, err, want)
+			}
 		}
 	})
 
@@ -254,6 +276,37 @@ func TestInit(t *testing.T) {
 		}
 		if cfg.CallbackBase != srv.URL+"/c" {
 			t.Fatalf("CallbackBase = %q, want environment value", cfg.CallbackBase)
+		}
+	})
+
+	t.Run("resolves callback and API bases", func(t *testing.T) {
+		for _, tt := range []struct{ callback, api, wantCallback, wantAPI string }{
+			{"https://canary.example.com/c", "", "https://canary.example.com/c", "https://canary.example.com"},
+			{"https://canary.example.com/c/", "", "https://canary.example.com/c", "https://canary.example.com"},
+			{"https://edge.example.com/c", "https://ops.example.com/", "https://edge.example.com/c", "https://ops.example.com"},
+		} {
+			setupHome(t)
+			fakeManagedEnrollment(t)
+			t.Setenv("SNARE_CALLBACK_BASE", tt.callback)
+			t.Setenv("SNARE_API_BASE", tt.api)
+			cfg, err := Init("", "", false)
+			if err != nil {
+				t.Fatalf("Init(%q, %q): %v", tt.callback, tt.api, err)
+			}
+			if cfg.CallbackBase != tt.wantCallback || cfg.APIBase() != tt.wantAPI {
+				t.Fatalf("Init(%q, %q) = %q, %q", tt.callback, tt.api, cfg.CallbackBase, cfg.APIBase())
+			}
+		}
+		for _, bad := range [][2]string{
+			{"ftp://x/c", ""}, {"https:///c", ""}, {"https://u:p@x/c", ""}, {"https://x/c?q=1", ""},
+			{"", "https://ops.example.com"}, {"https://edge.example.com/c", DefaultAPIBase},
+		} {
+			setupHome(t)
+			t.Setenv("SNARE_CALLBACK_BASE", bad[0])
+			t.Setenv("SNARE_API_BASE", bad[1])
+			if _, err := Init("", "", false); err == nil {
+				t.Fatalf("Init(%q, %q) error = nil", bad[0], bad[1])
+			}
 		}
 	})
 
@@ -303,7 +356,7 @@ func TestRegisterDeviceWithServerTimeout(t *testing.T) {
 	defer srv.Close()
 
 	start := time.Now()
-	got, err := registerDeviceWithServer(srv.URL, strings.Repeat("a", 64))
+	got, _, err := registerDeviceWithServer(srv.URL, strings.Repeat("a", 64))
 	if got != "" || err == nil {
 		t.Fatalf("device ID = %q, want fallback", got)
 	}
@@ -449,7 +502,7 @@ func TestRegisterDeviceWithServerRetries(t *testing.T) {
 				_, _ = w.Write([]byte(`{"device_id":"dev-retry"}`))
 			}))
 			defer srv.Close()
-			id, err := registerDeviceWithServer(srv.URL, strings.Repeat("a", 64))
+			id, _, err := registerDeviceWithServer(srv.URL, strings.Repeat("a", 64))
 			if calls != tt.wantCalls || (err == nil) != tt.wantOK {
 				t.Fatalf("calls=%d id=%q err=%v", calls, id, err)
 			}
@@ -496,7 +549,7 @@ func TestRegisterDeviceWithServer(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			got, err := registerDeviceWithServer(srv.URL, strings.Repeat("a", 64))
+			got, _, err := registerDeviceWithServer(srv.URL, strings.Repeat("a", 64))
 			if got != tt.wantID {
 				t.Fatalf("registerDeviceWithServer() = %q, want %q", got, tt.wantID)
 			}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 
@@ -34,8 +35,8 @@ type OrphanResult struct {
 	URL  string
 }
 
-// snareURLPattern is the substring we look for to detect canary content on disk.
-const snareURLPattern = "snare.sh/c/"
+// canaryURLPattern matches planted callback URLs on any receiver host.
+var canaryURLPattern = regexp.MustCompile(`https?://[A-Za-z0-9.-]+(?::[0-9]{1,5})?(?:/[A-Za-z0-9._~-]+)*/c/(?:[a-z0-9-]+-)?[0-9a-f]{32}(?:/[A-Za-z0-9._~/-]*)?`)
 
 // ScanManifest checks each active canary against disk and returns categorised results.
 // It does NOT scan for orphans (that requires filesystem walking — see ScanForOrphans).
@@ -85,7 +86,7 @@ func ScanManifest(m *manifest.Manifest) []ScanResult {
 // pathID is a (path, id) pair used for orphan scanning.
 type pathID struct{ path, id string }
 
-// ScanForOrphans walks the known canary paths and looks for snare.sh/c/ URLs
+// ScanForOrphans walks the known canary paths and looks for callback URLs
 // in files that have no matching manifest entry. Returns any found orphans.
 func ScanForOrphans(m *manifest.Manifest) ([]OrphanResult, error) {
 	home, err := os.UserHomeDir()
@@ -163,7 +164,8 @@ func checkFileForOrphans(path string, covered map[pathID]bool, active []manifest
 		return nil
 	}
 	content := string(data)
-	if !strings.Contains(content, snareURLPattern) {
+	url := canaryURLPattern.FindString(content)
+	if url == "" {
 		return nil
 	}
 
@@ -174,31 +176,7 @@ func checkFileForOrphans(path string, covered map[pathID]bool, active []manifest
 		}
 	}
 
-	// Found snare URL in this file but no manifest entry — it's an orphan
-	// Extract the URL for display
-	url := extractSnareURL(content)
 	return []OrphanResult{{Path: path, URL: url}}
-}
-
-// extractSnareURL pulls out the first snare.sh/c/... URL from content.
-func extractSnareURL(content string) string {
-	idx := strings.Index(content, snareURLPattern)
-	if idx == -1 {
-		return "(unknown)"
-	}
-	// Walk backwards to find https://
-	start := idx
-	for start > 0 && content[start-1] != '\n' && content[start-1] != '"' &&
-		content[start-1] != ' ' && content[start-1] != '\t' {
-		start--
-	}
-	// Walk forward to end of URL
-	end := idx
-	for end < len(content) && content[end] != '\n' && content[end] != '"' &&
-		content[end] != ' ' && content[end] != '\t' {
-		end++
-	}
-	return strings.TrimSpace(content[start:end])
 }
 
 // cmdScan checks each active canary against disk and reports status.

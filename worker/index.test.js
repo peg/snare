@@ -557,6 +557,19 @@ describe("resolveWebhooks", () => {
 });
 
 describe("callback registration boundary", () => {
+  it("serves only callbacks on hosts outside API_HOSTS", async () => {
+    const env = { API_HOSTS: "snare.sh", SNARE_KV: { get: async () => null, put: async () => {} } };
+    const ctx = { waitUntil() {} };
+    for (const path of ["/", "/health", "/api/devices", "/api/events/tok_neutral0001"]) {
+      const response = await worker.fetch(new Request(`https://edge.example.net${path}`, { method: "POST" }), env, ctx);
+      expect(response.status).toBe(404);
+      expect(await response.text()).toBe("not found");
+    }
+    const callback = await worker.fetch(new Request("https://edge.example.net/c/tok_neutral0001/ssh"), env, ctx);
+    expect(callback.headers.get("content-type")).toBe("image/gif");
+    expect((await worker.fetch(new Request("https://snare.sh/health"), env, ctx)).status).toBe(200);
+  });
+
   it("does not create state or deliver webhooks for an unregistered test token", async () => {
     const writes = [];
     let pending;

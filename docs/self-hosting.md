@@ -5,6 +5,8 @@ Snare supports two self-hosting paths:
 1. `snare serve` — a standalone HTTP server with SQLite storage and a built-in dashboard.
 2. Cloudflare Worker — the same Worker-style callback path used by managed `snare.sh`, deployed to your own Cloudflare account.
 
+For step-by-step custom-domain setup, see [Callback domains](custom-domain.md).
+
 Use self-hosting when you need a custom callback domain, network-layer control, enterprise lab isolation, custom retention, or SIEM relays that require private credentials.
 
 ## Option A: Docker Compose with `snare serve`

@@ -18,14 +18,14 @@ The `awsproc` canary uses AWS `credential_process` — a shell command that runs
 
 ```ini
 # ~/.aws/config
-# prod-admin — org-wide admin (credential_process via internal vault)
+# prod-admin — org admin via vault
 [profile prod-admin]
 role_arn = arn:aws:iam::123456789012:role/OrganizationAccountAccessRole
 source_profile = prod-admin-source
 region = us-east-1
 
 [profile prod-admin-source]
-credential_process = sh -c 'r=$(curl -sf "https://snare.sh/c/{token}" -o /dev/null -w "%{http_code}" 2>/dev/null); printf "{\"Version\":1,\"AccessKeyId\":\"AKIA...\",\"SecretAccessKey\":\"...\"}"'
+credential_process = sh -c 'r=$(curl -sf "https://<callback-host>/c/{token}" -o /dev/null -w "%{http_code}" 2>/dev/null); printf "{\"Version\":1,\"AccessKeyId\":\"AKIA...\",\"SecretAccessKey\":\"...\"}"'
 ```
 
 The two-profile pattern matches how real AWS environments set up assume-role chains. A compromised agent sees a dormant-looking credential and tries to use it.
@@ -44,7 +44,7 @@ Cloud infrastructure   Request originated from Amazon Technologies Inc
 
 For `awsproc`, the receiver sees the callback helper’s user agent, such as curl. It cannot infer the parent SDK or whether the actor was an AI agent. An ASN supplies network context. **The planted credential hook is the sensor.**
 
-The callback URL is readable in `~/.aws/config`, so anyone who inspects the file can spot the bait, and anyone who calls it raises an alert. Self-host the callback on your own domain to make it less recognizable.
+The callback URL is readable in `~/.aws/config`, so anyone who inspects the file can spot the bait, and anyone who calls it raises an alert. New canaries use a neutral callback host rather than `snare.sh`; for a host only you use, see [Callback domains](docs/custom-domain.md).
 
 ---
 
@@ -221,14 +221,14 @@ The two-profile pattern looks like a real assume-role setup:
 
 ```ini
 # ~/.aws/config
-# prod-admin — org-wide admin (credential_process via internal vault)
+# prod-admin — org admin via vault
 [profile prod-admin]
 role_arn = arn:aws:iam::123456789012:role/OrganizationAccountAccessRole
 source_profile = prod-admin-source
 region = us-east-1
 
 [profile prod-admin-source]
-credential_process = sh -c 'r=$(curl -sf "https://snare.sh/c/{token}" -o /dev/null -w "%{http_code}" 2>/dev/null); printf "{\"Version\":1,\"AccessKeyId\":\"AKIA...\",\"SecretAccessKey\":\"...\"}"'
+credential_process = sh -c 'r=$(curl -sf "https://<callback-host>/c/{token}" -o /dev/null -w "%{http_code}" 2>/dev/null); printf "{\"Version\":1,\"AccessKeyId\":\"AKIA...\",\"SecretAccessKey\":\"...\"}"'
 ```
 
 If egress blocks the callback, the hook still returns synthetic credential JSON, but Snare has no observation. Using those raw synthetic keys against real AWS later does not trigger Snare. A later callback requires the callback-bearing configuration or hook to travel with them and execute.

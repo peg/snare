@@ -25,6 +25,7 @@ func testParams(t *testing.T, bt bait.Type) bait.Params {
 		CallbackURL: "https://snare.sh/c/" + tokenID,
 		Label:       "test",
 		ProfileName: "test-us-east-1-legacy-2024",
+		Decor:       bait.NewDecor(bt, "test-us-east-1-legacy-2024"),
 	}
 
 	var e error
@@ -458,7 +459,7 @@ func TestRemoveModifiedContent(t *testing.T) {
 
 	// Simulate user editing the bait file
 	data, _ := os.ReadFile(path)
-	modified := strings.Replace(string(data), "deploy-svc", "modified-svc", 1)
+	modified := strings.Replace(string(data), "service_account", "authorized_user", 1)
 	os.WriteFile(path, []byte(modified), 0600)
 
 	c := manifest.Canary{

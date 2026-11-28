@@ -83,6 +83,15 @@ describe("integrated receiver admission and evidence", () => {
     expect(db.count("devices")).toBe(0);
   });
 
+  it("hands out the callback base at enrollment only when configured", async () => {
+    const { env } = fixture();
+    let body = await (await invoke(env, api("devices", { device_secret: SECRET }, null))).json();
+    expect(body).not.toHaveProperty("callback_base");
+    env.CALLBACK_BASE = "https://edge.example.net/c";
+    body = await (await invoke(env, api("devices", { device_secret: "b".repeat(64) }, null))).json();
+    expect(body.callback_base).toBe("https://edge.example.net/c");
+  });
+
   it("denies public use-global registration while keeping authorized public destinations usable", async () => {
     const { env, db, queued } = fixture({ WEBHOOK_URLS: WEBHOOK });
     const deviceId = await enroll(env);

@@ -83,7 +83,7 @@ func TestNormalizeAutoLabel(t *testing.T) {
 	for input, want := range map[string]string{
 		"Agent_01.local": "agent-01-local",
 		"--BUILD HOST--": "build-host",
-		"":               "snare",
+		"":               "dev",
 	} {
 		if got := normalizeAutoLabel(input); got != want {
 			t.Errorf("normalizeAutoLabel(%q) = %q, want %q", input, got, want)

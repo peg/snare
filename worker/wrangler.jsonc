@@ -39,7 +39,8 @@
   "triggers": { "crons": ["*/5 * * * *"] },
   "vars": {
     "STORAGE_BACKEND": "d1",
-    "RATE_LIMITS_REQUIRED": "true"
+    "RATE_LIMITS_REQUIRED": "true",
+    "API_HOSTS": "snare.sh"
   },
   "ratelimits": [
     { "name": "ENROLLMENT_RATE_LIMITER", "namespace_id": "1001", "simple": { "limit": 3, "period": 60 } },
@@ -82,7 +83,8 @@
         "SNARE_ENVIRONMENT": "staging",
         "STORAGE_BACKEND": "d1",
         "RATE_LIMITS_REQUIRED": "true",
-        "ENROLLMENT_MODE": "invite"
+        "ENROLLMENT_MODE": "invite",
+        "API_HOSTS": "staging.snare.sh"
       },
       "observability": {
         "enabled": true,
@@ -90,6 +92,8 @@
       }
     }
   }
+  // Callback hosts and CALLBACK_BASE come from the SNARE_CALLBACK_HOST
+  // GitHub secret at deploy, so they never appear in this repository.
   // WEBHOOK_URLS remains a remote Worker secret and is never committed. If
   // configured for staging, it must point to a dedicated non-production sink.
 }

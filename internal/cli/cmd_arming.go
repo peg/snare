@@ -242,7 +242,7 @@ Naming tip:
 		if h, err := os.Hostname(); err == nil {
 			label = normalizeAutoLabel(h)
 		} else {
-			label = "snare"
+			label = "dev"
 		}
 	}
 
@@ -259,7 +259,7 @@ Naming tip:
 			// Create a temporary in-memory config for dry-run rendering
 			cfg = &config.Config{
 				DeviceID:     "dry-run",
-				CallbackBase: "https://snare.sh/c",
+				CallbackBase: config.DefaultAPIBase + "/c",
 				WebhookURL:   webhookURL,
 			}
 		} else {
