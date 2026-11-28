@@ -60,8 +60,7 @@ func cmdEvents(args []string) {
 		return
 	}
 
-	// Build API base from callback base
-	apiBase := strings.TrimSuffix(cfg.CallbackBase, "/c")
+	apiBase := cfg.APIBase()
 
 	// eventRecord holds a single event with canary context.
 	type eventRecord struct {

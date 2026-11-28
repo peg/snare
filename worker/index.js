@@ -139,13 +139,17 @@ function shouldFilter(canaryType, metadata) {
 export default {
   async fetch(request, env, ctx) {
     try {
+      const url = new URL(request.url);
+      // Hosts outside API_HOSTS are callback-only, so a planted host reveals
+      // nothing about the receiver behind it.
+      const callbackOnly = !!env.API_HOSTS && !env.API_HOSTS.split(",").map(h => h.trim().toLowerCase()).includes(url.hostname);
+      if (callbackOnly && !url.pathname.startsWith("/c/")) return new Response("not found", { status: 404 });
       if (env.STORAGE_BACKEND === "d1" && !env.SNARE_DB) {
         throw new PolicyError(503, "storage_unavailable", "transactional storage is not configured");
       }
       if (env.SNARE_DB) {
         try { storeLimits(env); } catch { throw new PolicyError(503, "configuration_invalid", "STORE_LIMITS is invalid"); }
       }
-      const url = new URL(request.url);
       if (url.pathname === "/health") {
         return json({ status: "ok", environment: env.SNARE_ENVIRONMENT || "production",
           version: env.CF_VERSION_METADATA || {}, storage: env.SNARE_DB ? "d1" : "kv",

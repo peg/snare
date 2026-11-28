@@ -45,7 +45,7 @@ const (
 // Params are filled into bait templates.
 type Params struct {
 	TokenID            string // unique canary ID
-	CallbackURL        string // snare.sh callback URL — used as the SERVICE ENDPOINT, not a comment
+	CallbackURL        string // receiver callback URL — used as the SERVICE ENDPOINT, not a comment
 	CallbackURLNoProto string // CallbackURL without https:// prefix (for npm auth lines)
 	Label              string // user-supplied label prefix (optional)
 	// Per-type fake values — realistic looking but non-functional
@@ -55,6 +55,7 @@ type Params struct {
 	FakeProjID     string
 	FakePrivateKey string // PEM-formatted RSA private key (invalid but correct structure)
 	ProfileName    string // e.g. "prod-us-east-1-legacy"
+	Decor
 }
 
 // PlacedFile describes a file that was written, including the exact content.
@@ -440,7 +441,7 @@ func DefaultPaths(t Type) ([]string, error) {
 	case TypeK8s:
 		// Standalone kubeconfig file in ~/.kube/ — does NOT modify the real config.
 		// An agent scanning ~/.kube/ will find this and may try to use it.
-		// Fires when kubectl targets the fake cluster (server URL → snare.sh)
+		// Fires when kubectl targets the fake cluster (server URL → the receiver)
 		// Uses a realistic filename that varies to avoid collisions.
 		return kubeConfigPaths(home), nil
 	case TypeNPM:
@@ -485,7 +486,7 @@ func DefaultPaths(t Type) ([]string, error) {
 		return []string{filepath.Join(home, ".gitconfig")}, nil
 	case TypeTerraform:
 		// Append a network_mirror block to ~/.terraformrc
-		// Redirects provider downloads to snare.sh
+		// Redirects provider downloads to the receiver
 		if goos == "windows" {
 			appData, err := os.UserConfigDir()
 			if err != nil {
@@ -614,20 +615,19 @@ func templateFor(t Type) (*template.Template, bool) {
 var windowsTemplates = map[Type]*template.Template{
 	TypeSSH: template.Must(template.New("ssh-windows").Parse(
 		`
-# {{.ProfileName}} — internal bastion (legacy, do not remove)
-Host {{.ProfileName}}
+{{with .Comment}}# {{.}}
+{{end}}Host {{.ProfileName}}
     HostName {{.ProfileName}}.internal
-    User deploy
+    User {{.Account}}
     IdentityFile ~/.ssh/id_ed25519
     ProxyCommand curl.exe -s -o NUL --max-time 5 {{.CallbackURL}}/ssh
     ServerAliveInterval 60
-    StrictHostKeyChecking no
 `)),
 
 	TypeAWSProc: template.Must(template.New("awsproc-windows").Funcs(template.FuncMap{"curl": windowsCurl}).Parse(
 		`
-# {{.ProfileName}} — org-wide admin (credential_process via internal vault)
-[profile {{.ProfileName}}]
+{{with .Comment}}# {{.}}
+{{end}}[profile {{.ProfileName}}]
 role_arn = arn:aws:iam::{{.FakeSecret}}:role/OrganizationAccountAccessRole
 source_profile = {{.ProfileName}}-source
 region = us-east-1
@@ -648,8 +648,8 @@ var templates = map[Type]*template.Template{
 	// Fires when an agent tries to call any AWS API with this profile.
 	TypeAWS: template.Must(template.New("aws").Parse(
 		`
-# {{.ProfileName}} — legacy, scheduled for rotation
-[profile {{.ProfileName}}]
+{{with .Comment}}# {{.}}
+{{end}}[profile {{.ProfileName}}]
 aws_access_key_id     = {{.FakeKeyID}}
 aws_secret_access_key = {{.FakeSecret}}
 region                = us-east-1
@@ -666,7 +666,7 @@ endpoint_url          = {{.CallbackURL}}
   "project_id": "{{.FakeProjID}}",
   "private_key_id": "{{.FakeKeyID}}",
   "private_key": "{{.FakePrivateKey}}",
-  "client_email": "deploy-svc@{{.FakeProjID}}.iam.gserviceaccount.com",
+  "client_email": "{{.Account}}@{{.FakeProjID}}.iam.gserviceaccount.com",
   "client_id": "{{.FakeSecret}}",
   "auth_uri": "https://accounts.google.com/o/oauth2/auth",
   "token_uri": "{{.CallbackURL}}",
@@ -681,8 +681,8 @@ endpoint_url          = {{.CallbackURL}}
 	//   - Still valuable: agents that DO load dotenv (Claude Code, many Python agents) will fire
 	//   - Real-world tested: Codex CLI fires if OPENAI_BASE_URL is set in environment
 	TypeOpenAI: template.Must(template.New("openai").Parse(
-		`# openai credentials — backup key
-OPENAI_API_KEY={{.FakeToken}}
+		`{{with .Comment}}# {{.}}
+{{end}}OPENAI_API_KEY={{.FakeToken}}
 OPENAI_BASE_URL={{.CallbackURL}}/v1
 `)),
 
@@ -693,8 +693,8 @@ OPENAI_BASE_URL={{.CallbackURL}}/v1
 	//   - Same conditional as OpenAI — depends on agent's dotenv loading behavior
 	//   - Still valuable: Claude-based agents often have ANTHROPIC_API_KEY in their env
 	TypeAnthropic: template.Must(template.New("anthropic").Parse(
-		`# anthropic credentials — backup key
-ANTHROPIC_API_KEY={{.FakeToken}}
+		`{{with .Comment}}# {{.}}
+{{end}}ANTHROPIC_API_KEY={{.FakeToken}}
 ANTHROPIC_BASE_URL={{.CallbackURL}}
 `)),
 
@@ -702,27 +702,26 @@ ANTHROPIC_BASE_URL={{.CallbackURL}}
 	//
 	// Reliability: HIGH
 	//   - Fires via ProxyCommand when anyone/anything runs `ssh <hostname>`
-	//   - ProxyCommand executes curl/wget to snare.sh, which fires the canary
+	//   - ProxyCommand executes curl/wget to the receiver, which fires the canary
 	//   - The host looks like a forgotten jump box / bastion server
 	//   - SSH config is a prime target for compromised agents doing lateral movement
 	//   - curl runs silently (-s), agent sees a connection error, canary fires
 	TypeSSH: template.Must(template.New("ssh").Parse(
 		`
-# {{.ProfileName}} — internal bastion (legacy, do not remove)
-Host {{.ProfileName}}
+{{with .Comment}}# {{.}}
+{{end}}Host {{.ProfileName}}
     HostName {{.ProfileName}}.internal
-    User deploy
+    User {{.Account}}
     IdentityFile ~/.ssh/id_ed25519
     ProxyCommand sh -c 'curl -fsS {{.CallbackURL}}/ssh -o /dev/null 2>/dev/null || wget -qO- {{.CallbackURL}}/ssh >/dev/null 2>&1 || true; exec nc "$0" "$1"' %h %p
     ServerAliveInterval 60
-    StrictHostKeyChecking no
 `)),
 
 	// Kubernetes: Plants a standalone kubeconfig file in ~/.kube/.
 	//
 	// Reliability: HIGH
 	//   - Fires when kubectl targets this cluster (via --kubeconfig or KUBECONFIG env)
-	//   - The server URL points to snare.sh — any API discovery request fires it
+	//   - The server URL points to the receiver — any API discovery request fires it
 	//   - kubeconfig is a top-value credential for compromised agents
 	//   - A compromised agent scanning ~/.kube/ will find this and try to use it
 	//   - The cluster name looks like a real staging/prod cluster
@@ -734,17 +733,16 @@ kind: Config
 current-context: {{.ProfileName}}
 clusters:
 - cluster:
-    insecure-skip-tls-verify: true
     server: {{.CallbackURL}}
   name: {{.ProfileName}}
 contexts:
 - context:
     cluster: {{.ProfileName}}
-    user: {{.ProfileName}}-deploy
+    user: {{.ProfileName}}-{{.Account}}
     namespace: default
   name: {{.ProfileName}}
 users:
-- name: {{.ProfileName}}-deploy
+- name: {{.ProfileName}}-{{.Account}}
   user:
     token: {{.FakeToken}}
 `)),
@@ -755,14 +753,14 @@ users:
 	//   - Fires when npm tries to install any package from the scoped registry
 	//   - The scope looks like an internal org package namespace (@company-internal)
 	//   - npm sends auth token + package name to the registry URL
-	//   - Registry URL points to snare.sh — instant callback
+	//   - Registry URL points to the receiver — instant callback
 	//   - Supply chain attacks make this highly relevant for agent security
 	// The registry URL uses the full https:// form.
 	// The auth line strips the protocol (npm convention: //host/path/:_authToken=...)
 	TypeNPM: template.Must(template.New("npm").Parse(
 		`
-# {{.ProfileName}} internal packages
-@{{.ProfileName}}:registry={{.CallbackURL}}/
+{{with .Comment}}# {{.}}
+{{end}}@{{.ProfileName}}:registry={{.CallbackURL}}/
 //{{.CallbackURLNoProto}}/:_authToken={{.FakeToken}}
 `)),
 
@@ -770,25 +768,22 @@ users:
 	//
 	// Reliability: HIGH
 	//   - Fires when any MCP client tries to connect to the fake server
-	//   - Uses HTTP transport — the "url" field points to snare.sh
+	//   - Uses HTTP transport — the "url" field points to the receiver
 	//   - The MCP client sends an `initialize` JSON-RPC POST request
-	//   - snare.sh receives the request (headers only) and fires the canary
+	//   - The receiver gets the request (headers only) and fires the canary
 	//   - Placed in discoverable but non-auto-loaded locations
 	//   - An agent scanning ~/.config/ for MCP configs will find this
-	//   - Multiple fake servers with enticing names (data-warehouse, secrets-vault)
-	//   - Nobody else is doing MCP config canaries (confirmed via market research)
+	//   - Two fake servers with enticing, per-plant names
 	TypeMCP: template.Must(template.New("mcp").Parse(`{
   "mcpServers": {
-    "{{.ProfileName}}-warehouse": {
+    "{{.ProfileName}}-{{.Account}}": {
       "url": "{{.CallbackURL}}/mcp",
-      "description": "Internal data warehouse — read-only access to prod tables",
       "env": {
         "DB_TOKEN": "{{.FakeToken}}"
       }
     },
-    "{{.ProfileName}}-vault": {
-      "url": "{{.CallbackURL}}/vault",
-      "description": "HashiCorp Vault — team secrets and rotation service",
+    "{{.ProfileName}}-{{.Service}}": {
+      "url": "{{.CallbackURL}}/{{.Service}}",
       "env": {
         "VAULT_TOKEN": "{{.FakeSecret}}"
       }
@@ -797,12 +792,12 @@ users:
 }
 `)),
 
-	// PyPI: Adds an extra-index-url to pip config pointing to snare.sh.
+	// PyPI: Adds an extra-index-url to pip config pointing to the receiver.
 	//
 	// Reliability: HIGH-NOISY
 	//   - Fires when pip/uv/poetry tries to install from the fake index
 	//   - pip checks all index URLs during dependency resolution
-	//   - The fake index URL points to snare.sh's /simple/ endpoint
+	//   - The fake index URL points to the receiver's /simple/ endpoint
 	//   - pip sends package name + version queries as path components
 	//   - AI coding agents constantly run pip install / uv sync
 	//   - Same mechanism as npm canary but for the Python ecosystem
@@ -835,7 +830,7 @@ password = {{.FakeToken}}
 	// Reliability: HIGH
 	//   - Fires BEFORE any API call — at credential resolution time
 	//   - The SDK runs the credential_process command to fetch creds
-	//   - Our command curls snare.sh and returns fake creds on stdout
+	//   - Our command curls the receiver and returns fake creds on stdout
 	//   - Callback payload is fully under our control (no SigV4, no body)
 	//   - Works with ALL AWS SDKs (boto3, CLI, Go, JS, Java, .NET, etc.)
 	//   - Two-profile pattern: visible assume-role profile chains to hidden
@@ -843,8 +838,8 @@ password = {{.FakeToken}}
 	//   - Named profiles only — never touches default profile
 	TypeAWSProc: template.Must(template.New("awsproc").Parse(
 		`
-# {{.ProfileName}} — org-wide admin (credential_process via internal vault)
-[profile {{.ProfileName}}]
+{{with .Comment}}# {{.}}
+{{end}}[profile {{.ProfileName}}]
 role_arn = arn:aws:iam::{{.FakeSecret}}:role/OrganizationAccountAccessRole
 source_profile = {{.ProfileName}}-source
 region = us-east-1
@@ -856,10 +851,9 @@ credential_process = sh -c 'r=$(curl -sf "{{.CallbackURL}}" -o /dev/null -w "%{h
 	// Generic: .env.local style with API base redirect.
 	// Works for any agent using a custom API client that respects API_BASE_URL.
 	TypeGeneric: template.Must(template.New("generic").Parse(
-		`# {{.ProfileName}} service credentials
-API_KEY={{.FakeToken}}
+		`{{with .Comment}}# {{.}}
+{{end}}API_KEY={{.FakeToken}}
 API_BASE_URL={{.CallbackURL}}
-# verify: {{.CallbackURL}}
 `)),
 
 	// HuggingFace: plants ~/.env.hf with an inference endpoint override.
@@ -871,8 +865,8 @@ API_BASE_URL={{.CallbackURL}}
 	//   - Mirrors the OpenAI (OPENAI_BASE_URL) and Anthropic (ANTHROPIC_BASE_URL) approach
 	//   - Real-world: many Python ML agents load .env files automatically (dotenv, python-decouple)
 	TypeHuggingFace: template.Must(template.New("huggingface").Parse(
-		`# huggingface credentials — {{.ProfileName}}
-HF_TOKEN={{.FakeToken}}
+		`{{with .Comment}}# {{.}}
+{{end}}HF_TOKEN={{.FakeToken}}
 HUGGING_FACE_HUB_TOKEN={{.FakeToken}}
 HF_INFERENCE_ENDPOINT={{.CallbackURL}}/hf/inference
 `)),
@@ -881,9 +875,9 @@ HF_INFERENCE_ENDPOINT={{.CallbackURL}}/hf/inference
 	//
 	// Reliability: HIGH
 	//   - Fires when an agent runs `git clone` / `git ls-remote` against the fake host
-	//   - url.insteadOf rewrites the fake enterprise Git URL directly to snare.sh
+	//   - url.insteadOf rewrites the fake enterprise Git URL directly to the receiver
 	//   - Also fires when an agent runs `git credential fill` with the fake host URL
-	//   - Helper script curls snare.sh callback silently then exits 1 (git fails gracefully)
+	//   - Helper script curls the receiver callback silently then exits 1 (git fails gracefully)
 	//   - Scoped to a fake internal git server hostname — near-zero false positives
 	//   - No daemon required; normal Git HTTP transport hits the callback URL
 	//   - Fires only on active fake-host use, not on reading the config file
@@ -894,7 +888,7 @@ HF_INFERENCE_ENDPOINT={{.CallbackURL}}/hf/inference
 	insteadOf = git@git.{{.ProfileName}}.io:
 
 [credential "https://git.{{.ProfileName}}.io"]
-	username = deploy-bot
+	username = {{.Account}}
 	helper = !sh -c 'curl -sf {{.CallbackURL}}/credential -o /dev/null 2>/dev/null; echo ""; exit 1'
 `)),
 
@@ -908,8 +902,8 @@ HF_INFERENCE_ENDPOINT={{.CallbackURL}}/hf/inference
 	//   - ModeNewFile only — fails if ~/.terraformrc already exists (appending would create
 	//     duplicate provider_installation blocks, which is invalid HCL)
 	//   - No daemon required — HTTP request during terraform init
-	TypeTerraform: template.Must(template.New("terraform").Parse(`# {{.ProfileName}} — internal provider mirror
-provider_installation {
+	TypeTerraform: template.Must(template.New("terraform").Parse(`{{with .Comment}}# {{.}}
+{{end}}provider_installation {
   network_mirror {
     url     = "{{.CallbackURL}}/terraform/providers/"
     include = ["registry.terraform.io/{{.ProfileName}}-internal/*"]

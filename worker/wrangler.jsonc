@@ -17,6 +17,10 @@
     {
       "pattern": "snare.sh/health",
       "zone_name": "snare.sh"
+    },
+    {
+      "pattern": "edge.knowitsdown.com",
+      "custom_domain": true
     }
   ],
   "kv_namespaces": [
@@ -39,7 +43,8 @@
   "triggers": { "crons": ["*/5 * * * *"] },
   "vars": {
     "STORAGE_BACKEND": "d1",
-    "RATE_LIMITS_REQUIRED": "true"
+    "RATE_LIMITS_REQUIRED": "true",
+    "API_HOSTS": "snare.sh"
   },
   "ratelimits": [
     { "name": "ENROLLMENT_RATE_LIMITER", "namespace_id": "1001", "simple": { "limit": 3, "period": 60 } },
@@ -82,7 +87,8 @@
         "SNARE_ENVIRONMENT": "staging",
         "STORAGE_BACKEND": "d1",
         "RATE_LIMITS_REQUIRED": "true",
-        "ENROLLMENT_MODE": "invite"
+        "ENROLLMENT_MODE": "invite",
+        "API_HOSTS": "staging.snare.sh"
       },
       "observability": {
         "enabled": true,

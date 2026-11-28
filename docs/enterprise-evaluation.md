@@ -57,7 +57,7 @@ Teardown is content-matched: Snare removes the exact bytes it wrote and does not
 ### Managed `snare.sh`
 
 1. The CLI creates a local device secret and registers token metadata with `snare.sh`.
-2. A planted canary contains a callback URL such as `https://snare.sh/c/<token>`.
+2. A planted canary contains a callback URL such as `https://edge.knowitsdown.com/c/<token>`.
 3. If the fake credential/tool path is used, the SDK or tool requests the callback URL.
 4. The callback service stores metadata and optionally forwards an alert to your webhook destination.
 5. The CLI reads recent events with the local device secret.
@@ -145,7 +145,7 @@ snare prove --help
 
 - Snare detects use of planted tripwires; it does not prevent compromise.
 - `~/.snare/manifest.json` records canary locations so Snare can safely remove them. A local attacker who reads it can identify bait.
-- Public callback domains can be fingerprinted. Use self-hosting or a custom callback domain when that matters.
+- Public callback domains can be fingerprinted. The hosted default is a neutral shared host; use [your own domain](custom-domain.md) when that matters.
 - Some canary types are intentionally noisier than the precision defaults and should be selected deliberately.
 - Managed mode depends on the availability and policy of the hosted callback service and its network provider.
 - Webhook URLs are secrets and should be handled like credentials.

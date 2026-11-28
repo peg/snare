@@ -261,7 +261,7 @@ func TestScanManifestMultiple(t *testing.T) {
 		ID: "tokOK123", Type: "aws", Path: okPath,
 		Mode: manifest.ModeNewFile, Content: okContent,
 		ContentHash: manifest.HashContent(okContent),
-		Active: true, PlantedAt: time.Now(),
+		Active:      true, PlantedAt: time.Now(),
 	}
 
 	// Missing canary
@@ -270,7 +270,7 @@ func TestScanManifestMultiple(t *testing.T) {
 		ID: "tokMISS", Type: "gcp", Path: missingPath,
 		Mode: manifest.ModeNewFile, Content: "gcp content",
 		ContentHash: manifest.HashContent("gcp content"),
-		Active: true, PlantedAt: time.Now(),
+		Active:      true, PlantedAt: time.Now(),
 	}
 
 	// Modified canary
@@ -283,7 +283,7 @@ func TestScanManifestMultiple(t *testing.T) {
 		ID: "tokMOD456", Type: "openai", Path: modPath,
 		Mode: manifest.ModeNewFile, Content: origContent,
 		ContentHash: manifest.HashContent(origContent),
-		Active: true, PlantedAt: time.Now(),
+		Active:      true, PlantedAt: time.Now(),
 	}
 
 	m := makeManifest([]manifest.Canary{okCanary, missingCanary, modCanary})
@@ -314,7 +314,7 @@ func TestScanManifestMultiple(t *testing.T) {
 	}
 }
 
-// TestScanForOrphans verifies that files containing snare.sh/c/ URLs without
+// TestScanForOrphans verifies that files containing callback URLs without
 // a manifest entry are reported as orphans.
 func TestScanForOrphans(t *testing.T) {
 	home := t.TempDir()
@@ -325,7 +325,7 @@ func TestScanForOrphans(t *testing.T) {
 	if err := os.MkdirAll(awsDir, 0700); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
-	orphanContent := "\n[orphan-profile]\naws_access_key_id = FAKEKEY\nendpoint_url = https://snare.sh/c/orphan-tok-999\n"
+	orphanContent := "\n[orphan-profile]\naws_access_key_id = FAKEKEY\nendpoint_url = https://edge.example.net/c/orphan-0123456789abcdef0123456789abcdef\n"
 	if err := os.WriteFile(filepath.Join(awsDir, "credentials"), []byte(orphanContent), 0600); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
@@ -346,8 +346,8 @@ func TestScanForOrphans(t *testing.T) {
 	for _, o := range orphans {
 		if strings.Contains(o.Path, ".aws") {
 			found = true
-			if !strings.Contains(o.URL, "snare.sh/c/") {
-				t.Errorf("orphan URL should contain snare.sh/c/, got: %q", o.URL)
+			if o.URL != "https://edge.example.net/c/orphan-0123456789abcdef0123456789abcdef" {
+				t.Errorf("orphan URL = %q", o.URL)
 			}
 		}
 	}
@@ -367,14 +367,14 @@ func TestScanForOrphansIgnoresCovered(t *testing.T) {
 		t.Fatalf("MkdirAll: %v", err)
 	}
 	credPath := filepath.Join(awsDir, "credentials")
-	content := "\n[covered-profile]\naws_access_key_id = FAKE\nendpoint_url = https://snare.sh/c/covered-tok-001\n"
+	content := "\n[covered-profile]\naws_access_key_id = FAKE\nendpoint_url = https://snare.sh/c/covered-0123456789abcdef0123456789abcdef\n"
 	if err := os.WriteFile(credPath, []byte(content), 0600); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
 	// Active canary that covers this file/token
 	c := manifest.Canary{
-		ID:          "covered-tok-001",
+		ID:          "covered-0123456789abcdef0123456789abcdef",
 		Type:        "aws",
 		Path:        credPath,
 		Mode:        manifest.ModeNewFile,

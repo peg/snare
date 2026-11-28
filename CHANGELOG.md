@@ -10,10 +10,14 @@ Versioning: [Semantic Versioning](https://semver.org/)
 ## [Unreleased]
 
 ### Added
+- `SNARE_API_BASE` and `api_base` separate the receiver API from the planted callback host; see [Callback domains](docs/custom-domain.md) for running on your own domain.
 - Windows release builds and a PowerShell installer (`irm https://snare.sh/install.ps1 | iex`).
 - Windows `awsproc` and `ssh` canaries use `curl.exe` instead of `sh`; Terraform, pip and gcloud canaries use their `%APPDATA%` locations.
 
 ### Security
+- New canaries call back to a neutral host (`edge.knowitsdown.com`) instead of `snare.sh`; the API stays on `snare.sh`. Existing canaries are unchanged until re-armed.
+- Callback hosts answer only `/c/` paths, so probing one reveals nothing.
+- Planted comments, account and server names vary per install; dropped `insecure-skip-tls-verify` (k8s), `StrictHostKeyChecking no` (ssh), MCP `description` fields and the duplicate `verify:` line (generic).
 - Refuse to plant canaries when the callback URL contains characters that are unsafe in shell or `cmd.exe` hooks.
 
 ### Changed

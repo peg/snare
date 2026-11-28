@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,11 +20,19 @@ var httpClient = &http.Client{Timeout: 15 * time.Second}
 
 const configFile = "config.json"
 
+// The hosted receiver serves its API on snare.sh and canary callbacks on a
+// neutral host, so planted files do not name the project.
+const (
+	DefaultAPIBase      = "https://snare.sh"
+	DefaultCallbackBase = "https://edge.knowitsdown.com/c"
+)
+
 // Config holds device-level snare configuration.
 type Config struct {
 	DeviceID     string `json:"device_id"`               // unique ID for this machine
-	DeviceSecret string `json:"device_secret,omitempty"` // secret for API auth (never sent to snare.sh — only hash is stored)
-	CallbackBase string `json:"callback_base"`           // e.g. https://snare.sh/c
+	DeviceSecret string `json:"device_secret,omitempty"` // secret for API auth (only its hash leaves this machine)
+	CallbackBase string `json:"callback_base"`           // base of planted callback URLs, e.g. https://edge.knowitsdown.com/c
+	APIBaseURL   string `json:"api_base,omitempty"`      // receiver API; derived from CallbackBase when empty
 	WebhookURL   string `json:"webhook_url,omitempty"`   // optional local override
 }
 
@@ -94,11 +103,9 @@ func Init(callbackBase, webhookURL string, force bool) (*Config, error) {
 		}
 	}
 
-	if callbackBase == "" {
-		callbackBase = strings.TrimSpace(os.Getenv("SNARE_CALLBACK_BASE"))
-		if callbackBase == "" {
-			callbackBase = "https://snare.sh/c"
-		}
+	callbackBase, apiBase, err := resolveBases(callbackBase)
+	if err != nil {
+		return nil, err
 	}
 
 	deviceSecret, err := newDeviceSecret()
@@ -109,10 +116,6 @@ func Init(callbackBase, webhookURL string, force bool) (*Config, error) {
 	// The receiver mints the device ID (prevents squatting). Fail closed: a
 	// locally invented ID is unknown to the receiver, so every later
 	// registration would be rejected and no canary could ever alert.
-	apiBase := callbackBase
-	if len(apiBase) > 2 && apiBase[len(apiBase)-2:] == "/c" {
-		apiBase = apiBase[:len(apiBase)-2]
-	}
 	deviceID, err := registerDeviceWithServer(apiBase, deviceSecret)
 	if err != nil {
 		return nil, fmt.Errorf("enrolling this device with %s: %w — nothing was written; try again when the receiver is reachable", apiBase, err)
@@ -122,6 +125,7 @@ func Init(callbackBase, webhookURL string, force bool) (*Config, error) {
 		DeviceID:     deviceID,
 		DeviceSecret: deviceSecret,
 		CallbackBase: callbackBase,
+		APIBaseURL:   apiBase,
 		WebhookURL:   webhookURL,
 	}
 
@@ -174,11 +178,37 @@ func NewDeviceSecret() (string, error) {
 
 // APIBase returns the base URL for API calls (e.g. https://snare.sh).
 func (c *Config) APIBase() string {
-	base := c.CallbackBase
-	if idx := len(base) - len("/c"); idx > 0 && base[idx:] == "/c" {
-		base = base[:idx]
+	if c.APIBaseURL != "" {
+		return c.APIBaseURL
 	}
-	return base
+	return strings.TrimSuffix(c.CallbackBase, "/c")
+}
+
+// resolveBases picks the callback and API bases from the argument,
+// SNARE_CALLBACK_BASE and SNARE_API_BASE. A custom callback base without an
+// API base is a self-hosted receiver that serves both on one host.
+func resolveBases(callbackBase string) (string, string, error) {
+	if callbackBase == "" {
+		callbackBase = strings.TrimSpace(os.Getenv("SNARE_CALLBACK_BASE"))
+	}
+	apiBase := strings.TrimSpace(os.Getenv("SNARE_API_BASE"))
+	switch {
+	case callbackBase == "":
+		callbackBase = DefaultCallbackBase
+		if apiBase == "" {
+			apiBase = DefaultAPIBase
+		}
+	case apiBase == "":
+		apiBase = strings.TrimSuffix(callbackBase, "/c")
+	}
+	callbackBase = strings.TrimSuffix(callbackBase, "/")
+	apiBase = strings.TrimSuffix(apiBase, "/")
+	for _, u := range []string{callbackBase, apiBase} {
+		if p, err := url.Parse(u); err != nil || (p.Scheme != "https" && p.Scheme != "http") || p.Host == "" || p.User != nil || p.RawQuery != "" || p.Fragment != "" {
+			return "", "", fmt.Errorf("invalid receiver URL %q: use http(s)://host[/path]", u)
+		}
+	}
+	return callbackBase, apiBase, nil
 }
 
 // Reenroll replaces the device identity with a fresh server-minted one. It is

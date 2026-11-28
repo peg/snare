@@ -20,6 +20,7 @@ func cmdConfig(args []string) {
 		fmt.Println()
 		fmt.Printf("  Device ID:     %s\n", cfg.DeviceID)
 		fmt.Printf("  Callback base: %s\n", cfg.CallbackBase)
+		fmt.Printf("  API base:      %s\n", cfg.APIBase())
 		fmt.Printf("  Webhook:       %s\n", webhookSummary(cfg.WebhookURL))
 		fmt.Printf("  Config file:   ~/.snare/config.json\n")
 		fmt.Println()

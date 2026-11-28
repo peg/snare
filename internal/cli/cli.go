@@ -444,7 +444,7 @@ func buildParams(bt bait.Type, label string, cfg *config.Config) (bait.Params, e
 	case bait.TypeGit:
 		// ProfileName is the fake git server domain component
 		// e.g. git.acme-internal.io becomes ProfileName = acme-internal
-		corps := []string{"acme", "contoso", "initech", "tyrell", "weyland"}
+		corps := []string{"corp", "eng", "src", "build", "platform"}
 		c := corps[token.MustRandInt(len(corps))]
 		if label != "" {
 			p.ProfileName = label + "-internal"
@@ -458,10 +458,11 @@ func buildParams(bt bait.Type, label string, cfg *config.Config) (bait.Params, e
 		if label != "" {
 			p.ProfileName = label + "-internal"
 		} else {
-			p.ProfileName = "terraform-internal"
+			p.ProfileName = []string{"infra", "platform", "corp", "ops"}[token.MustRandInt(4)] + "-internal"
 		}
 	}
 
+	p.Decor = bait.NewDecor(bt, p.ProfileName)
 	return p, nil
 }
 

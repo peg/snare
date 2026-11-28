@@ -235,8 +235,8 @@ func TestInit(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Init: %v", err)
 		}
-		if cfg.CallbackBase != "https://snare.sh/c" {
-			t.Fatalf("CallbackBase = %q, want default", cfg.CallbackBase)
+		if cfg.CallbackBase != DefaultCallbackBase || cfg.APIBase() != DefaultAPIBase {
+			t.Fatalf("bases = %q, %q, want defaults", cfg.CallbackBase, cfg.APIBase())
 		}
 	})
 
@@ -254,6 +254,33 @@ func TestInit(t *testing.T) {
 		}
 		if cfg.CallbackBase != srv.URL+"/c" {
 			t.Fatalf("CallbackBase = %q, want environment value", cfg.CallbackBase)
+		}
+	})
+
+	t.Run("resolves callback and API bases", func(t *testing.T) {
+		for _, tt := range []struct{ callback, api, wantCallback, wantAPI string }{
+			{"https://canary.example.com/c", "", "https://canary.example.com/c", "https://canary.example.com"},
+			{"https://canary.example.com/c/", "https://snare.sh/", "https://canary.example.com/c", "https://snare.sh"},
+			{"", "https://api.example.com", DefaultCallbackBase, "https://api.example.com"},
+		} {
+			setupHome(t)
+			fakeManagedEnrollment(t)
+			t.Setenv("SNARE_CALLBACK_BASE", tt.callback)
+			t.Setenv("SNARE_API_BASE", tt.api)
+			cfg, err := Init("", "", false)
+			if err != nil {
+				t.Fatalf("Init(%q, %q): %v", tt.callback, tt.api, err)
+			}
+			if cfg.CallbackBase != tt.wantCallback || cfg.APIBase() != tt.wantAPI {
+				t.Fatalf("Init(%q, %q) = %q, %q", tt.callback, tt.api, cfg.CallbackBase, cfg.APIBase())
+			}
+		}
+		for _, bad := range []string{"ftp://x/c", "https:///c", "https://u:p@x/c", "https://x/c?q=1"} {
+			setupHome(t)
+			t.Setenv("SNARE_CALLBACK_BASE", bad)
+			if _, err := Init("", "", false); err == nil {
+				t.Fatalf("Init(%q) error = nil", bad)
+			}
 		}
 	})
 
