@@ -270,7 +270,7 @@ Naming tip:
 		if webhookURL == "" {
 			// Try interactive init
 			fmt.Println()
-			guidedInit(false)
+			guidedInit(false, true)
 			// Reload config after guided init
 			cfg, err = config.Load()
 			if err != nil || cfg == nil {
@@ -293,6 +293,10 @@ Naming tip:
 			fmt.Printf("  ✓ webhook updated\n")
 		} else {
 			fmt.Printf("  ✓ already initialized (device: %s)\n", cfg.DeviceID)
+		}
+		if cfg.WebhookURL == "" {
+			fmt.Println("  ⚠  no webhook set, so alerts only reach the receiver's default destination, if any.")
+			fmt.Println("     Add yours with `snare config set webhook <url>`.")
 		}
 	}
 
@@ -464,12 +468,8 @@ Naming tip:
 		fmt.Println("  Canaries are now waiting for a real hit. No event is recorded until bait is used.")
 	}
 	fmt.Println()
-	fmt.Println("  Next checks:")
-	fmt.Println("    snare status   show event state; `never fired` is normal at first")
-	fmt.Println("    snare scan     verify planted files are present and unchanged")
-	fmt.Println("    snare doctor   confidence screen: config, API, ownership, and test health")
-	fmt.Println("    snare repair   re-sync registrations safely if doctor finds drift")
-	fmt.Println("    snare prove --run --report   safely trigger precision canaries and print a proof report")
-	fmt.Println("    snare events   view real hits when one arrives")
-	fmt.Println("  Run `snare disarm` to remove everything.")
+	fmt.Println("  Next:")
+	fmt.Println("    snare prove --run   safely trip each precision canary and confirm snare recorded it")
+	fmt.Println("    snare doctor        check health any time; it says what to fix")
+	fmt.Println("  Remove everything with `snare disarm`.")
 }
